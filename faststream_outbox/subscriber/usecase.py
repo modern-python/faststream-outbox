@@ -130,7 +130,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                 error_attempt = min(error_attempt + 1, _BACKOFF_EXP_CAP)
                 delay = min(2.0 ** (error_attempt - 1) * random.uniform(0.5, 1.5), 30.0)  # noqa: S311
                 await anyio.sleep(delay)
-                continue
+                continue  # pragma: no cover  -- coverage misses bare-continue-after-await
 
             error_attempt = 0
             if rows:
@@ -151,9 +151,11 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                 if not row.allow_delivery(max_deliveries=self._config.max_deliveries, logger=logger):
                     await self._flush_terminal(row)
                     continue
+                # FastStream's AckPolicy middleware catches handler exceptions before
+                # they reach this except, so this branch is defensive.
                 try:
                     await self.consume(row)
-                except BaseException as exc:
+                except BaseException as exc:  # pragma: no cover
                     row.last_exception = exc
                     raise
                 finally:

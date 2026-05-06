@@ -335,3 +335,330 @@ def test_duplicate_subscriber_warns() -> None:
 def test_router_can_be_constructed() -> None:
     router = OutboxRouter(prefix="svc-")
     assert router is not None
+
+
+# --- broker error paths and _NoProducer stubs ---
+
+
+async def test_broker_publish_batch_raises() -> None:
+    metadata = MetaData()
+    t = make_outbox_table(metadata)
+    broker = OutboxBroker(outbox_table=t)
+    with pytest.raises(NotImplementedError, match="no publish API"):
+        await broker.publish_batch()
+
+
+async def test_no_producer_methods_raise() -> None:
+    from faststream_outbox.broker import _NoProducer  # noqa: PLC0415
+
+    producer = _NoProducer()
+    with pytest.raises(NotImplementedError):
+        await producer.publish()
+    with pytest.raises(NotImplementedError):
+        await producer.request()
+    with pytest.raises(NotImplementedError):
+        await producer.publish_batch()
+
+
+def test_no_producer_connect_disconnect_noop() -> None:
+    from faststream_outbox.broker import _NoProducer  # noqa: PLC0415
+
+    producer = _NoProducer()
+    producer.connect()  # must not raise
+    producer.disconnect()  # must not raise
+
+
+def test_broker_client_property_raises_without_engine() -> None:
+    metadata = MetaData()
+    t = make_outbox_table(metadata)
+    broker = OutboxBroker(outbox_table=t)
+    with pytest.raises(RuntimeError, match="not connected"):
+        _ = broker.client
+
+
+async def test_broker_validate_schema_delegates_to_client() -> None:
+    metadata = MetaData()
+    t = make_outbox_table(metadata)
+    engine = AsyncMock()
+    broker = OutboxBroker(engine, outbox_table=t)
+    broker.config.broker_config.client = AsyncMock()
+    await broker.validate_schema()
+    broker.config.broker_config.client.validate_schema.assert_awaited_once()  # type: ignore[union-attr]
+
+
+async def test_broker_ping_done_subscriber_task_is_false() -> None:
+    from unittest.mock import MagicMock  # noqa: PLC0415
+
+    metadata = MetaData()
+    t = make_outbox_table(metadata)
+    engine = AsyncMock()
+    broker = OutboxBroker(engine, outbox_table=t)
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> None: ...
+
+    # Force client.ping() True so the for-loop over subscribers is reached.
+    broker.config.broker_config.client.ping = AsyncMock(return_value=True)  # type: ignore[union-attr]
+    sub = next(iter(broker._subscribers))  # noqa: SLF001
+    done_task = MagicMock()
+    done_task.done.return_value = True
+    sub.tasks = [done_task]
+    assert await broker.ping() is False
+
+
+async def test_broker_ping_live_subscriber_task_is_true() -> None:
+    from unittest.mock import MagicMock  # noqa: PLC0415
+
+    metadata = MetaData()
+    t = make_outbox_table(metadata)
+    engine = AsyncMock()
+    broker = OutboxBroker(engine, outbox_table=t)
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> None: ...
+
+    broker.config.broker_config.client.ping = AsyncMock(return_value=True)  # type: ignore[union-attr]
+    sub = next(iter(broker._subscribers))  # noqa: SLF001
+    live_task = MagicMock()
+    live_task.done.return_value = False
+    sub.tasks = [live_task]
+    assert await broker.ping() is True
+
+
+def test_outbox_params_storage_caches_logger() -> None:
+    from unittest.mock import MagicMock  # noqa: PLC0415
+
+    from faststream_outbox.broker import OutboxParamsStorage  # noqa: PLC0415
+
+    storage = OutboxParamsStorage()
+    context = MagicMock()
+    a = storage.get_logger(context=context)
+    b = storage.get_logger(context=context)  # cache hit on L46
+    assert a is b
+
+
+# --- configs ---
+
+
+def test_engine_state_raises_when_no_engine() -> None:
+    from faststream.exceptions import IncorrectState  # noqa: PLC0415
+
+    from faststream_outbox.configs import EngineState  # noqa: PLC0415
+
+    state = EngineState()
+    with pytest.raises(IncorrectState):
+        _ = state.engine
+
+
+def test_engine_state_set_engine() -> None:
+    from faststream_outbox.configs import EngineState  # noqa: PLC0415
+
+    state = EngineState()
+    engine = AsyncMock()
+    state.set_engine(engine)
+    assert state.engine is engine
+
+
+def test_outbox_router_config_engine_state_raises() -> None:
+    from faststream.exceptions import IncorrectState  # noqa: PLC0415
+
+    from faststream_outbox.configs import OutboxRouterConfig  # noqa: PLC0415
+
+    cfg = OutboxRouterConfig()
+    with pytest.raises(IncorrectState):
+        _ = cfg.engine_state
+
+
+def test_outbox_broker_config_uses_default_time_source() -> None:
+    from faststream_outbox.configs import OutboxBrokerConfig  # noqa: PLC0415
+
+    cfg = OutboxBrokerConfig()
+    now = cfg.time_source()
+    assert now.tzinfo is not None  # naive datetimes would be a regression
+
+
+# --- client ---
+
+
+def test_client_table_property() -> None:
+    from faststream_outbox.client import OutboxClient  # noqa: PLC0415
+
+    metadata = MetaData()
+    t = make_outbox_table(metadata)
+    client = OutboxClient(AsyncMock(), t)
+    assert client.table is t
+
+
+async def test_client_fetch_empty_queues_returns_empty() -> None:
+    from faststream_outbox.client import OutboxClient  # noqa: PLC0415
+
+    metadata = MetaData()
+    t = make_outbox_table(metadata)
+    client = OutboxClient(AsyncMock(), t)
+    assert await client.fetch([], limit=10) == []
+
+
+# --- OutboxMessage.reject + assert_state_set logger branch ---
+
+
+async def test_outbox_message_reject_calls_raw_then_super() -> None:
+    inner = _make_msg()
+    msg = OutboxMessage(
+        raw_message=inner,
+        body=b"",
+        headers={},
+        content_type=None,
+        message_id="1",
+        correlation_id="1",
+    )
+    await msg.reject()
+    assert inner.to_delete  # raw_message.reject ran
+    assert msg.committed is not None  # super().reject ran
+
+
+async def test_message_assert_state_set_logs_when_logger_given() -> None:
+    from unittest.mock import MagicMock  # noqa: PLC0415
+
+    msg = _make_msg()
+    logger = MagicMock()
+    await msg.assert_state_set(logger=logger)
+    logger.log.assert_called_once()
+    assert msg.state_set
+
+
+# --- OutboxRoute / specs / subscriber config ---
+
+
+def test_outbox_route_constructs() -> None:
+    from faststream_outbox.router import OutboxRoute  # noqa: PLC0415
+
+    async def handler(body: str) -> None: ...
+
+    route = OutboxRoute(handler, "orders")
+    assert route is not None
+
+
+def test_subscriber_config_time_source_property() -> None:
+    metadata = MetaData()
+    t = make_outbox_table(metadata)
+    broker = OutboxBroker(outbox_table=t)
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> None: ...
+
+    sub = next(iter(broker._subscribers))  # noqa: SLF001
+    assert callable(sub._config.time_source)  # noqa: SLF001
+
+
+def test_subscriber_specification_name_with_prefix() -> None:
+    metadata = MetaData()
+    t = make_outbox_table(metadata)
+    broker = OutboxBroker(outbox_table=t)
+
+    @broker.subscriber(["orders", "shipments"])
+    async def handle(body: str) -> None: ...
+
+    sub = next(iter(broker._subscribers))  # noqa: SLF001
+    name = sub.specification.name
+    assert "orders" in name
+    assert "shipments" in name
+
+
+async def test_subscriber_specification_get_schema() -> None:
+    from faststream_outbox import TestOutboxBroker  # noqa: PLC0415
+
+    metadata = MetaData()
+    t = make_outbox_table(metadata)
+    broker = OutboxBroker(outbox_table=t)
+
+    @broker.subscriber("orders")
+    async def handle(body: str) -> None: ...
+
+    # get_schema() requires the subscriber to be set up (dependant computed),
+    # which happens during broker.start(); use the test broker to get there.
+    async with TestOutboxBroker(broker):
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        schema = sub.specification.get_schema()
+        assert schema  # non-empty dict
+        spec = next(iter(schema.values()))
+        title = spec.operation.message.title
+        assert title is not None
+        assert title.endswith(":Message")
+
+
+# --- FakeOutboxClient direct tests ---
+
+
+def test_fake_client_table_property() -> None:
+    from faststream_outbox.testing import FakeOutboxClient  # noqa: PLC0415
+
+    assert FakeOutboxClient().table is None
+
+
+async def test_fake_client_fetch_empty_queues() -> None:
+    from faststream_outbox.testing import FakeOutboxClient  # noqa: PLC0415
+
+    client = FakeOutboxClient()
+    assert await client.fetch([], limit=10) == []
+
+
+async def test_fake_client_delete_miss() -> None:
+    from faststream_outbox.testing import FakeOutboxClient  # noqa: PLC0415
+
+    client = FakeOutboxClient()
+    assert await client.delete_with_lease(123, uuid.uuid4()) is False
+
+
+async def test_fake_client_mark_pending_miss() -> None:
+    from faststream_outbox.testing import FakeOutboxClient  # noqa: PLC0415
+
+    client = FakeOutboxClient()
+    now = _dt.datetime.now(tz=_dt.UTC)
+    updated = await client.mark_pending_with_lease(
+        999,
+        uuid.uuid4(),
+        next_attempt_at=now,
+        attempts_count=1,
+        first_attempt_at=now,
+        last_attempt_at=now,
+    )
+    assert updated is False
+
+
+async def test_fake_client_validate_schema_and_ping() -> None:
+    from faststream_outbox.testing import FakeOutboxClient  # noqa: PLC0415
+
+    client = FakeOutboxClient()
+    await client.validate_schema()  # noop
+    assert await client.ping() is True
+
+
+# --- OutboxBrokerConfig connect/disconnect (no-op stubs) ---
+
+
+async def test_outbox_broker_config_connect_disconnect_noop() -> None:
+    from faststream_outbox.configs import OutboxBrokerConfig  # noqa: PLC0415
+
+    cfg = OutboxBrokerConfig()
+    await cfg.connect()  # must not raise
+    await cfg.disconnect()  # must not raise
+
+
+# --- subscriber get_one + _make_response_publisher ---
+
+
+async def test_subscriber_get_one_raises() -> None:
+    from unittest.mock import MagicMock  # noqa: PLC0415
+
+    metadata = MetaData()
+    t = make_outbox_table(metadata)
+    broker = OutboxBroker(outbox_table=t)
+
+    @broker.subscriber("orders")
+    async def handle(body: str) -> None: ...
+
+    sub = next(iter(broker._subscribers))  # noqa: SLF001
+    with pytest.raises(NotImplementedError, match="get_one"):
+        await sub.get_one()
+    # _make_response_publisher returns ()
+    assert sub._make_response_publisher(MagicMock()) == ()  # noqa: SLF001

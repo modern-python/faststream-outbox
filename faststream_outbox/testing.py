@@ -215,8 +215,13 @@ class TestOutboxBroker(TestBroker[OutboxBroker]):  # ty: ignore[invalid-type-arg
         super()._fake_start(broker, *args, **kwargs)
         # Then spin up the real subscriber loops against the in-memory fake client. Without this,
         # ``feed()`` would drop rows on the floor — there's no producer to fall back to.
+        # Skip subscribers without a registered handler — matches OutboxSubscriber.start()'s
+        # ``if not self.calls: return`` behavior so the test broker doesn't access ``_client``
+        # for an inert subscriber.
         for raw_subscriber in broker.subscribers:
             sub = typing.cast("OutboxSubscriber", raw_subscriber)
+            if not sub.calls:
+                continue
             for _ in range(sub._config.max_workers):  # noqa: SLF001
                 sub.add_task(sub._worker_loop)  # noqa: SLF001
             sub.add_task(sub._fetch_loop)  # noqa: SLF001

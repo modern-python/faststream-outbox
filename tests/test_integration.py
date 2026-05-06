@@ -27,8 +27,8 @@ async def _wait_until(predicate, *, timeout: float = 5.0) -> None:  # noqa: ASYN
         if predicate():
             return
         await asyncio.sleep(0.05)
-    msg = "timed out waiting for predicate"
-    raise AssertionError(msg)
+    msg = "timed out waiting for predicate"  # pragma: no cover
+    raise AssertionError(msg)  # pragma: no cover
 
 
 async def _row_count(engine: AsyncEngine, table) -> int:
@@ -195,8 +195,20 @@ async def test_end_to_end_failing_handler_with_retry(pg_engine, outbox_table) ->
             payload, headers = encode_payload({"x": 1})
             await session.execute(insert(outbox_table).values(queue="orders", payload=payload, headers=headers))
         await _wait_until(lambda: len(attempts) == 3, timeout=10.0)
-        await _wait_until(lambda: True, timeout=0.2)
-    assert await _row_count(pg_engine, outbox_table) == 0
+
+        # Wait for the row to be deleted while the broker is still running,
+        # otherwise the broker stops and the worker's final DELETE may race
+        # with shutdown.
+        async def _check_deleted() -> bool:
+            return await _row_count(pg_engine, outbox_table) == 0
+
+        deadline = asyncio.get_event_loop().time() + 5.0
+        while asyncio.get_event_loop().time() < deadline:
+            if await _check_deleted():
+                return
+            await asyncio.sleep(0.1)  # pragma: no cover
+        msg = "row not deleted within timeout"  # pragma: no cover
+        raise AssertionError(msg)  # pragma: no cover
 
 
 async def test_subscriber_state_machine_uses_pending_value(outbox_table) -> None:
@@ -205,3 +217,28 @@ async def test_subscriber_state_machine_uses_pending_value(outbox_table) -> None
     assert any("'pending'" in str(c.sqltext) for c in states if hasattr(c, "sqltext"))
     assert OutboxState.PENDING.value == "pending"
     assert OutboxState.PROCESSING.value == "processing"
+
+
+async def test_release_stuck_returns_zero_when_lock_held(pg_engine, outbox_table) -> None:
+    """If another process holds the advisory lock, release_stuck no-ops and returns 0."""
+    from sqlalchemy import text  # noqa: PLC0415
+
+    client = OutboxClient(pg_engine, outbox_table)
+    lock_key = f"faststream_outbox:{outbox_table.name}"
+
+    async with pg_engine.connect() as holder, holder.begin():
+        # Acquire the same advisory lock the client uses (xact-scoped).
+        await holder.execute(text(f"SELECT pg_advisory_xact_lock(hashtext('{lock_key}'))"))
+        # While held, release_stuck should fail to acquire and return 0.
+        released = await client.release_stuck(timeout_seconds=60)
+        assert released == 0
+
+
+async def test_validate_schema_fails_when_columns_missing(pg_engine, outbox_table) -> None:
+    """Drop a column the package expects and verify validate_schema reports it."""
+    drop_sql = f'ALTER TABLE "{outbox_table.name}" DROP COLUMN headers'
+    async with pg_engine.begin() as conn:
+        await conn.exec_driver_sql(drop_sql)
+    client = OutboxClient(pg_engine, outbox_table)
+    with pytest.raises(RuntimeError, match="missing columns"):
+        await client.validate_schema()
