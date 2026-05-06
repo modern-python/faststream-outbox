@@ -1,0 +1,14 @@
+.env
+.coverage
+.gitignore
+.idea
+.ruff_cache
+.vscode
+.git
+.pytest_cache
+.DS_Store
+*.yml
+Dockerfile
+**/__pycache__
+.hypothesis
+.venv

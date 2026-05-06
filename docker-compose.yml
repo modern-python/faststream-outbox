@@ -1,0 +1,31 @@
+services:
+  application:
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+    restart: always
+    volumes:
+      - .:/code
+      - /code/.venv
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - POSTGRES_DSN=postgresql+asyncpg://outbox:outbox@postgres:5432/outbox
+    stdin_open: true
+    tty: true
+
+  postgres:
+    image: postgres:17
+    restart: always
+    environment:
+      - POSTGRES_USER=outbox
+      - POSTGRES_PASSWORD=outbox
+      - POSTGRES_DB=outbox
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U outbox -d outbox"]
+      interval: 1s
+      timeout: 3s
+      retries: 30

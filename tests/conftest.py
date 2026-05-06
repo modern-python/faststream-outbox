@@ -1,0 +1,42 @@
+import os
+import uuid
+from collections.abc import AsyncIterator
+
+import pytest
+from sqlalchemy import MetaData, Table
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+
+from faststream_outbox import make_outbox_table
+
+
+PG_DSN = os.environ.get("POSTGRES_DSN", "postgresql+asyncpg://outbox:outbox@localhost:5432/outbox")
+
+
+@pytest.fixture
+async def pg_engine() -> AsyncIterator[AsyncEngine]:
+    engine = create_async_engine(PG_DSN, future=True)
+    try:
+        async with engine.connect() as conn:
+            await conn.exec_driver_sql("SELECT 1")
+    except Exception as exc:  # noqa: BLE001
+        await engine.dispose()
+        pytest.skip(f"Postgres not available at {PG_DSN}: {exc}")
+    yield engine
+    await engine.dispose()
+
+
+@pytest.fixture
+async def outbox_table(pg_engine: AsyncEngine) -> AsyncIterator[Table]:
+    """Per-test outbox table with a unique name + the recommended partial index."""
+    metadata = MetaData()
+    table_name = f"test_outbox_{uuid.uuid4().hex[:12]}"
+    table = make_outbox_table(metadata, table_name=table_name)
+    async with pg_engine.begin() as conn:
+        await conn.run_sync(metadata.create_all)
+        await conn.exec_driver_sql(
+            f'CREATE INDEX "{table_name}_pending_idx" ON "{table_name}" '
+            f"(queue, next_attempt_at) WHERE state = 'pending'"
+        )
+    yield table
+    async with pg_engine.begin() as conn:
+        await conn.run_sync(metadata.drop_all)

@@ -1,0 +1,21 @@
+from typing import Any
+
+from faststream.message import decode_message
+
+from faststream_outbox.message import OutboxInnerMessage, OutboxMessage
+
+
+class OutboxParser:
+    async def parse_message(self, msg: OutboxInnerMessage) -> OutboxMessage:
+        headers = msg.headers or {}
+        return OutboxMessage(
+            raw_message=msg,
+            body=msg.payload,
+            headers=headers,
+            content_type=headers.get("content-type"),
+            message_id=str(msg.id),
+            correlation_id=headers.get("correlation_id", str(msg.id)),
+        )
+
+    async def decode_message(self, msg: OutboxMessage) -> Any:
+        return decode_message(msg)
