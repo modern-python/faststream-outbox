@@ -52,7 +52,7 @@ if typing.TYPE_CHECKING:
     from faststream._internal.endpoint.publisher import PublisherProto
     from faststream._internal.endpoint.subscriber.call_item import CallsCollection
     from faststream.message import StreamMessage
-    from sqlalchemy.ext.asyncio import AsyncConnection
+    from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
     from faststream_outbox.client import OutboxClient
     from faststream_outbox.configs import OutboxBrokerConfig
@@ -147,15 +147,22 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         a persistent connection — uses ``client.fetch(...)`` for each iteration and never
         sets up LISTEN. The ``_notify_event`` simply never fires; behavior is polling-only.
         """
-        engine = self._client.engine
         error_attempt = 0
         while self.running:
+            # Read client lazily inside the loop: in the test broker path the client is
+            # patched in/out via mock.patch, so it can be None after teardown. Returning
+            # cleanly (rather than raising RuntimeError) prevents FastStream's supervisor
+            # from restarting the task and leaking a pending coroutine at GC time.
+            client = self._outer_config.client
+            if client is None:
+                return
+            engine = client.engine
             try:
                 if engine is None:
                     await self._fetch_inner(fetch_conn=None)
                 else:
                     async with engine.connect() as fetch_conn:
-                        listen_conn = await self._open_listen_connection()
+                        listen_conn = await self._open_listen_connection(engine)
                         try:
                             await self._fetch_inner(fetch_conn=fetch_conn)
                         finally:
@@ -216,7 +223,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             await asyncio.wait_for(self._notify_event.wait(), timeout=timeout)
         self._notify_event.clear()
 
-    async def _open_listen_connection(self) -> "_asyncpg.Connection | None":
+    async def _open_listen_connection(self, engine: "AsyncEngine") -> "_asyncpg.Connection | None":
         """
         Open a dedicated raw asyncpg connection and register LISTEN on it.
 
@@ -228,10 +235,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         connection's reader task monopolize it — interleaving normal queries breaks
         notification delivery.
         """
-        if _asyncpg is None:
-            return None
-        engine = self._client.engine
-        if engine is None or "asyncpg" not in (engine.url.drivername or ""):
+        if _asyncpg is None or "asyncpg" not in (engine.url.drivername or ""):
             return None
         # SQLAlchemy URL with the +asyncpg suffix isn't a valid raw asyncpg DSN; strip it.
         # ``str(url)`` hides the password — use ``render_as_string(hide_password=False)``
