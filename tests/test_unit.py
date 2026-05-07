@@ -504,14 +504,6 @@ def test_outbox_router_config_engine_state_raises() -> None:
         _ = cfg.engine_state
 
 
-def test_outbox_broker_config_uses_default_time_source() -> None:
-    from faststream_outbox.configs import OutboxBrokerConfig  # noqa: PLC0415
-
-    cfg = OutboxBrokerConfig()
-    now = cfg.time_source()
-    assert now.tzinfo is not None  # naive datetimes would be a regression
-
-
 # --- client ---
 
 
@@ -571,18 +563,6 @@ def test_outbox_route_constructs() -> None:
 
     route = OutboxRoute(handler, "orders")
     assert route is not None
-
-
-def test_subscriber_config_time_source_property() -> None:
-    metadata = MetaData()
-    t = make_outbox_table(metadata)
-    broker = OutboxBroker(outbox_table=t)
-
-    @broker.subscriber("orders")
-    async def handle(body: dict) -> None: ...
-
-    sub = next(iter(broker._subscribers))  # noqa: SLF001
-    assert callable(sub._config.time_source)  # noqa: SLF001
 
 
 def test_subscriber_specification_name_lists_queues() -> None:

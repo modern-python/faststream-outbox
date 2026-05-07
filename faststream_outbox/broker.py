@@ -122,7 +122,6 @@ class OutboxBroker(
         fd_config = FastDependsConfig(use_fastdepends=apply_types)
         broker_config = OutboxBrokerConfig(
             engine_state=engine_state,
-            outbox_table=outbox_table,
             client=client,
             broker_middlewares=(_CaptureExceptionMiddleware, *middlewares),
             broker_parser=parser,
