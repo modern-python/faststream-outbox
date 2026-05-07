@@ -53,6 +53,7 @@ def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table
         Column("last_attempt_at", DateTime(timezone=True), nullable=True),
         Column("acquired_at", DateTime(timezone=True), nullable=True),
         Column("acquired_token", Uuid, nullable=True),
+        Column("timer_id", String(255), nullable=True),
     )
     # Partial index that backs the fetch query's hot branch
     # (`WHERE acquired_token IS NULL AND queue = ? AND next_attempt_at <= now()`).
@@ -62,5 +63,15 @@ def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table
         table.c.queue,
         table.c.next_attempt_at,
         postgresql_where=table.c.acquired_token.is_(None),
+    )
+    # Partial unique index that backs `publish(..., timer_id=...)`'s ON CONFLICT DO NOTHING
+    # and the (queue, timer_id) lookup in `cancel_timer`. Only enforced when timer_id is set,
+    # so non-timer rows remain unconstrained.
+    Index(
+        f"{table_name}_timer_id_uq",
+        table.c.queue,
+        table.c.timer_id,
+        unique=True,
+        postgresql_where=table.c.timer_id.is_not(None),
     )
     return table

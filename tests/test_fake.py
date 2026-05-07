@@ -591,3 +591,86 @@ async def test_fake_client_fetch_with_conn_mirrors_fetch() -> None:
     assert len(rows) == 1
     assert rows[0].queue == "q"
     assert rows[0].payload == b"x"
+
+
+async def test_fake_client_feed_timer_id_dedup() -> None:
+    fake = FakeOutboxClient()
+    first = fake.feed(queue="q", payload=b"x", timer_id="email-1")
+    second = fake.feed(queue="q", payload=b"y", timer_id="email-1")
+    assert first is not None
+    assert second is None  # second feed is a no-op
+    assert len(fake.rows) == 1
+    assert fake.rows[0].payload == b"x"  # first wins
+
+
+async def test_fake_client_feed_timer_id_different_queues_allowed() -> None:
+    """Unique-on-(queue, timer_id): same timer_id in a different queue is independent."""
+    fake = FakeOutboxClient()
+    a = fake.feed(queue="q1", payload=b"x", timer_id="email-1")
+    b = fake.feed(queue="q2", payload=b"y", timer_id="email-1")
+    assert a is not None
+    assert b is not None
+    assert len(fake.rows) == 2
+
+
+async def test_fake_client_future_next_attempt_is_invisible_to_fetch() -> None:
+    fake = FakeOutboxClient()
+    future = _dt.datetime.now(tz=_dt.UTC) + _dt.timedelta(minutes=5)
+    fake.feed(queue="q", payload=b"x", next_attempt_at=future)
+    rows = await fake.fetch(["q"], limit=10, lease_ttl_seconds=60.0)
+    assert rows == []
+
+
+async def test_fake_client_cancel_timer_removes_unleased_row() -> None:
+    fake = FakeOutboxClient()
+    fake.feed(queue="q", payload=b"x", timer_id="email-1")
+    assert await fake.cancel_timer(queue="q", timer_id="email-1") is True
+    assert fake.rows == []
+
+
+async def test_fake_client_cancel_timer_unknown_returns_false() -> None:
+    fake = FakeOutboxClient()
+    assert await fake.cancel_timer(queue="q", timer_id="never-existed") is False
+
+
+async def test_fake_client_cancel_timer_skips_leased_row() -> None:
+    fake = FakeOutboxClient()
+    fake.feed(queue="q", payload=b"x", timer_id="email-1")
+    # Simulate the row having been claimed by a worker.
+    fake.rows[0].acquired_token = uuid.uuid4()
+    fake.rows[0].acquired_at = _dt.datetime.now(tz=_dt.UTC)
+    assert await fake.cancel_timer(queue="q", timer_id="email-1") is False
+    assert len(fake.rows) == 1  # row still there
+
+
+async def test_test_broker_feed_forwards_timer_id() -> None:
+    broker = _make_broker()
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        first = test_broker.feed("orders", b"x", timer_id="email-1")
+        second = test_broker.feed("orders", b"y", timer_id="email-1")
+    assert first is not None
+    assert second is None
+    assert len(test_broker.fake_client.rows) == 1
+    assert test_broker.fake_client.rows[0].timer_id == "email-1"
+
+
+async def test_fake_broker_delays_delivery_by_next_attempt_at() -> None:
+    """Row fed with next_attempt_at=future should not be dispatched until the gate opens."""
+    broker = _make_broker()
+    received: list[str] = []
+
+    @broker.subscriber("orders", min_fetch_interval=0.01, max_fetch_interval=0.05)
+    async def handle(body: str) -> None:
+        received.append(body)
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        future = _dt.datetime.now(tz=_dt.UTC) + _dt.timedelta(milliseconds=300)
+        test_broker.feed("orders", b'"delayed"', next_attempt_at=future, headers={"content-type": "application/json"})
+        # Before the gate opens: nothing delivered.
+        await asyncio.sleep(0.1)
+        assert received == []
+        # After the gate opens (and at least one fetch tick): delivered.
+        await _wait_until(lambda: received, timeout=2.0)
+    assert received == ["delayed"]

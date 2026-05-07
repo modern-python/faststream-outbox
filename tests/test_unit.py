@@ -4,6 +4,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import MetaData
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from faststream_outbox import (
     ConstantRetry,
@@ -29,6 +31,20 @@ def _make_broker(engine: object | None = None, table_name: str = "outbox") -> Ou
     return OutboxBroker(outbox_table=table)
 
 
+def _make_session_mock(*, scalar_return: object = 42) -> AsyncMock:
+    """
+    Build an AsyncSession mock whose ``execute()`` returns a sync MagicMock.
+
+    AsyncMock(spec=AsyncSession) makes the return_value of execute() default to an
+    AsyncMock — so ``result.scalar()`` would itself return a coroutine. The broker's
+    real CursorResult.scalar() is sync, so override the return_value to a MagicMock.
+    """
+    session = AsyncMock(spec=AsyncSession)
+    session.execute.return_value = MagicMock()
+    session.execute.return_value.scalar.return_value = scalar_return
+    return session
+
+
 # --- make_outbox_table ---
 
 
@@ -48,9 +64,20 @@ def test_make_outbox_table_columns_present() -> None:
         "last_attempt_at",
         "acquired_at",
         "acquired_token",
+        "timer_id",
     }
     assert {c.name for c in t.columns} == expected
     assert t.name == "my_outbox"
+
+
+def test_make_outbox_table_declares_timer_unique_index() -> None:
+    metadata = MetaData()
+    t = make_outbox_table(metadata, table_name="my_outbox")
+    timer_idx = next(idx for idx in t.indexes if idx.name == "my_outbox_timer_id_uq")
+    assert timer_idx.unique is True
+    assert [c.name for c in timer_idx.columns] == ["queue", "timer_id"]
+    # Partial-index predicate ensures non-timer rows aren't constrained
+    assert timer_idx.dialect_options["postgresql"]["where"] is not None
 
 
 def test_make_outbox_table_attaches_to_metadata() -> None:
@@ -276,10 +303,8 @@ async def test_broker_publish_rejects_non_async_session() -> None:
 
 
 async def test_broker_publish_executes_insert_then_pg_notify_on_session() -> None:
-    from sqlalchemy.ext.asyncio import AsyncSession  # noqa: PLC0415
-
     broker = _make_broker()
-    session = AsyncMock(spec=AsyncSession)
+    session = _make_session_mock()
     await broker.publish({"order_id": 1}, queue="orders", session=session)
     # Two execute calls: the INSERT, then SELECT pg_notify(...).
     assert session.execute.await_count == 2
@@ -296,10 +321,8 @@ async def test_broker_publish_executes_insert_then_pg_notify_on_session() -> Non
 
 
 async def test_broker_publish_does_not_commit() -> None:
-    from sqlalchemy.ext.asyncio import AsyncSession  # noqa: PLC0415
-
     broker = _make_broker()
-    session = AsyncMock(spec=AsyncSession)
+    session = _make_session_mock()
     await broker.publish(b"x", queue="orders", session=session)
     session.commit.assert_not_called()
     session.flush.assert_not_called()
@@ -371,6 +394,145 @@ async def test_broker_publish_batch_no_bodies_is_noop() -> None:
     session = AsyncMock(spec=AsyncSession)
     await broker.publish_batch(queue="orders", session=session)
     session.execute.assert_not_called()
+
+
+async def test_broker_publish_rejects_activate_in_and_at_together() -> None:
+    broker = _make_broker()
+    session = _make_session_mock()
+    with pytest.raises(ValueError, match="activate_in / activate_at"):
+        await broker.publish(
+            b"x",
+            queue="orders",
+            session=session,
+            activate_in=_dt.timedelta(seconds=1),
+            activate_at=_dt.datetime.now(tz=_dt.UTC) + _dt.timedelta(seconds=1),
+        )
+
+
+async def test_broker_publish_with_activate_in_skips_notify() -> None:
+    broker = _make_broker()
+    session = _make_session_mock()
+    await broker.publish(b"x", queue="orders", session=session, activate_in=_dt.timedelta(seconds=30))
+    # Only the INSERT — no NOTIFY for future-dated rows.
+    assert session.execute.await_count == 1
+    insert_stmt = session.execute.await_args_list[0].args[0]
+    assert "INSERT INTO" in str(insert_stmt)
+    assert "next_attempt_at" in str(insert_stmt)
+
+
+async def test_broker_publish_with_activate_at_skips_notify() -> None:
+    broker = _make_broker()
+    session = _make_session_mock()
+    fire = _dt.datetime.now(tz=_dt.UTC) + _dt.timedelta(minutes=5)
+    await broker.publish(b"x", queue="orders", session=session, activate_at=fire)
+    assert session.execute.await_count == 1
+    params = session.execute.await_args_list[0].args[0].compile().params
+    assert params["next_attempt_at"] == fire
+
+
+async def test_broker_publish_with_timer_id_uses_on_conflict() -> None:
+    broker = _make_broker()
+    session = _make_session_mock()
+    await broker.publish(b"x", queue="orders", session=session, timer_id="email-123")
+    insert_stmt = session.execute.await_args_list[0].args[0]
+    compiled = insert_stmt.compile(dialect=postgresql.dialect())
+    sql = str(compiled)
+    assert "INSERT INTO" in sql
+    assert "ON CONFLICT" in sql
+    assert "DO NOTHING" in sql
+    assert compiled.params["timer_id"] == "email-123"
+
+
+async def test_broker_publish_returns_none_on_timer_id_conflict() -> None:
+    broker = _make_broker()
+    # Simulate ON CONFLICT DO NOTHING returning no rows: scalar() → None
+    session = _make_session_mock(scalar_return=None)
+    result = await broker.publish(b"x", queue="orders", session=session, timer_id="dup")
+    assert result is None
+    # NOTIFY skipped when nothing was inserted.
+    assert session.execute.await_count == 1
+
+
+async def test_broker_publish_batch_rejects_activate_in_and_at_together() -> None:
+    broker = _make_broker()
+    session = AsyncMock(spec=AsyncSession)
+    with pytest.raises(ValueError, match="activate_in / activate_at"):
+        await broker.publish_batch(
+            b"a",
+            queue="orders",
+            session=session,
+            activate_in=_dt.timedelta(seconds=1),
+            activate_at=_dt.datetime.now(tz=_dt.UTC) + _dt.timedelta(seconds=1),
+        )
+
+
+async def test_broker_publish_batch_with_activate_in_skips_notify() -> None:
+    broker = _make_broker()
+    session = AsyncMock(spec=AsyncSession)
+    await broker.publish_batch(
+        b"a",
+        b"b",
+        queue="orders",
+        session=session,
+        activate_in=_dt.timedelta(seconds=30),
+    )
+    # Insert only — no NOTIFY for future-dated batch.
+    assert session.execute.await_count == 1
+    rows = session.execute.await_args_list[0].args[1]
+    assert all("next_attempt_at" in r for r in rows)
+
+
+async def test_broker_publish_batch_with_activate_at_skips_notify() -> None:
+    broker = _make_broker()
+    session = AsyncMock(spec=AsyncSession)
+    fire = _dt.datetime.now(tz=_dt.UTC) + _dt.timedelta(minutes=5)
+    await broker.publish_batch(b"a", b"b", queue="orders", session=session, activate_at=fire)
+    # No NOTIFY: future-dated rows.
+    assert session.execute.await_count == 1
+    rows = session.execute.await_args_list[0].args[1]
+    assert all(r["next_attempt_at"] == fire for r in rows)
+
+
+async def test_broker_publish_batch_does_not_accept_timer_id() -> None:
+    """publish_batch must not expose per-row dedup; timer_id is a publish()-only kwarg."""
+    broker = _make_broker()
+    session = AsyncMock(spec=AsyncSession)
+    with pytest.raises(TypeError, match="timer_id"):
+        await broker.publish_batch(
+            b"a",
+            queue="orders",
+            session=session,
+            timer_id="x",  # ty: ignore[unknown-argument]
+        )
+
+
+async def test_broker_cancel_timer_rejects_non_async_session() -> None:
+    broker = _make_broker()
+    with pytest.raises(TypeError, match="AsyncSession"):
+        await broker.cancel_timer(queue="orders", timer_id="x", session=object())  # ty: ignore[invalid-argument-type]
+
+
+async def test_broker_cancel_timer_emits_delete_with_lease_guard() -> None:
+    broker = _make_broker()
+    session = AsyncMock(spec=AsyncSession)
+    session.execute.return_value.rowcount = 1
+    deleted = await broker.cancel_timer(queue="orders", timer_id="email-1", session=session)
+    assert deleted is True
+    delete_stmt = session.execute.await_args_list[0].args[0]
+    sql = str(delete_stmt)
+    assert "DELETE" in sql
+    assert "acquired_token IS NULL" in sql
+    params = delete_stmt.compile().params
+    assert params["queue_1"] == "orders"
+    assert params["timer_id_1"] == "email-1"
+
+
+async def test_broker_cancel_timer_returns_false_when_nothing_deleted() -> None:
+    broker = _make_broker()
+    session = AsyncMock(spec=AsyncSession)
+    session.execute.return_value.rowcount = 0
+    deleted = await broker.cancel_timer(queue="orders", timer_id="x", session=session)
+    assert deleted is False
 
 
 async def test_broker_publish_batch_executes_single_insert_for_many_rows() -> None:
