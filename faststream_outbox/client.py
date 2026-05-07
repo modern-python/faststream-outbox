@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from sqlalchemy import Connection, Table
-    from sqlalchemy.ext.asyncio import AsyncEngine
+    from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 
 @dataclass(frozen=True)
@@ -58,20 +58,30 @@ class OutboxClient:
     def table(self) -> "Table":
         return self._table
 
-    async def fetch(
+    @property
+    def engine(self) -> "AsyncEngine":
+        """
+        The underlying ``AsyncEngine``.
+
+        Used by the subscriber loop to open its own long-lived fetch connection and to
+        drive ``LISTEN/NOTIFY``.
+        """
+        return self._engine
+
+    async def fetch_with_conn(
         self,
+        conn: "AsyncConnection",
         queues: "Sequence[str]",
         *,
         limit: int,
         lease_ttl_seconds: float,
     ) -> list[OutboxInnerMessage]:
         """
-        Atomically claim up to *limit* available rows for the given queue names.
+        Run the fetch CTE on a caller-supplied connection.
 
-        A row is available iff its lease is unset (``acquired_token IS NULL``) or its
-        lease is older than *lease_ttl_seconds*. Returns the freshly-leased rows; each
-        carries ``acquired_token`` which the worker loop must echo back on the terminal
-        ``DELETE``/``UPDATE``.
+        Same contract as :meth:`fetch`. Used by ``OutboxSubscriber._fetch_loop`` to reuse
+        a long-lived connection instead of acquiring one per fetch from the pool. Each
+        call opens its own transaction on *conn* via ``async with conn.begin():``.
         """
         if not queues:
             return []
@@ -103,10 +113,39 @@ class OutboxClient:
             )
             .returning(*t.c)
         )
-        async with self._engine.begin() as conn:
+        async with conn.begin():
             result = await conn.execute(stmt, {"lease_ttl": max(0.0, lease_ttl_seconds)})
             rows = result.mappings().all()
         return [_row_to_message(dict(row)) for row in rows]
+
+    async def fetch(
+        self,
+        queues: "Sequence[str]",
+        *,
+        limit: int,
+        lease_ttl_seconds: float,
+    ) -> list[OutboxInnerMessage]:
+        """
+        Atomically claim up to *limit* available rows for the given queue names.
+
+        A row is available iff its lease is unset (``acquired_token IS NULL``) or its
+        lease is older than *lease_ttl_seconds*. Returns the freshly-leased rows; each
+        carries ``acquired_token`` which the worker loop must echo back on the terminal
+        ``DELETE``/``UPDATE``.
+
+        Convenience wrapper that opens a one-shot connection and delegates to
+        :meth:`fetch_with_conn`. The subscriber loop uses ``fetch_with_conn`` directly
+        with a long-lived connection.
+        """
+        if not queues:
+            return []
+        async with self._engine.connect() as conn:
+            return await self.fetch_with_conn(
+                conn,
+                queues,
+                limit=limit,
+                lease_ttl_seconds=lease_ttl_seconds,
+            )
 
     async def delete_with_lease(self, message_id: int, acquired_token: uuid.UUID) -> bool:
         """Delete *message_id* iff it still holds *acquired_token*. Returns True if deleted."""

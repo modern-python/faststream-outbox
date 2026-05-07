@@ -6,11 +6,19 @@ Two async tasks run per subscriber:
 * ``_fetch_loop`` claims available rows from Postgres and pushes them onto an
   in-process queue. A row is available iff its lease is unset *or* expired
   (``acquired_at < now() - lease_ttl_seconds``); the fetch CTE reclaims both cases
-  in one round-trip. Adaptive idle backoff with jitter when the queue is empty.
+  in one round-trip. Adaptive idle backoff with jitter when the queue is empty —
+  but the sleep is short-circuited by ``LISTEN/NOTIFY`` when the asyncpg driver
+  is in use, dropping idle dispatch latency from up to ``max_fetch_interval`` to
+  ~10ms. Polling stays as the fallback if ``LISTEN`` setup fails.
 * ``_worker_loop`` (one per ``max_workers``) pulls rows, dispatches via
   ``consume()``, and writes the terminal state back through the client. Every
   terminal write is filtered by ``acquired_token`` so a row whose lease was
   reclaimed by a newer fetch doesn't get clobbered by the stale handler.
+
+The fetch loop owns a long-lived ``AsyncConnection`` (used for the fetch CTE) and,
+when asyncpg is available, a separate raw asyncpg connection dedicated to LISTEN.
+On any error the connections are closed, the loop backs off, then both are reopened
+in the next iteration.
 """
 
 import asyncio
@@ -31,6 +39,12 @@ from faststream_outbox.parser.parser import OutboxParser
 from faststream_outbox.subscriber.config import OutboxSubscriberConfig, OutboxSubscriberSpecificationConfig
 
 
+try:
+    import asyncpg as _asyncpg
+except ImportError:  # pragma: no cover
+    _asyncpg = None  # ty: ignore[invalid-assignment]
+
+
 _BACKOFF_EXP_CAP = 30
 
 
@@ -38,6 +52,7 @@ if typing.TYPE_CHECKING:
     from faststream._internal.endpoint.publisher import PublisherProto
     from faststream._internal.endpoint.subscriber.call_item import CallsCollection
     from faststream.message import StreamMessage
+    from sqlalchemy.ext.asyncio import AsyncConnection
 
     from faststream_outbox.client import OutboxClient
     from faststream_outbox.configs import OutboxBrokerConfig
@@ -82,6 +97,10 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         self._inflight: asyncio.Queue[OutboxInnerMessage] = asyncio.Queue(
             maxsize=config.fetch_batch_size,
         )
+        # Set by the LISTEN callback to wake _fetch_loop early; cleared after each
+        # wakeup. When LISTEN is unavailable the event simply never fires and the
+        # loop sleeps the full adaptive interval.
+        self._notify_event: asyncio.Event = asyncio.Event()
 
     @property
     def _client(self) -> "OutboxClient":
@@ -110,31 +129,78 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         with anyio.move_on_after(self._outer_config.graceful_timeout):
             await super().stop()
 
-    async def _fetch_loop(self) -> None:
-        base = self._config.min_fetch_interval
-        max_idle = self._config.max_fetch_interval
-        idle_count = 0
-        error_attempt = 0
+    @property
+    def _notify_channel(self) -> str:
+        """
+        LISTEN channel name.
 
+        One channel per outbox table; subscribers ignore queues they don't care
+        about (cheap — wake-up does an empty fetch and goes back to sleep).
+        """
+        return f"outbox_{self._client.table.name}"
+
+    async def _fetch_loop(self) -> None:
+        """
+        Outer loop: own connection lifecycle, back off and reconnect on error.
+
+        When the client has no real engine (test broker), drives the inner loop without
+        a persistent connection — uses ``client.fetch(...)`` for each iteration and never
+        sets up LISTEN. The ``_notify_event`` simply never fires; behavior is polling-only.
+        """
+        engine = self._client.engine
+        error_attempt = 0
         while self.running:
-            free = self._inflight.maxsize - self._inflight.qsize()
-            if free <= 0:
-                await anyio.sleep(base)
-                continue
             try:
-                rows = await self._client.fetch(
-                    self._queues,
-                    limit=min(free, self._config.fetch_batch_size),
-                    lease_ttl_seconds=self._config.lease_ttl_seconds,
-                )
+                if engine is None:
+                    await self._fetch_inner(fetch_conn=None)
+                else:
+                    async with engine.connect() as fetch_conn:
+                        listen_conn = await self._open_listen_connection()
+                        try:
+                            await self._fetch_inner(fetch_conn=fetch_conn)
+                        finally:
+                            if listen_conn is not None:
+                                await listen_conn.close()
+                error_attempt = 0
             except Exception as e:  # noqa: BLE001
-                self._log(log_level=logging.ERROR, message=f"Outbox fetch error: {e!r}", exc_info=e)
+                self._log(
+                    log_level=logging.ERROR,
+                    message=f"Outbox fetch loop error: {e!r}; reconnecting",
+                    exc_info=e,
+                )
                 error_attempt = min(error_attempt + 1, _BACKOFF_EXP_CAP)
                 delay = min(2.0 ** (error_attempt - 1) * random.uniform(0.5, 1.5), 30.0)  # noqa: S311
                 await anyio.sleep(delay)
-                continue  # pragma: no cover  -- coverage misses bare-continue-after-await
 
-            error_attempt = 0
+    async def _fetch_inner(self, *, fetch_conn: "AsyncConnection | None") -> None:
+        """
+        Fetch + adaptive backoff, with NOTIFY-driven wakeup.
+
+        Returns when ``self.running`` goes False, or raises on any DB error so the outer
+        loop can rebuild the connection.
+        """
+        base = self._config.min_fetch_interval
+        max_idle = self._config.max_fetch_interval
+        idle_count = 0
+        while self.running:
+            free = self._inflight.maxsize - self._inflight.qsize()
+            if free <= 0:
+                await self._wait_for_notify_or_timeout(base)
+                continue
+            limit = min(free, self._config.fetch_batch_size)
+            if fetch_conn is None:
+                rows = await self._client.fetch(
+                    self._queues,
+                    limit=limit,
+                    lease_ttl_seconds=self._config.lease_ttl_seconds,
+                )
+            else:
+                rows = await self._client.fetch_with_conn(
+                    fetch_conn,
+                    self._queues,
+                    limit=limit,
+                    lease_ttl_seconds=self._config.lease_ttl_seconds,
+                )
             if rows:
                 idle_count = 0
                 for row in rows:
@@ -142,7 +208,55 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             else:
                 idle_count = min(idle_count + 1, _BACKOFF_EXP_CAP)
                 delay = min(base * (2.0 ** (idle_count - 1)) * random.uniform(0.5, 1.5), max_idle)  # noqa: S311
-                await anyio.sleep(delay)
+                await self._wait_for_notify_or_timeout(delay)
+
+    async def _wait_for_notify_or_timeout(self, timeout: float) -> None:  # noqa: ASYNC109
+        """Sleep up to *timeout* seconds, but wake immediately on a NOTIFY."""
+        with suppress(TimeoutError):
+            await asyncio.wait_for(self._notify_event.wait(), timeout=timeout)
+        self._notify_event.clear()
+
+    async def _open_listen_connection(self) -> "_asyncpg.Connection | None":
+        """
+        Open a dedicated raw asyncpg connection and register LISTEN on it.
+
+        Returns the connection on success, ``None`` on any failure (asyncpg not installed,
+        non-asyncpg driver, permission error, network problem). The fetch loop falls back
+        to polling-only behavior in that case.
+
+        A separate connection is required because asyncpg's ``add_listener`` makes the
+        connection's reader task monopolize it — interleaving normal queries breaks
+        notification delivery.
+        """
+        if _asyncpg is None:
+            return None
+        engine = self._client.engine
+        if engine is None or "asyncpg" not in (engine.url.drivername or ""):
+            return None
+        # SQLAlchemy URL with the +asyncpg suffix isn't a valid raw asyncpg DSN; strip it.
+        # ``str(url)`` hides the password — use ``render_as_string(hide_password=False)``
+        # so asyncpg.connect actually sees the credentials.
+        dsn = engine.url.set(drivername="postgresql").render_as_string(hide_password=False)
+        try:
+            conn = await _asyncpg.connect(dsn)
+            await conn.add_listener(self._notify_channel, self._on_notify)
+        except Exception as e:  # noqa: BLE001
+            self._log(
+                log_level=logging.WARNING,
+                message=f"LISTEN setup failed; falling back to polling: {e!r}",
+                exc_info=e,
+            )
+            return None
+        return conn
+
+    def _on_notify(self, *_args: object) -> None:
+        """
+        Asyncpg notification callback: ``(connection, pid, channel, payload)``.
+
+        We only need the wake-up signal; payload is ignored. Setting an ``asyncio.Event``
+        from the asyncpg reader task is safe — it runs on the same event loop.
+        """
+        self._notify_event.set()
 
     async def _worker_loop(self) -> None:
         logger = self._outer_config.logger.logger.logger if self._outer_config.logger else None

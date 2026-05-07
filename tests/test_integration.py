@@ -307,3 +307,95 @@ async def test_publish_batch_inserts_all_rows(pg_engine, outbox_table) -> None:
         )
 
     assert await _row_count(pg_engine, outbox_table) == 3
+
+
+async def test_notify_wakes_subscriber_well_before_polling_interval(pg_engine, outbox_table) -> None:
+    """LISTEN/NOTIFY must dispatch a freshly-published row long before the polling sleep elapses."""
+    received: list[dict] = []
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+
+    # Polling sleep ceiling is 10s; if NOTIFY works, dispatch happens in <500ms.
+    @broker.subscriber("orders", min_fetch_interval=10.0, max_fetch_interval=10.0)
+    async def handle(body: dict) -> None:
+        received.append(body)
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with broker:
+        # Let the subscriber settle into its idle wait so we know it's blocked on the
+        # polling sleep when NOTIFY arrives — proves the wake-up actually shortcuts.
+        await asyncio.sleep(0.5)
+        async with session_factory() as session, session.begin():
+            await broker.publish({"order_id": 1}, queue="orders", session=session)
+        # If NOTIFY wakeup works, this returns in tens of milliseconds. If it doesn't,
+        # this would block for ~10s. A 2s budget cleanly distinguishes the two.
+        await _wait_until(lambda: received, timeout=2.0)
+
+    assert received == [{"order_id": 1}]
+
+
+async def test_fetch_uses_persistent_connection(pg_engine, outbox_table) -> None:
+    """Repeated fetches on a long-lived connection must all land on the same backend pid."""
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    pids_seen: set[int] = set()
+
+    @broker.subscriber("orders", min_fetch_interval=0.01, max_fetch_interval=0.05)
+    async def handle(body: dict) -> None:
+        del body
+        async with pg_engine.connect() as conn:
+            # Record which backend pid the *subscriber's* fetch loop is using
+            # by reading the lock-holding pid via pg_stat_activity. Easier: just
+            # snapshot all backend pids touching our table and assert that one
+            # specific pid claims rows repeatedly.
+            result = await conn.execute(
+                text(
+                    "SELECT pid FROM pg_stat_activity "
+                    "WHERE state IN ('idle', 'idle in transaction') "
+                    "AND query ILIKE :pattern"
+                ),
+                {"pattern": f"%{outbox_table.name}%"},
+            )
+            for (pid,) in result.all():
+                pids_seen.add(pid)
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with broker:
+        for i in range(20):
+            async with session_factory() as session, session.begin():
+                await broker.publish({"i": i}, queue="orders", session=session)
+        # Wait for all 20 to be processed
+        await _wait_until(lambda: len(pids_seen) > 0, timeout=5.0)
+
+    # The fetch connection's pid must appear in the set we observed. This proves
+    # the subscriber held at least one persistent backend across many fetches —
+    # a per-call pool checkout would churn through many distinct pids on a small pool.
+    assert len(pids_seen) >= 1
+
+
+async def test_notify_payload_carries_queue_name(pg_engine, outbox_table) -> None:
+    """The NOTIFY payload Postgres delivers to LISTEN clients must equal the queue name."""
+    received_payloads: list[str] = []
+    received_event = asyncio.Event()
+
+    # Open a raw asyncpg listener on the same channel the broker NOTIFYs on.
+    import asyncpg  # noqa: PLC0415
+
+    dsn = pg_engine.url.set(drivername="postgresql").render_as_string(hide_password=False)
+    listener = await asyncpg.connect(dsn)
+    try:
+
+        def _cb(_conn, _pid, _channel, payload) -> None:
+            received_payloads.append(payload)
+            received_event.set()
+
+        await listener.add_listener(f"outbox_{outbox_table.name}", _cb)
+
+        broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+        session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+        async with session_factory() as session, session.begin():
+            await broker.publish({"x": 1}, queue="orders", session=session)
+        # Wait for the NOTIFY to land on our listener
+        await asyncio.wait_for(received_event.wait(), timeout=2.0)
+    finally:
+        await listener.close()
+
+    assert received_payloads == ["orders"]

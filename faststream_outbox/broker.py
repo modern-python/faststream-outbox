@@ -22,7 +22,7 @@ from faststream._internal.logger.logging import get_broker_logger
 from faststream._internal.types import BrokerMiddleware, CustomCallable
 from faststream.specification.schema import BrokerSpec
 from faststream.specification.schema.extra import Tag, TagDict
-from sqlalchemy import insert
+from sqlalchemy import insert, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from faststream_outbox.client import OutboxClient
@@ -208,6 +208,7 @@ class OutboxBroker(
             raise TypeError(msg)
         payload, hdrs = _encode_payload(body, headers=headers, correlation_id=correlation_id)
         await session.execute(insert(self._outbox_table).values(queue=queue, payload=payload, headers=hdrs))
+        await self._notify(session, queue)
 
     async def publish_batch(  # ty: ignore[invalid-method-override]
         self,
@@ -232,6 +233,23 @@ class OutboxBroker(
             payload, hdrs = _encode_payload(body, headers=headers)
             rows.append({"queue": queue, "payload": payload, "headers": hdrs})
         await session.execute(insert(self._outbox_table), rows)
+        await self._notify(session, queue)
+
+    async def _notify(self, session: AsyncSession, queue: str) -> None:
+        """
+        Emit ``pg_notify('outbox_<table>', queue)`` so listening subscribers wake immediately.
+
+        Uses ``pg_notify(...)`` rather than raw ``NOTIFY`` so the channel and payload
+        bind cleanly as parameters (raw NOTIFY accepts only literals — injection-prone).
+        Runs on the caller's session so the NOTIFY commits with the row insert; if the
+        caller's transaction rolls back, the NOTIFY is silently discarded by Postgres.
+        Safe no-op for non-Postgres dialects: subscribers without a matching LISTEN just
+        ignore it.
+        """
+        await session.execute(
+            text("SELECT pg_notify(:channel, :payload)"),
+            {"channel": f"outbox_{self._outbox_table.name}", "payload": queue},
+        )
 
     async def request(self, *args: typing.Any, **kwargs: typing.Any) -> typing.NoReturn:
         msg = "OutboxBroker does not support request-reply"
