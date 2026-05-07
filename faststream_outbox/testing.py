@@ -115,7 +115,7 @@ class FakeOutboxClient:
         message_id: int,
         acquired_token: uuid.UUID,
         *,
-        next_attempt_at: _dt.datetime,
+        delay_seconds: float,
         attempts_count: int,
         first_attempt_at: _dt.datetime,
         last_attempt_at: _dt.datetime,
@@ -123,7 +123,7 @@ class FakeOutboxClient:
         for row in self._rows:
             if row.id == message_id and row.acquired_token == acquired_token:
                 row.state = OutboxState.PENDING.value
-                row.next_attempt_at = next_attempt_at
+                row.next_attempt_at = _utcnow() + _dt.timedelta(seconds=max(0.0, delay_seconds))
                 row.attempts_count = attempts_count
                 row.first_attempt_at = first_attempt_at
                 row.last_attempt_at = last_attempt_at

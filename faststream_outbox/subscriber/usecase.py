@@ -46,9 +46,8 @@ if typing.TYPE_CHECKING:
 class OutboxSubscriberSpecification(SubscriberSpecification["OutboxBrokerConfig", OutboxSubscriberSpecificationConfig]):
     @property
     def name(self) -> str:
-        prefix = getattr(self._outer_config, "prefix", "")
         joined = ",".join(self.config.queues)
-        return f"{prefix}{joined}:{self.call_name}"
+        return f"{joined}:{self.call_name}"
 
     def get_schema(self) -> dict[str, SubscriberSpec]:
         return {
@@ -94,7 +93,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
 
     @property
     def _queues(self) -> list[str]:
-        return self._config.full_queues
+        return self._config.queues
 
     @typing.override
     async def start(self) -> None:
@@ -151,13 +150,11 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                 if not row.allow_delivery(max_deliveries=self._config.max_deliveries, logger=logger):
                     await self._flush_terminal(row)
                     continue
-                # FastStream's AckPolicy middleware catches handler exceptions before
-                # they reach this except, so this branch is defensive.
+                # AckPolicy middleware catches handler exceptions; _CaptureExceptionMiddleware
+                # stashes exc onto row.last_exception before nack runs, so retry strategies
+                # can branch on exception type.
                 try:
                     await self.consume(row)
-                except BaseException as exc:  # pragma: no cover
-                    row.last_exception = exc
-                    raise
                 finally:
                     await row.assert_state_set(logger)
                 await self._flush_result(row)
@@ -183,12 +180,12 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             )
 
     async def _flush_retry(self, row: OutboxInnerMessage) -> None:
-        if row.acquired_token is None:
+        if row.acquired_token is None or row.pending_delay_seconds is None:
             return
         updated = await self._client.mark_pending_with_lease(
             row.id,
             row.acquired_token,
-            next_attempt_at=row.next_attempt_at,
+            delay_seconds=row.pending_delay_seconds,
             attempts_count=row.attempts_count,
             first_attempt_at=row.first_attempt_at,  # ty: ignore[invalid-argument-type]
             last_attempt_at=row.last_attempt_at,  # ty: ignore[invalid-argument-type]
@@ -210,7 +207,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             else:
                 if released:
                     self._log(
-                        log_level=logging.WARNING,
+                        log_level=logging.INFO,
                         message=f"release_stuck reset {released} stale rows back to pending",
                     )
             await anyio.sleep(interval)

@@ -52,8 +52,9 @@ class OutboxClient:
         self._engine = engine
         self._table = outbox_table
         # Stable advisory-lock key derived from the table name; ``hashtext`` returns int4.
-        self._advisory_lock_sql = text(
-            f"SELECT pg_try_advisory_xact_lock(hashtext('faststream_outbox:{outbox_table.name}'))"
+        # Parameterized to keep the table name out of SQL string interpolation.
+        self._advisory_lock_sql = text("SELECT pg_try_advisory_xact_lock(hashtext(:lock_key))").bindparams(
+            lock_key=f"faststream_outbox:{outbox_table.name}"
         )
 
     @property
@@ -113,7 +114,7 @@ class OutboxClient:
         message_id: int,
         acquired_token: uuid.UUID,
         *,
-        next_attempt_at: _dt.datetime,
+        delay_seconds: float,
         attempts_count: int,
         first_attempt_at: _dt.datetime,
         last_attempt_at: _dt.datetime,
@@ -121,15 +122,17 @@ class OutboxClient:
         """
         Move *message_id* back to ``pending`` for retry, iff it still holds the lease.
 
-        Returns True if the row was updated.
+        ``next_attempt_at`` is computed server-side as ``now() + delay_seconds`` so
+        retry timing uses the DB clock, not the worker's. Returns True if the row was updated.
         """
         t = self._table
+        next_attempt_at_expr = func.now() + func.make_interval(0, 0, 0, 0, 0, 0, bindparam("delay", type_=Float))
         stmt = (
             update(t)
             .where(t.c.id == message_id, t.c.acquired_token == acquired_token)
             .values(
                 state=OutboxState.PENDING.value,
-                next_attempt_at=next_attempt_at,
+                next_attempt_at=next_attempt_at_expr,
                 attempts_count=attempts_count,
                 first_attempt_at=first_attempt_at,
                 last_attempt_at=last_attempt_at,
@@ -138,7 +141,7 @@ class OutboxClient:
             )
         )
         async with self._engine.begin() as conn:
-            result = await conn.execute(stmt)
+            result = await conn.execute(stmt, {"delay": max(0.0, delay_seconds)})
         return (result.rowcount or 0) > 0
 
     async def release_stuck(self, *, timeout_seconds: float) -> int:

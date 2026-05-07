@@ -8,6 +8,8 @@ from sqlalchemy import MetaData
 from faststream_outbox import (
     ConstantRetry,
     OutboxBroker,
+    OutboxRouter,
+    RetryStrategyProto,
     TestOutboxBroker,
     make_outbox_table,
 )
@@ -548,3 +550,110 @@ async def test_fake_connect_is_noop() -> None:
     test_broker = TestOutboxBroker(broker)
     # Direct call exercises L226 even though it's also called during __aenter__.
     await test_broker._fake_connect(broker)  # noqa: SLF001
+
+
+async def test_retry_strategy_receives_handler_exception() -> None:
+    """RetryStrategyProto.get_next_attempt_delay must see the raised exception, not None."""
+    seen_exceptions: list[BaseException | None] = []
+
+    class RecordingStrategy(RetryStrategyProto):
+        def get_next_attempt_delay(
+            self,
+            *,
+            first_attempt_at: _dt.datetime,  # noqa: ARG002
+            last_attempt_at: _dt.datetime,  # noqa: ARG002
+            attempts_count: int,  # noqa: ARG002
+            exception: BaseException | None = None,
+        ) -> float | None:
+            seen_exceptions.append(exception)
+            return None  # terminal so the test wraps up promptly
+
+    broker = _make_broker()
+
+    @broker.subscriber(
+        "orders",
+        min_fetch_interval=0.01,
+        max_fetch_interval=0.05,
+        retry_strategy=RecordingStrategy(),
+    )
+    async def handle(body: str) -> None:
+        del body
+        msg = "boom-transient"
+        raise RuntimeError(msg)
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        p, h = encode_payload("payload")
+        test_broker.feed("orders", p, headers=h)
+        await _wait_until(lambda: seen_exceptions, timeout=3.0)
+
+    assert len(seen_exceptions) >= 1
+    exc = seen_exceptions[0]
+    assert isinstance(exc, RuntimeError)
+    assert str(exc) == "boom-transient"
+
+
+async def test_retry_strategy_can_branch_on_exception_type() -> None:
+    """Subclass pattern from retry.py docstring: retry transient, terminate on permanent."""
+    attempts: list[str] = []
+
+    class TransientOnlyStrategy(RetryStrategyProto):
+        def get_next_attempt_delay(
+            self,
+            *,
+            first_attempt_at: _dt.datetime,  # noqa: ARG002
+            last_attempt_at: _dt.datetime,  # noqa: ARG002
+            attempts_count: int,  # noqa: ARG002
+            exception: BaseException | None = None,
+        ) -> float | None:
+            if isinstance(exception, ValueError):
+                return None  # permanent → terminal
+            return 0.05  # transient → retry
+
+    broker = _make_broker()
+
+    @broker.subscriber(
+        "orders",
+        min_fetch_interval=0.01,
+        max_fetch_interval=0.05,
+        retry_strategy=TransientOnlyStrategy(),
+    )
+    async def handle(body: str) -> None:
+        attempts.append(body)
+        # First call: transient (gets retried via the strategy's retry branch).
+        # Second call: permanent (terminates via the strategy's None branch).
+        if len(attempts) == 1:
+            msg = "transient"
+            raise RuntimeError(msg)
+        msg = "permanent"
+        raise ValueError(msg)
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        p, h = encode_payload("body")
+        test_broker.feed("orders", p, headers=h)
+        await _wait_until(lambda: not test_broker.fake_client.rows, timeout=5.0)
+
+    assert len(attempts) == 2  # transient retried once, then permanent terminated
+
+
+async def test_router_subscriber_receives_plain_queue_publish() -> None:
+    """A subscriber registered via OutboxRouter must receive rows whose queue matches literally."""
+    received: list[str] = []
+
+    router = OutboxRouter()
+
+    @router.subscriber("orders", min_fetch_interval=0.01, max_fetch_interval=0.05)
+    async def handle(body: str) -> None:
+        received.append(body)
+
+    broker = _make_broker()
+    broker.include_router(router)
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        p, h = encode_payload("via-router")
+        test_broker.feed("orders", p, headers=h)
+        await _wait_until(lambda: received, timeout=3.0)
+
+    assert received == ["via-router"]
