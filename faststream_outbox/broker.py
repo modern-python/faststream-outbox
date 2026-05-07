@@ -9,6 +9,7 @@ owns subscribers on the consumer side.
 import logging
 import typing
 from collections.abc import Iterable, Sequence
+from types import TracebackType
 
 from faststream import BaseMiddleware
 from faststream._internal.basic_types import LoggerProto
@@ -38,6 +39,29 @@ if typing.TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
 
     from faststream_outbox.subscriber.usecase import OutboxSubscriber
+
+
+class _CaptureExceptionMiddleware(BaseMiddleware):
+    """
+    Stash the handler exception on the inner row before AckMiddleware nacks.
+
+    FastStream's AcknowledgementMiddleware catches the handler exception in its
+    own ``__aexit__`` and calls ``message.nack()`` directly — the exception never
+    propagates back to the worker loop. Without this middleware, ``OutboxInnerMessage._nack``
+    sees ``last_exception=None`` and retry strategies that branch on exception type
+    can't work. We sit one step closer to the handler in the middleware stack so
+    our ``__aexit__`` runs before AckMiddleware's, capturing ``exc_val`` onto the row.
+    """
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None = None,
+        exc_val: BaseException | None = None,
+        exc_tb: TracebackType | None = None,
+    ) -> bool | None:
+        if exc_val is not None and isinstance(self.msg, OutboxInnerMessage):
+            self.msg.last_exception = exc_val
+        return False
 
 
 class OutboxParamsStorage(DefaultLoggerStorage):
@@ -100,7 +124,7 @@ class OutboxBroker(
             engine_state=engine_state,
             outbox_table=outbox_table,
             client=client,
-            broker_middlewares=middlewares,
+            broker_middlewares=(_CaptureExceptionMiddleware, *middlewares),
             broker_parser=parser,
             broker_decoder=decoder,
             logger=make_logger_state(

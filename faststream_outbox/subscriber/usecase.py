@@ -151,13 +151,11 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                 if not row.allow_delivery(max_deliveries=self._config.max_deliveries, logger=logger):
                     await self._flush_terminal(row)
                     continue
-                # FastStream's AckPolicy middleware catches handler exceptions before
-                # they reach this except, so this branch is defensive.
+                # AckPolicy middleware catches handler exceptions; _CaptureExceptionMiddleware
+                # stashes exc onto row.last_exception before nack runs, so retry strategies
+                # can branch on exception type.
                 try:
                     await self.consume(row)
-                except BaseException as exc:  # pragma: no cover
-                    row.last_exception = exc
-                    raise
                 finally:
                     await row.assert_state_set(logger)
                 await self._flush_result(row)
