@@ -3,6 +3,7 @@
 import asyncio
 import datetime as _dt
 import uuid
+from unittest import mock
 
 import pytest
 from sqlalchemy import insert, select, text
@@ -334,41 +335,34 @@ async def test_notify_wakes_subscriber_well_before_polling_interval(pg_engine, o
 
 
 async def test_fetch_uses_persistent_connection(pg_engine, outbox_table) -> None:
-    """Repeated fetches on a long-lived connection must all land on the same backend pid."""
+    """Every fetch must land on the same backend pid — proves the connection is reused."""
     broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
-    pids_seen: set[int] = set()
+    received: list[dict] = []
+    fetch_pids: list[int] = []
+    original_fetch_with_conn = OutboxClient.fetch_with_conn
+
+    async def tracking_fetch_with_conn(self, conn, queues, *, limit, lease_ttl_seconds):
+        # Probe the pid in its own transaction so SQLAlchemy's autobegun txn is
+        # closed before original_fetch_with_conn opens its own ``async with conn.begin():``.
+        async with conn.begin():
+            result = await conn.execute(text("SELECT pg_backend_pid()"))
+            fetch_pids.append(result.scalar_one())
+        return await original_fetch_with_conn(self, conn, queues, limit=limit, lease_ttl_seconds=lease_ttl_seconds)
 
     @broker.subscriber("orders", min_fetch_interval=0.01, max_fetch_interval=0.05)
     async def handle(body: dict) -> None:
-        del body
-        async with pg_engine.connect() as conn:
-            # Record which backend pid the *subscriber's* fetch loop is using
-            # by reading the lock-holding pid via pg_stat_activity. Easier: just
-            # snapshot all backend pids touching our table and assert that one
-            # specific pid claims rows repeatedly.
-            result = await conn.execute(
-                text(
-                    "SELECT pid FROM pg_stat_activity "
-                    "WHERE state IN ('idle', 'idle in transaction') "
-                    "AND query ILIKE :pattern"
-                ),
-                {"pattern": f"%{outbox_table.name}%"},
-            )
-            for (pid,) in result.all():
-                pids_seen.add(pid)
+        received.append(body)
 
     session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
-    async with broker:
-        for i in range(20):
-            async with session_factory() as session, session.begin():
-                await broker.publish({"i": i}, queue="orders", session=session)
-        # Wait for all 20 to be processed
-        await _wait_until(lambda: len(pids_seen) > 0, timeout=5.0)
+    with mock.patch.object(OutboxClient, "fetch_with_conn", tracking_fetch_with_conn):
+        async with broker:
+            for i in range(5):
+                async with session_factory() as session, session.begin():
+                    await broker.publish({"i": i}, queue="orders", session=session)
+            await _wait_until(lambda: len(received) == 5, timeout=5.0)
 
-    # The fetch connection's pid must appear in the set we observed. This proves
-    # the subscriber held at least one persistent backend across many fetches —
-    # a per-call pool checkout would churn through many distinct pids on a small pool.
-    assert len(pids_seen) >= 1
+    assert len(fetch_pids) >= 3, f"fetch_with_conn should run multiple times, got {len(fetch_pids)}"
+    assert len(set(fetch_pids)) == 1, f"persistent connection should hold one pid, saw {set(fetch_pids)}"
 
 
 async def test_notify_payload_carries_queue_name(pg_engine, outbox_table) -> None:

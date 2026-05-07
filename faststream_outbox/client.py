@@ -82,9 +82,10 @@ class OutboxClient:
         Same contract as :meth:`fetch`. Used by ``OutboxSubscriber._fetch_loop`` to reuse
         a long-lived connection instead of acquiring one per fetch from the pool. Each
         call opens its own transaction on *conn* via ``async with conn.begin():``.
+
+        Callers must pass a non-empty *queues*; the empty-queue short-circuit lives in
+        :meth:`fetch`.
         """
-        if not queues:
-            return []
         token = uuid.uuid4()
         t = self._table
 

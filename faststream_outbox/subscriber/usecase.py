@@ -168,7 +168,6 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                         finally:
                             if listen_conn is not None:
                                 await listen_conn.close()
-                error_attempt = 0
             except Exception as e:  # noqa: BLE001
                 self._log(
                     log_level=logging.ERROR,

@@ -1,6 +1,6 @@
 import datetime as _dt
 import uuid
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import MetaData
@@ -18,6 +18,7 @@ from faststream_outbox.client import OutboxClient
 from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.message import OutboxInnerMessage, OutboxMessage
 from faststream_outbox.parser.parser import OutboxParser
+from faststream_outbox.subscriber.usecase import OutboxSubscriber
 
 
 def _make_broker(engine: object | None = None, table_name: str = "outbox") -> OutboxBroker:
@@ -667,8 +668,6 @@ async def test_outbox_broker_config_connect_disconnect_noop() -> None:
 
 
 async def test_subscriber_get_one_raises() -> None:
-    from unittest.mock import MagicMock  # noqa: PLC0415
-
     metadata = MetaData()
     t = make_outbox_table(metadata)
     broker = OutboxBroker(outbox_table=t)
@@ -681,3 +680,45 @@ async def test_subscriber_get_one_raises() -> None:
         await sub.get_one()
     # _make_response_publisher returns ()
     assert sub._make_response_publisher(MagicMock()) == ()  # noqa: SLF001
+
+
+# --- _open_listen_connection fallback paths ---
+
+
+def _make_subscriber_for_listener_test() -> OutboxSubscriber:
+    broker = _make_broker()
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> None: ...
+
+    return next(iter(broker._subscribers))  # noqa: SLF001
+
+
+async def test_open_listen_connection_returns_none_for_non_asyncpg_driver() -> None:
+    sub = _make_subscriber_for_listener_test()
+    engine = MagicMock()
+    engine.url.drivername = "postgresql"  # no +asyncpg suffix
+
+    result = await sub._open_listen_connection(engine)  # noqa: SLF001
+
+    assert result is None
+
+
+async def test_open_listen_connection_returns_none_when_asyncpg_connect_fails() -> None:
+    sub = _make_subscriber_for_listener_test()
+    engine = MagicMock()
+    engine.url.drivername = "postgresql+asyncpg"
+    engine.url.set.return_value.render_as_string.return_value = "postgresql://u:p@h/db"
+
+    with (
+        patch.object(sub, "_log") as log_mock,
+        patch(
+            "faststream_outbox.subscriber.usecase._asyncpg.connect",
+            new=AsyncMock(side_effect=OSError("boom")),
+        ),
+    ):
+        result = await sub._open_listen_connection(engine)  # noqa: SLF001
+
+    assert result is None
+    log_mock.assert_called_once()
+    assert "LISTEN setup failed" in log_mock.call_args.kwargs["message"]
