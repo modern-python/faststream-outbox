@@ -81,8 +81,6 @@ await broker.cancel_timer(queue="orders", timer_id="order-confirm-42", session=s
 
 **Latency floor:** firing latency is bounded by the subscriber's `max_fetch_interval` (default 10s) after `next_attempt_at` elapses. Lower it for sub-10s precision; sub-second precision is not a goal of this broker.
 
-**Migration note:** existing deployments must regenerate Alembic migrations after upgrading — the new `timer_id` column and `<table>_timer_id_uq` partial unique index need to land in the database before publish-with-`timer_id` works.
-
 ## Schema validation
 
 Schema validation is opt-in:
