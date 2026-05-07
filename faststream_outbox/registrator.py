@@ -27,8 +27,7 @@ class OutboxRegistrator(Registrator[OutboxInnerMessage, "OutboxBrokerConfig"]): 
         fetch_batch_size: int = 10,
         min_fetch_interval: float = 1.0,
         max_fetch_interval: float = 10.0,
-        release_stuck_timeout: float = 300.0,
-        release_stuck_interval: float | None = None,
+        lease_ttl_seconds: float = 60.0,
         max_deliveries: int | None = None,
         dependencies: Iterable["Dependant"] = (),
         parser: CustomCallable | None = None,
@@ -49,10 +48,7 @@ class OutboxRegistrator(Registrator[OutboxInnerMessage, "OutboxBrokerConfig"]): 
             fetch_batch_size=fetch_batch_size,
             min_fetch_interval=min_fetch_interval,
             max_fetch_interval=max_fetch_interval,
-            release_stuck_timeout=release_stuck_timeout,
-            release_stuck_interval=release_stuck_interval
-            if release_stuck_interval is not None
-            else release_stuck_timeout / 2,
+            lease_ttl_seconds=lease_ttl_seconds,
             max_deliveries=max_deliveries,
             config=self.config,  # ty: ignore[invalid-argument-type]
             title_=title_,

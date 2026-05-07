@@ -3,8 +3,8 @@ Test broker with an in-memory ``OutboxClient`` substitute.
 
 ``TestOutboxBroker`` wraps an ``OutboxBroker`` and swaps in a ``FakeOutboxClient``
 backed by a list of dicts. The real ``OutboxSubscriber`` runs unmodified — same
-fetch / worker / release-stuck loops — so tests exercise the actual delivery
-path, not a shortcut. ``feed()`` simulates a row insert.
+fetch / worker loops — so tests exercise the actual delivery path, not a shortcut.
+``feed()`` simulates a row insert.
 """
 
 import datetime as _dt
@@ -17,7 +17,6 @@ from faststream._internal.testing.broker import TestBroker
 
 from faststream_outbox.broker import OutboxBroker
 from faststream_outbox.message import OutboxInnerMessage
-from faststream_outbox.schema import OutboxState
 
 
 if typing.TYPE_CHECKING:
@@ -36,7 +35,6 @@ class _FakeRow:
     queue: str
     payload: bytes
     headers: dict[str, str] | None
-    state: str = OutboxState.PENDING.value
     attempts_count: int = 0
     deliveries_count: int = 0
     created_at: _dt.datetime = field(default_factory=_utcnow)
@@ -81,22 +79,30 @@ class FakeOutboxClient:
     def table(self) -> typing.Any:
         return None
 
-    async def fetch(self, queues: "Sequence[str]", *, limit: int) -> list[OutboxInnerMessage]:
+    async def fetch(
+        self,
+        queues: "Sequence[str]",
+        *,
+        limit: int,
+        lease_ttl_seconds: float,
+    ) -> list[OutboxInnerMessage]:
         if not queues:
             return []
         now = _utcnow()
+        lease_cutoff = now - _dt.timedelta(seconds=max(0.0, lease_ttl_seconds))
         token = uuid.uuid4()
         out: list[OutboxInnerMessage] = []
         eligible = sorted(
             (
                 r
                 for r in self._rows
-                if r.state == OutboxState.PENDING.value and r.queue in queues and r.next_attempt_at <= now
+                if r.queue in queues
+                and r.next_attempt_at <= now
+                and (r.acquired_token is None or (r.acquired_at is not None and r.acquired_at < lease_cutoff))
             ),
             key=lambda r: r.next_attempt_at,
         )
         for row in eligible[:limit]:
-            row.state = OutboxState.PROCESSING.value
             row.acquired_at = now
             row.acquired_token = token
             row.deliveries_count += 1
@@ -122,7 +128,6 @@ class FakeOutboxClient:
     ) -> bool:
         for row in self._rows:
             if row.id == message_id and row.acquired_token == acquired_token:
-                row.state = OutboxState.PENDING.value
                 row.next_attempt_at = _utcnow() + _dt.timedelta(seconds=max(0.0, delay_seconds))
                 row.attempts_count = attempts_count
                 row.first_attempt_at = first_attempt_at
@@ -131,17 +136,6 @@ class FakeOutboxClient:
                 row.acquired_token = None
                 return True
         return False
-
-    async def release_stuck(self, *, timeout_seconds: float) -> int:
-        cutoff = _utcnow() - _dt.timedelta(seconds=timeout_seconds)
-        released = 0
-        for row in self._rows:
-            if row.state == OutboxState.PROCESSING.value and row.acquired_at is not None and row.acquired_at < cutoff:
-                row.state = OutboxState.PENDING.value
-                row.acquired_at = None
-                row.acquired_token = None
-                released += 1
-        return released
 
     async def validate_schema(self) -> None:
         return
@@ -156,7 +150,6 @@ def _to_inner(row: _FakeRow) -> OutboxInnerMessage:
         queue=row.queue,
         payload=row.payload,
         headers=row.headers,
-        state=OutboxState(row.state),
         attempts_count=row.attempts_count,
         deliveries_count=row.deliveries_count,
         created_at=row.created_at,
@@ -225,7 +218,6 @@ class TestOutboxBroker(TestBroker[OutboxBroker]):  # ty: ignore[invalid-type-arg
             for _ in range(sub._config.max_workers):  # noqa: SLF001
                 sub.add_task(sub._worker_loop)  # noqa: SLF001
             sub.add_task(sub._fetch_loop)  # noqa: SLF001
-            sub.add_task(sub._release_stuck_loop)  # noqa: SLF001
 
     async def _fake_connect(self, broker: OutboxBroker, *args: typing.Any, **kwargs: typing.Any) -> None:  # noqa: ARG002
         return

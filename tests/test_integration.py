@@ -11,7 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from faststream_outbox import (
     ConstantRetry,
     OutboxBroker,
-    OutboxState,
     make_outbox_table,
 )
 from faststream_outbox.client import OutboxClient
@@ -62,7 +61,7 @@ async def test_fetch_returns_pending_rows_only(pg_engine, outbox_table) -> None:
         for i in range(3):
             await conn.execute(insert(outbox_table).values(queue="orders", payload=f"p-{i}".encode()))
     client = OutboxClient(pg_engine, outbox_table)
-    rows = await client.fetch(["orders"], limit=10)
+    rows = await client.fetch(["orders"], limit=10, lease_ttl_seconds=60.0)
     assert len(rows) == 3
     assert {r.queue for r in rows} == {"orders"}
     assert all(r.acquired_token is not None for r in rows)
@@ -73,7 +72,7 @@ async def test_fetch_skips_other_queues(pg_engine, outbox_table) -> None:
         await conn.execute(insert(outbox_table).values(queue="orders", payload=b"x"))
         await conn.execute(insert(outbox_table).values(queue="other", payload=b"y"))
     client = OutboxClient(pg_engine, outbox_table)
-    rows = await client.fetch(["orders"], limit=10)
+    rows = await client.fetch(["orders"], limit=10, lease_ttl_seconds=60.0)
     assert len(rows) == 1
     assert rows[0].queue == "orders"
 
@@ -85,7 +84,7 @@ async def test_two_concurrent_fetches_dont_double_claim(pg_engine, outbox_table)
     client = OutboxClient(pg_engine, outbox_table)
 
     async def fetch_n(n: int) -> list[int]:
-        rows = await client.fetch(["orders"], limit=n)
+        rows = await client.fetch(["orders"], limit=n, lease_ttl_seconds=60.0)
         return [r.id for r in rows]
 
     results = await asyncio.gather(fetch_n(10), fetch_n(10))
@@ -98,7 +97,7 @@ async def test_delete_with_lease_succeeds_with_correct_token(pg_engine, outbox_t
     async with pg_engine.begin() as conn:
         await conn.execute(insert(outbox_table).values(queue="orders", payload=b"x"))
     client = OutboxClient(pg_engine, outbox_table)
-    rows = await client.fetch(["orders"], limit=1)
+    rows = await client.fetch(["orders"], limit=1, lease_ttl_seconds=60.0)
     assert len(rows) == 1
     deleted = await client.delete_with_lease(rows[0].id, rows[0].acquired_token)  # ty: ignore[invalid-argument-type]
     assert deleted is True
@@ -109,7 +108,7 @@ async def test_delete_with_wrong_token_is_noop(pg_engine, outbox_table) -> None:
     async with pg_engine.begin() as conn:
         await conn.execute(insert(outbox_table).values(queue="orders", payload=b"x"))
     client = OutboxClient(pg_engine, outbox_table)
-    rows = await client.fetch(["orders"], limit=1)
+    rows = await client.fetch(["orders"], limit=1, lease_ttl_seconds=60.0)
     deleted = await client.delete_with_lease(rows[0].id, uuid.uuid4())  # wrong token
     assert deleted is False
     assert await _row_count(pg_engine, outbox_table) == 1  # row still there
@@ -119,7 +118,7 @@ async def test_mark_pending_with_lease(pg_engine, outbox_table) -> None:
     async with pg_engine.begin() as conn:
         await conn.execute(insert(outbox_table).values(queue="orders", payload=b"x"))
     client = OutboxClient(pg_engine, outbox_table)
-    rows = await client.fetch(["orders"], limit=1)
+    rows = await client.fetch(["orders"], limit=1, lease_ttl_seconds=60.0)
     msg = rows[0]
     updated = await client.mark_pending_with_lease(
         msg.id,
@@ -131,7 +130,7 @@ async def test_mark_pending_with_lease(pg_engine, outbox_table) -> None:
     )
     assert updated is True
     # Refetch — should be empty because next_attempt_at is in the future
-    rows2 = await client.fetch(["orders"], limit=10)
+    rows2 = await client.fetch(["orders"], limit=10, lease_ttl_seconds=60.0)
     assert rows2 == []
 
 
@@ -140,7 +139,7 @@ async def test_mark_pending_with_lease_uses_db_clock(pg_engine, outbox_table) ->
     async with pg_engine.begin() as conn:
         await conn.execute(insert(outbox_table).values(queue="orders", payload=b"x"))
     client = OutboxClient(pg_engine, outbox_table)
-    rows = await client.fetch(["orders"], limit=1)
+    rows = await client.fetch(["orders"], limit=1, lease_ttl_seconds=60.0)
     msg = rows[0]
     delay = 10.0
     # Use clock_timestamp(), not now(): now() returns transaction start time and
@@ -163,21 +162,34 @@ async def test_mark_pending_with_lease_uses_db_clock(pg_engine, outbox_table) ->
     assert db_before + _dt.timedelta(seconds=delay) <= next_at <= db_after + _dt.timedelta(seconds=delay)
 
 
-async def test_release_stuck_recovers_old_processing_rows(pg_engine, outbox_table) -> None:
+async def test_expired_lease_is_reclaimed_by_fetch(pg_engine, outbox_table) -> None:
+    """A row whose lease has expired must be re-claimed by the next fetch with a fresh token."""
     async with pg_engine.begin() as conn:
         await conn.execute(insert(outbox_table).values(queue="orders", payload=b"x"))
     client = OutboxClient(pg_engine, outbox_table)
-    rows = await client.fetch(["orders"], limit=1)
-    assert rows
-    # Backdate acquired_at so release_stuck picks it up
+    first = await client.fetch(["orders"], limit=1, lease_ttl_seconds=60.0)
+    assert first
+    original_token = first[0].acquired_token
+    # Backdate acquired_at so the lease is now considered expired by a 60s TTL.
     backdate_sql = f"UPDATE \"{outbox_table.name}\" SET acquired_at = NOW() - INTERVAL '1 hour'"  # noqa: S608
     async with pg_engine.begin() as conn:
         await conn.exec_driver_sql(backdate_sql)
-    released = await client.release_stuck(timeout_seconds=60)
-    assert released == 1
-    # Row should now be claimable again
-    rows2 = await client.fetch(["orders"], limit=10)
-    assert len(rows2) == 1
+    second = await client.fetch(["orders"], limit=1, lease_ttl_seconds=60.0)
+    assert len(second) == 1
+    assert second[0].id == first[0].id
+    assert second[0].acquired_token != original_token  # fresh lease holder
+
+
+async def test_unexpired_lease_is_not_reclaimed_by_fetch(pg_engine, outbox_table) -> None:
+    """A still-valid lease must NOT be reclaimed by another fetch."""
+    async with pg_engine.begin() as conn:
+        await conn.execute(insert(outbox_table).values(queue="orders", payload=b"x"))
+    client = OutboxClient(pg_engine, outbox_table)
+    first = await client.fetch(["orders"], limit=1, lease_ttl_seconds=60.0)
+    assert first
+    # Lease was just set; a fresh fetch with a 60s TTL must find nothing.
+    second = await client.fetch(["orders"], limit=1, lease_ttl_seconds=60.0)
+    assert second == []
 
 
 async def test_end_to_end_subscriber_delivers_inserted_row(pg_engine, outbox_table) -> None:
@@ -236,29 +248,6 @@ async def test_end_to_end_failing_handler_with_retry(pg_engine, outbox_table) ->
             await asyncio.sleep(0.1)  # pragma: no cover
         msg = "row not deleted within timeout"  # pragma: no cover
         raise AssertionError(msg)  # pragma: no cover
-
-
-async def test_subscriber_state_machine_uses_pending_value(outbox_table) -> None:
-    """Sanity: the OutboxState constants match the column CHECK constraint."""
-    states = list(outbox_table.c.state.constraints)
-    assert any("'pending'" in str(c.sqltext) for c in states if hasattr(c, "sqltext"))
-    assert OutboxState.PENDING.value == "pending"
-    assert OutboxState.PROCESSING.value == "processing"
-
-
-async def test_release_stuck_returns_zero_when_lock_held(pg_engine, outbox_table) -> None:
-    """If another process holds the advisory lock, release_stuck no-ops and returns 0."""
-    from sqlalchemy import text  # noqa: PLC0415
-
-    client = OutboxClient(pg_engine, outbox_table)
-    lock_key = f"faststream_outbox:{outbox_table.name}"
-
-    async with pg_engine.connect() as holder, holder.begin():
-        # Acquire the same advisory lock the client uses (xact-scoped).
-        await holder.execute(text(f"SELECT pg_advisory_xact_lock(hashtext('{lock_key}'))"))
-        # While held, release_stuck should fail to acquire and return 0.
-        released = await client.release_stuck(timeout_seconds=60)
-        assert released == 0
 
 
 async def test_validate_schema_fails_when_columns_missing(pg_engine, outbox_table) -> None:

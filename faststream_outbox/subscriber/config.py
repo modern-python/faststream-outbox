@@ -20,8 +20,7 @@ class OutboxSubscriberConfig(SubscriberUsecaseConfig):
     fetch_batch_size: int
     min_fetch_interval: float
     max_fetch_interval: float
-    release_stuck_timeout: float
-    release_stuck_interval: float
+    lease_ttl_seconds: float
     max_deliveries: int | None
 
     @property

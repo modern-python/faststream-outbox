@@ -19,8 +19,7 @@ def create_subscriber(  # noqa: PLR0913
     fetch_batch_size: int,
     min_fetch_interval: float,
     max_fetch_interval: float,
-    release_stuck_timeout: float,
-    release_stuck_interval: float,
+    lease_ttl_seconds: float,
     max_deliveries: int | None,
     config: "OutboxBrokerConfig",
     title_: str | None = None,
@@ -35,8 +34,7 @@ def create_subscriber(  # noqa: PLR0913
         fetch_batch_size=fetch_batch_size,
         min_fetch_interval=min_fetch_interval,
         max_fetch_interval=max_fetch_interval,
-        release_stuck_timeout=release_stuck_timeout,
-        release_stuck_interval=release_stuck_interval,
+        lease_ttl_seconds=lease_ttl_seconds,
         max_deliveries=max_deliveries,
     )
     specification_config = OutboxSubscriberSpecificationConfig(
