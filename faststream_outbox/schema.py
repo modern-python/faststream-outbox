@@ -2,11 +2,11 @@
 Outbox table factory.
 
 The package does not own the schema. Users attach the returned ``Table`` to their own
-``MetaData`` and write Alembic migrations themselves. Recommended companion partial index
-(create it in your migration alongside the table)::
+``MetaData`` and write Alembic migrations themselves. Recommended companion partial
+index (create it in your migration alongside the table)::
 
     CREATE INDEX outbox_pending_idx ON outbox (queue, next_attempt_at)
-      WHERE state IN ('pending', 'retryable');
+      WHERE state = 'pending';
 """
 
 import enum

@@ -9,9 +9,9 @@ from faststream_outbox import (
     ConstantRetry,
     OutboxBroker,
     TestOutboxBroker,
-    encode_payload,
     make_outbox_table,
 )
+from faststream_outbox.envelope import _encode_payload as encode_payload
 
 
 def _make_broker() -> OutboxBroker:
@@ -214,12 +214,20 @@ async def test_fake_broker_no_handler_no_dispatch() -> None:
     assert len(test_broker.fake_client.rows) == 1
 
 
-async def test_fake_broker_publish_raises() -> None:
+async def test_fake_broker_request_raises() -> None:
     broker = _make_broker()
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
         with pytest.raises(NotImplementedError):
-            await broker.publish(b"x")
+            await broker.request(b"x")
+
+
+async def test_fake_broker_publish_rejects_non_async_session() -> None:
+    broker = _make_broker()
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        with pytest.raises(TypeError, match="AsyncSession"):
+            await broker.publish(b"x", queue="orders", session=object())  # ty: ignore[invalid-argument-type]
 
 
 # --- subscriber error paths via subclassed FakeOutboxClient ---

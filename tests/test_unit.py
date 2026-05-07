@@ -13,11 +13,19 @@ from faststream_outbox import (
     OutboxBroker,
     OutboxRouter,
     OutboxState,
-    encode_payload,
     make_outbox_table,
 )
+from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.message import OutboxInnerMessage, OutboxMessage
 from faststream_outbox.parser.parser import OutboxParser
+
+
+def _make_broker(engine: object | None = None, table_name: str = "outbox") -> OutboxBroker:
+    metadata = MetaData()
+    table = make_outbox_table(metadata, table_name=table_name)
+    if engine is not None:
+        return OutboxBroker(engine, outbox_table=table)  # ty: ignore[invalid-argument-type]
+    return OutboxBroker(outbox_table=table)
 
 
 # --- make_outbox_table ---
@@ -52,23 +60,23 @@ def test_make_outbox_table_attaches_to_metadata() -> None:
     assert metadata.tables["outbox"] is t
 
 
-# --- encode_payload ---
+# --- _encode_payload ---
 
 
 def test_encode_payload_dict_sets_content_type_and_correlation() -> None:
-    payload, headers = encode_payload({"order_id": 1})
+    payload, headers = _encode_payload({"order_id": 1})
     assert payload == b'{"order_id": 1}'
     assert headers["content-type"] == "application/json"
     assert headers["correlation_id"]
 
 
 def test_encode_payload_preserves_user_correlation_id() -> None:
-    _, headers = encode_payload({"x": 1}, correlation_id="trace-abc")
+    _, headers = _encode_payload({"x": 1}, correlation_id="trace-abc")
     assert headers["correlation_id"] == "trace-abc"
 
 
 def test_encode_payload_passes_through_bytes() -> None:
-    payload, headers = encode_payload(b"raw bytes here")
+    payload, headers = _encode_payload(b"raw bytes here")
     assert payload == b"raw bytes here"
     # No content-type for raw bytes
     assert "content-type" not in headers
@@ -76,7 +84,7 @@ def test_encode_payload_passes_through_bytes() -> None:
 
 
 def test_encode_payload_merges_user_headers() -> None:
-    _, headers = encode_payload({"x": 1}, headers={"x-tenant": "acme"})
+    _, headers = _encode_payload({"x": 1}, headers={"x-tenant": "acme"})
     assert headers["x-tenant"] == "acme"
     assert headers["content-type"] == "application/json"
 
@@ -253,49 +261,62 @@ async def test_parser_round_trip() -> None:
 
 
 def test_broker_constructs_without_engine() -> None:
-    metadata = MetaData()
-    t = make_outbox_table(metadata)
-    broker = OutboxBroker(outbox_table=t)
+    broker = _make_broker()
     assert broker.config.broker_config.client is None
 
 
 def test_broker_with_engine_has_client() -> None:
-    metadata = MetaData()
-    t = make_outbox_table(metadata)
     engine = AsyncMock()
-    broker = OutboxBroker(engine, outbox_table=t)
+    broker = _make_broker(engine)
     assert broker.config.broker_config.client is not None
 
 
-async def test_broker_publish_raises() -> None:
-    metadata = MetaData()
-    t = make_outbox_table(metadata)
-    broker = OutboxBroker(outbox_table=t)
-    with pytest.raises(NotImplementedError, match="no publish API"):
-        await broker.publish(b"x")
+async def test_broker_publish_rejects_non_async_session() -> None:
+    broker = _make_broker()
+    with pytest.raises(TypeError, match="AsyncSession"):
+        await broker.publish(b"x", queue="orders", session=object())  # ty: ignore[invalid-argument-type]
+
+
+async def test_broker_publish_executes_insert_on_session() -> None:
+    from sqlalchemy.ext.asyncio import AsyncSession  # noqa: PLC0415
+
+    broker = _make_broker()
+    session = AsyncMock(spec=AsyncSession)
+    await broker.publish({"order_id": 1}, queue="orders", session=session)
+    session.execute.assert_awaited_once()
+    stmt = session.execute.await_args.args[0]
+    assert "INSERT INTO" in str(stmt)
+    params = stmt.compile().params
+    assert params["queue"] == "orders"
+    assert params["payload"] == b'{"order_id": 1}'
+    assert params["headers"]["content-type"] == "application/json"
+
+
+async def test_broker_publish_does_not_commit() -> None:
+    from sqlalchemy.ext.asyncio import AsyncSession  # noqa: PLC0415
+
+    broker = _make_broker()
+    session = AsyncMock(spec=AsyncSession)
+    await broker.publish(b"x", queue="orders", session=session)
+    session.commit.assert_not_called()
+    session.flush.assert_not_called()
 
 
 async def test_broker_request_raises() -> None:
-    metadata = MetaData()
-    t = make_outbox_table(metadata)
-    broker = OutboxBroker(outbox_table=t)
+    broker = _make_broker()
     with pytest.raises(NotImplementedError):
         await broker.request(b"x")
 
 
 async def test_broker_ping_no_client_returns_false() -> None:
-    metadata = MetaData()
-    t = make_outbox_table(metadata)
-    broker = OutboxBroker(outbox_table=t)
+    broker = _make_broker()
     assert await broker.ping() is False
 
 
 async def test_broker_ping_when_engine_query_fails() -> None:
-    metadata = MetaData()
-    t = make_outbox_table(metadata)
     engine = AsyncMock()
     engine.connect.return_value.__aenter__.side_effect = ConnectionError("nope")
-    broker = OutboxBroker(engine, outbox_table=t)
+    broker = _make_broker(engine)
     assert await broker.ping() is False
 
 
@@ -303,25 +324,19 @@ async def test_broker_ping_when_engine_query_fails() -> None:
 
 
 def test_subscriber_empty_queue_list_raises() -> None:
-    metadata = MetaData()
-    t = make_outbox_table(metadata)
-    broker = OutboxBroker(outbox_table=t)
+    broker = _make_broker()
     with pytest.raises(ValueError, match="at least one queue"):
         broker.subscriber([])
 
 
 def test_publisher_raises_not_implemented() -> None:
-    metadata = MetaData()
-    t = make_outbox_table(metadata)
-    broker = OutboxBroker(outbox_table=t)
+    broker = _make_broker()
     with pytest.raises(NotImplementedError, match="no publisher"):
         broker.publisher("orders")
 
 
 def test_duplicate_subscriber_warns() -> None:
-    metadata = MetaData()
-    t = make_outbox_table(metadata)
-    broker = OutboxBroker(outbox_table=t)
+    broker = _make_broker()
 
     @broker.subscriber("orders")
     async def first(body: dict) -> None: ...
@@ -340,12 +355,32 @@ def test_router_can_be_constructed() -> None:
 # --- broker error paths and _NoProducer stubs ---
 
 
-async def test_broker_publish_batch_raises() -> None:
-    metadata = MetaData()
-    t = make_outbox_table(metadata)
-    broker = OutboxBroker(outbox_table=t)
-    with pytest.raises(NotImplementedError, match="no publish API"):
-        await broker.publish_batch()
+async def test_broker_publish_batch_rejects_non_async_session() -> None:
+    broker = _make_broker()
+    with pytest.raises(TypeError, match="AsyncSession"):
+        await broker.publish_batch(b"x", queue="orders", session=object())  # ty: ignore[invalid-argument-type]
+
+
+async def test_broker_publish_batch_no_bodies_is_noop() -> None:
+    from sqlalchemy.ext.asyncio import AsyncSession  # noqa: PLC0415
+
+    broker = _make_broker()
+    session = AsyncMock(spec=AsyncSession)
+    await broker.publish_batch(queue="orders", session=session)
+    session.execute.assert_not_called()
+
+
+async def test_broker_publish_batch_executes_single_insert_for_many_rows() -> None:
+    from sqlalchemy.ext.asyncio import AsyncSession  # noqa: PLC0415
+
+    broker = _make_broker()
+    session = AsyncMock(spec=AsyncSession)
+    await broker.publish_batch(b"a", b"b", b"c", queue="orders", session=session)
+    session.execute.assert_awaited_once()
+    rows = session.execute.await_args.args[1]
+    assert len(rows) == 3
+    assert all(r["queue"] == "orders" for r in rows)
+    assert {r["payload"] for r in rows} == {b"a", b"b", b"c"}
 
 
 async def test_no_producer_methods_raise() -> None:

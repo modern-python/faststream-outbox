@@ -6,13 +6,13 @@ faststream-outbox
 
 `faststream-outbox` is a [FastStream](https://faststream.airt.ai) broker integration for the **transactional outbox pattern** — a Postgres table is the message queue.
 
-A producer writes a domain entity and an outbox row in the *same* SQLAlchemy transaction. A subscriber polls the table directly with `FOR UPDATE SKIP LOCKED`, runs the handler, and deletes the row on success. No downstream broker, no separate relay process — the table *is* the queue.
+A producer writes a domain entity and an outbox row in the *same* SQLAlchemy transaction by calling `broker.publish(body, queue=..., session=session)`. A subscriber polls the table directly with `FOR UPDATE SKIP LOCKED`, runs the handler, and deletes the row on success. No downstream broker, no separate relay process — the table *is* the queue.
 
 ```python
-from sqlalchemy import MetaData, insert
+from sqlalchemy import MetaData
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from faststream import FastStream
-from faststream_outbox import OutboxBroker, encode_payload, make_outbox_table
+from faststream_outbox import OutboxBroker, make_outbox_table
 
 metadata = MetaData()
 outbox_table = make_outbox_table(metadata, table_name="outbox")
@@ -25,19 +25,20 @@ app = FastStream(broker)
 async def handle(order_id: int) -> None:
     print(f"order {order_id}")
 
-# Producer side — your code, in your own transaction:
+# Producer side — share the caller's open transaction:
 session_factory = async_sessionmaker(engine, expire_on_commit=False)
 async with session_factory() as session, session.begin():
     session.add(Order(id=1))
-    payload, headers = encode_payload(1)
-    await session.execute(
-        insert(outbox_table).values(queue="orders", payload=payload, headers=headers)
-    )
+    await broker.publish(1, queue="orders", session=session)
 ```
 
 ## How it works
 
 `make_outbox_table(metadata, table_name="outbox")` returns a `sqlalchemy.Table` that you attach to your own `MetaData` and migrate via Alembic. The package does **not** own your schema; it only describes the columns it needs.
+
+`broker.publish(body, *, queue, session, headers=None, correlation_id=None)` inserts one outbox row through the caller's `AsyncSession`. It does not flush, commit, or open its own transaction — the whole point is that the row commits atomically with the caller's domain writes. Use it inside an `async with session.begin():` block.
+
+`broker.publish_batch(*bodies, queue, session, headers=None)` inserts many rows in a single round-trip with the same transactional contract.
 
 A subscriber owns three async loops:
 

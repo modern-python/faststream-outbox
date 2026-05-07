@@ -1,9 +1,9 @@
 """
 OutboxBroker — a FastStream broker whose queue is a Postgres table.
 
-There is no ``publish()``: producers insert outbox rows themselves via SQLAlchemy,
-inside their own transaction (that's what makes it "transactional"). The broker's
-job is consumer-side only: it owns subscribers that poll the table.
+Producers call ``broker.publish(body, queue=..., session=session)`` inside their
+own SQLAlchemy transaction; the row commits with their domain writes. The broker
+owns subscribers on the consumer side.
 """
 
 import logging
@@ -21,9 +21,12 @@ from faststream._internal.logger.logging import get_broker_logger
 from faststream._internal.types import BrokerMiddleware, CustomCallable
 from faststream.specification.schema import BrokerSpec
 from faststream.specification.schema.extra import Tag, TagDict
+from sqlalchemy import insert
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from faststream_outbox.client import OutboxClient
 from faststream_outbox.configs import EngineState, OutboxBrokerConfig
+from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.message import OutboxInnerMessage
 from faststream_outbox.registrator import OutboxRegistrator
 
@@ -89,6 +92,7 @@ class OutboxBroker(
         description: str | None = None,
         tags: Iterable[Tag | TagDict] = (),
     ) -> None:
+        self._outbox_table = outbox_table
         engine_state = EngineState(engine)
         client = OutboxClient(engine, outbox_table) if engine is not None else None
         fd_config = FastDependsConfig(use_fastdepends=apply_types)
@@ -159,20 +163,55 @@ class OutboxBroker(
         """Validate the user's table matches what the package expects. Opt-in."""
         await self.client.validate_schema()
 
-    async def publish(self, *args: typing.Any, **kwargs: typing.Any) -> typing.NoReturn:
-        msg = (
-            "OutboxBroker has no publish API. Insert outbox rows yourself via SQLAlchemy "
-            "inside your own transaction; use faststream_outbox.encode_payload() to "
-            "produce the (payload, headers) tuple."
-        )
-        raise NotImplementedError(msg)
+    async def publish(  # ty: ignore[invalid-method-override]
+        self,
+        body: typing.Any,
+        *,
+        queue: str,
+        session: AsyncSession,
+        headers: dict[str, str] | None = None,
+        correlation_id: str | None = None,
+    ) -> None:
+        """
+        Insert one outbox row using *session*'s open transaction.
+
+        Must be called inside a transaction the caller owns (typically inside an
+        ``async with session.begin():`` block). ``publish`` does not flush, commit,
+        or open its own transaction — that is the whole point of the transactional
+        outbox pattern: the row commits atomically with the caller's domain writes.
+        """
+        if not isinstance(session, AsyncSession):
+            msg = "broker.publish requires an sqlalchemy.ext.asyncio.AsyncSession"
+            raise TypeError(msg)
+        payload, hdrs = _encode_payload(body, headers=headers, correlation_id=correlation_id)
+        await session.execute(insert(self._outbox_table).values(queue=queue, payload=payload, headers=hdrs))
+
+    async def publish_batch(  # ty: ignore[invalid-method-override]
+        self,
+        *bodies: typing.Any,
+        queue: str,
+        session: AsyncSession,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        """
+        Insert multiple outbox rows via *session*. Same transactional contract as ``publish``.
+
+        Each row gets its own auto-generated ``correlation_id``; pass *headers* to
+        share static headers across all rows.
+        """
+        if not isinstance(session, AsyncSession):
+            msg = "broker.publish_batch requires an sqlalchemy.ext.asyncio.AsyncSession"
+            raise TypeError(msg)
+        if not bodies:
+            return
+        rows = []
+        for body in bodies:
+            payload, hdrs = _encode_payload(body, headers=headers)
+            rows.append({"queue": queue, "payload": payload, "headers": hdrs})
+        await session.execute(insert(self._outbox_table), rows)
 
     async def request(self, *args: typing.Any, **kwargs: typing.Any) -> typing.NoReturn:
         msg = "OutboxBroker does not support request-reply"
-        raise NotImplementedError(msg)
-
-    async def publish_batch(self, *args: typing.Any, **kwargs: typing.Any) -> typing.NoReturn:
-        msg = "OutboxBroker has no publish API; insert rows via SQLAlchemy"
         raise NotImplementedError(msg)
 
 

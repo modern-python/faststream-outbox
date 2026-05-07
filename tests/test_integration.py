@@ -12,10 +12,10 @@ from faststream_outbox import (
     ConstantRetry,
     OutboxBroker,
     OutboxState,
-    encode_payload,
     make_outbox_table,
 )
 from faststream_outbox.client import OutboxClient
+from faststream_outbox.envelope import _encode_payload as encode_payload
 
 
 pytestmark = pytest.mark.asyncio
@@ -242,3 +242,52 @@ async def test_validate_schema_fails_when_columns_missing(pg_engine, outbox_tabl
     client = OutboxClient(pg_engine, outbox_table)
     with pytest.raises(RuntimeError, match="missing columns"):
         await client.validate_schema()
+
+
+async def test_publish_inserts_in_caller_transaction(pg_engine, outbox_table) -> None:
+    """``broker.publish`` must commit with the caller's transaction, not before."""
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+
+    async with session_factory() as session:
+        async with session.begin():
+            await broker.publish({"order_id": 42}, queue="orders", session=session)
+            # Mid-transaction: a separate connection must not see the row.
+            count_during = await _row_count(pg_engine, outbox_table)
+            assert count_during == 0
+        # After commit (exited session.begin()): the row is visible.
+        count_after = await _row_count(pg_engine, outbox_table)
+        assert count_after == 1
+
+
+async def test_publish_payload_is_decodable_by_subscriber(pg_engine, outbox_table) -> None:
+    received: list[dict] = []
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+
+    @broker.subscriber("orders", min_fetch_interval=0.05, max_fetch_interval=0.5)
+    async def handle(body: dict) -> None:
+        received.append(body)
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with broker:
+        async with session_factory() as session, session.begin():
+            await broker.publish({"order_id": 7}, queue="orders", session=session)
+        await _wait_until(lambda: received, timeout=5.0)
+
+    assert received == [{"order_id": 7}]
+
+
+async def test_publish_batch_inserts_all_rows(pg_engine, outbox_table) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+
+    async with session_factory() as session, session.begin():
+        await broker.publish_batch(
+            {"id": 1},
+            {"id": 2},
+            {"id": 3},
+            queue="orders",
+            session=session,
+        )
+
+    assert await _row_count(pg_engine, outbox_table) == 3

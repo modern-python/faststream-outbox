@@ -1,5 +1,4 @@
 from faststream_outbox.broker import OutboxBroker
-from faststream_outbox.envelope import encode_payload
 from faststream_outbox.retry import (
     ConstantRetry,
     ExponentialRetry,
@@ -22,6 +21,5 @@ __all__ = [
     "OutboxState",
     "RetryStrategyProto",
     "TestOutboxBroker",
-    "encode_payload",
     "make_outbox_table",
 ]
