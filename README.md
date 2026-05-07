@@ -122,7 +122,7 @@ class TransientOnly(ExponentialRetry):
 
 - **Handlers must be idempotent.** Crash between commit-of-handler-side-effects and the broker's `DELETE` re-delivers the message.
 - **Best-effort ordering only.** `FOR UPDATE SKIP LOCKED` does not preserve strict order under concurrent workers. If you need strict per-aggregate ordering, route to a single subscriber and run a single worker.
-- **No DLQ / archive.** Terminal failures `DELETE` the row. Hook `on_terminal_failure(row)` to capture them in your own table or alerting.
+- **No DLQ / archive.** Terminal failures `DELETE` the row.
 
 ## Connection ownership
 
