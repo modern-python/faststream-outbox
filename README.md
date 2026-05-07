@@ -49,17 +49,6 @@ The `acquired_token` is critical: a slow handler whose lease expired and was re-
 
 `lease_ttl_seconds` (default `60.0`) **must exceed your handler's P99 duration with margin** — otherwise healthy in-flight handlers race their own lease expiry and the row gets re-claimed by another worker, triggering a duplicate delivery.
 
-## Index
-
-`make_outbox_table` declares the partial index that the fetch query relies on:
-
-```sql
-CREATE INDEX outbox_pending_idx ON outbox (queue, next_attempt_at)
-  WHERE acquired_token IS NULL;
-```
-
-Alembic autogenerate picks it up alongside the table — no separate migration step needed. Lease-expired rows fall back to a sequential scan when the fetch query reclaims them, which is fine because expired leases are rare.
-
 ## Schema validation
 
 Schema validation is opt-in:
