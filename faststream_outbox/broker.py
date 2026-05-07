@@ -6,6 +6,7 @@ own SQLAlchemy transaction; the row commits with their domain writes. The broker
 owns subscribers on the consumer side.
 """
 
+import datetime as _dt
 import logging
 import typing
 from collections.abc import Iterable, Sequence
@@ -22,7 +23,8 @@ from faststream._internal.logger.logging import get_broker_logger
 from faststream._internal.types import BrokerMiddleware, CustomCallable
 from faststream.specification.schema import BrokerSpec
 from faststream.specification.schema.extra import Tag, TagDict
-from sqlalchemy import insert, text
+from sqlalchemy import Float, bindparam, delete, func, insert, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from faststream_outbox.client import OutboxClient
@@ -186,7 +188,7 @@ class OutboxBroker(
         """Validate the user's table matches what the package expects. Opt-in."""
         await self.client.validate_schema()
 
-    async def publish(  # ty: ignore[invalid-method-override]
+    async def publish(  # ty: ignore[invalid-method-override]  # noqa: PLR0913
         self,
         body: typing.Any,
         *,
@@ -194,7 +196,10 @@ class OutboxBroker(
         session: AsyncSession,
         headers: dict[str, str] | None = None,
         correlation_id: str | None = None,
-    ) -> None:
+        activate_in: _dt.timedelta | None = None,
+        activate_at: _dt.datetime | None = None,
+        timer_id: str | None = None,
+    ) -> int | None:
         """
         Insert one outbox row using *session*'s open transaction.
 
@@ -202,13 +207,56 @@ class OutboxBroker(
         ``async with session.begin():`` block). ``publish`` does not flush, commit,
         or open its own transaction — that is the whole point of the transactional
         outbox pattern: the row commits atomically with the caller's domain writes.
+
+        Schedule a delayed delivery by passing exactly one of *activate_in* (relative)
+        or *activate_at* (absolute, tz-aware). Pass *timer_id* to deduplicate per
+        ``(queue, timer_id)`` — re-publishing with the same id is a no-op (returns
+        ``None``). Cancel a not-yet-leased timer with :meth:`cancel_timer`.
+
+        Returns the inserted row's ``id`` (BigInt PK), or ``None`` if a timer with
+        the same ``(queue, timer_id)`` already exists.
         """
         if not isinstance(session, AsyncSession):
             msg = "broker.publish requires an sqlalchemy.ext.asyncio.AsyncSession"
             raise TypeError(msg)
+        if activate_in is not None and activate_at is not None:
+            msg = "broker.publish accepts at most one of activate_in / activate_at"
+            raise ValueError(msg)
         payload, hdrs = _encode_payload(body, headers=headers, correlation_id=correlation_id)
-        await session.execute(insert(self._outbox_table).values(queue=queue, payload=payload, headers=hdrs))
-        await self._notify(session, queue)
+        t = self._outbox_table
+        values: dict[str, typing.Any] = {"queue": queue, "payload": payload, "headers": hdrs}
+        # Server-side compute keeps timing immune to worker/DB clock skew (mirrors
+        # client.mark_pending_with_lease).
+        if activate_in is not None:
+            values["next_attempt_at"] = func.now() + func.make_interval(
+                0, 0, 0, 0, 0, 0, bindparam("activate_in_seconds", activate_in.total_seconds(), type_=Float)
+            )
+        elif activate_at is not None:
+            values["next_attempt_at"] = activate_at
+        if timer_id is not None:
+            values["timer_id"] = timer_id
+        is_future = activate_in is not None or activate_at is not None
+
+        if timer_id is not None:
+            stmt = (
+                pg_insert(t)
+                .values(**values)
+                .on_conflict_do_nothing(
+                    index_elements=[t.c.queue, t.c.timer_id],
+                    index_where=t.c.timer_id.is_not(None),
+                )
+                .returning(t.c.id)
+            )
+        else:
+            stmt = insert(t).values(**values).returning(t.c.id)
+
+        result = await session.execute(stmt)
+        row_id: int | None = result.scalar()
+        # Skip NOTIFY for future-dated rows (listeners can't act before the gate
+        # opens — polling fires them at next tick) and on conflict (no row landed).
+        if row_id is not None and not is_future:
+            await self._notify(session, queue)
+        return row_id
 
     async def publish_batch(  # ty: ignore[invalid-method-override]
         self,
@@ -216,24 +264,70 @@ class OutboxBroker(
         queue: str,
         session: AsyncSession,
         headers: dict[str, str] | None = None,
+        activate_in: _dt.timedelta | None = None,
+        activate_at: _dt.datetime | None = None,
     ) -> None:
         """
         Insert multiple outbox rows via *session*. Same transactional contract as ``publish``.
 
         Each row gets its own auto-generated ``correlation_id``; pass *headers* to
-        share static headers across all rows.
+        share static headers across all rows. *activate_in* / *activate_at* schedule
+        every row in the batch identically — per-row timer dedup is not supported,
+        use :meth:`publish` for that.
         """
         if not isinstance(session, AsyncSession):
             msg = "broker.publish_batch requires an sqlalchemy.ext.asyncio.AsyncSession"
             raise TypeError(msg)
+        if activate_in is not None and activate_at is not None:
+            msg = "broker.publish_batch accepts at most one of activate_in / activate_at"
+            raise ValueError(msg)
         if not bodies:
             return
+        # Client-side time for batch: executemany doesn't compose with column-level
+        # SQL expressions easily, and a few-ms drift versus the DB is harmless for
+        # user-supplied scheduling. (Retries still use server time via mark_pending_with_lease.)
+        next_at: _dt.datetime | None = None
+        if activate_in is not None:
+            next_at = _dt.datetime.now(tz=_dt.UTC) + activate_in
+        elif activate_at is not None:
+            next_at = activate_at
         rows = []
         for body in bodies:
             payload, hdrs = _encode_payload(body, headers=headers)
-            rows.append({"queue": queue, "payload": payload, "headers": hdrs})
+            row: dict[str, typing.Any] = {"queue": queue, "payload": payload, "headers": hdrs}
+            if next_at is not None:
+                row["next_attempt_at"] = next_at
+            rows.append(row)
         await session.execute(insert(self._outbox_table), rows)
-        await self._notify(session, queue)
+        if next_at is None:
+            await self._notify(session, queue)
+
+    async def cancel_timer(
+        self,
+        *,
+        queue: str,
+        timer_id: str,
+        session: AsyncSession,
+    ) -> bool:
+        """
+        Delete a not-yet-leased timer row. Returns True if a row was deleted.
+
+        Same transactional contract as :meth:`publish` — runs on the caller's session
+        and commits with their transaction. The ``acquired_token IS NULL`` guard
+        prevents canceling a row whose handler is already in flight: that returns
+        False and the delivery completes normally.
+        """
+        if not isinstance(session, AsyncSession):
+            msg = "broker.cancel_timer requires an sqlalchemy.ext.asyncio.AsyncSession"
+            raise TypeError(msg)
+        t = self._outbox_table
+        stmt = delete(t).where(
+            t.c.queue == queue,
+            t.c.timer_id == timer_id,
+            t.c.acquired_token.is_(None),
+        )
+        result = await session.execute(stmt)
+        return (result.rowcount or 0) > 0  # ty: ignore[unresolved-attribute]
 
     async def _notify(self, session: AsyncSession, queue: str) -> None:
         """

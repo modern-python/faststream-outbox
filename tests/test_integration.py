@@ -365,6 +365,208 @@ async def test_fetch_uses_persistent_connection(pg_engine, outbox_table) -> None
     assert len(set(fetch_pids)) == 1, f"persistent connection should hold one pid, saw {set(fetch_pids)}"
 
 
+async def test_publish_with_activate_in_delays_delivery(pg_engine, outbox_table) -> None:
+    """Handler must not see the message until activate_in elapses."""
+    received: list[dict] = []
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+
+    @broker.subscriber("orders", min_fetch_interval=0.05, max_fetch_interval=0.2)
+    async def handle(body: dict) -> None:
+        received.append(body)
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with broker:
+        async with session_factory() as session, session.begin():
+            await broker.publish(
+                {"order_id": 1},
+                queue="orders",
+                session=session,
+                activate_in=_dt.timedelta(milliseconds=500),
+            )
+        # Before the gate opens: nothing delivered.
+        await asyncio.sleep(0.2)
+        assert received == []
+        # After the gate opens: delivered.
+        await _wait_until(lambda: received, timeout=3.0)
+    assert received == [{"order_id": 1}]
+
+
+async def test_publish_with_activate_at_delays_delivery(pg_engine, outbox_table) -> None:
+    received: list[dict] = []
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+
+    @broker.subscriber("orders", min_fetch_interval=0.05, max_fetch_interval=0.2)
+    async def handle(body: dict) -> None:
+        received.append(body)
+
+    fire_at = _dt.datetime.now(tz=_dt.UTC) + _dt.timedelta(milliseconds=500)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with broker:
+        async with session_factory() as session, session.begin():
+            await broker.publish(
+                {"order_id": 2},
+                queue="orders",
+                session=session,
+                activate_at=fire_at,
+            )
+        await asyncio.sleep(0.2)
+        assert received == []
+        await _wait_until(lambda: received, timeout=3.0)
+    assert received == [{"order_id": 2}]
+
+
+async def test_publish_rejects_activate_in_and_at_together(pg_engine, outbox_table) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with session_factory() as session, session.begin():
+        with pytest.raises(ValueError, match="activate_in / activate_at"):
+            await broker.publish(
+                {"x": 1},
+                queue="orders",
+                session=session,
+                activate_in=_dt.timedelta(seconds=1),
+                activate_at=_dt.datetime.now(tz=_dt.UTC),
+            )
+
+
+async def test_publish_with_timer_id_dedups(pg_engine, outbox_table) -> None:
+    """Re-publishing the same (queue, timer_id) is a no-op — handler invoked exactly once."""
+    received: list[dict] = []
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+
+    @broker.subscriber("orders", min_fetch_interval=0.05, max_fetch_interval=0.2)
+    async def handle(body: dict) -> None:
+        received.append(body)
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with broker:
+        async with session_factory() as session, session.begin():
+            first_id = await broker.publish(
+                {"v": 1},
+                queue="orders",
+                session=session,
+                timer_id="email-1",
+            )
+        async with session_factory() as session, session.begin():
+            second_id = await broker.publish(
+                {"v": 2},
+                queue="orders",
+                session=session,
+                timer_id="email-1",
+            )
+        await _wait_until(lambda: received, timeout=3.0)
+
+    assert first_id is not None
+    assert second_id is None  # second insert was a no-op
+    assert received == [{"v": 1}]  # second body was never delivered
+
+
+async def test_publish_timer_id_distinct_queues_are_independent(pg_engine, outbox_table) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with session_factory() as session, session.begin():
+        a = await broker.publish({"x": 1}, queue="q1", session=session, timer_id="dup")
+        b = await broker.publish({"x": 2}, queue="q2", session=session, timer_id="dup")
+    assert a is not None
+    assert b is not None
+    assert await _row_count(pg_engine, outbox_table) == 2
+
+
+async def test_cancel_timer_before_fire_prevents_delivery(pg_engine, outbox_table) -> None:
+    received: list[dict] = []
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+
+    @broker.subscriber("orders", min_fetch_interval=0.05, max_fetch_interval=0.2)
+    async def handle(body: dict) -> None:
+        received.append(body)  # pragma: no cover  # cancellation must prevent this
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with broker:
+        async with session_factory() as session, session.begin():
+            await broker.publish(
+                {"order_id": 9},
+                queue="orders",
+                session=session,
+                activate_in=_dt.timedelta(seconds=1),
+                timer_id="email-cancel",
+            )
+        # Cancel before activate_in elapses.
+        async with session_factory() as session, session.begin():
+            cancelled = await broker.cancel_timer(queue="orders", timer_id="email-cancel", session=session)
+        assert cancelled is True
+        # Wait past the original fire time — handler must never see the row.
+        await asyncio.sleep(1.5)
+    assert received == []
+    assert await _row_count(pg_engine, outbox_table) == 0
+
+
+async def test_cancel_timer_after_lease_taken_returns_false(pg_engine, outbox_table) -> None:
+    """If the row's already in flight, cancel is a no-op and delivery completes."""
+    received: list[dict] = []
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    handler_started = asyncio.Event()
+    release_handler = asyncio.Event()
+
+    @broker.subscriber("orders", min_fetch_interval=0.01, max_fetch_interval=0.05)
+    async def handle(body: dict) -> None:
+        handler_started.set()
+        await release_handler.wait()
+        received.append(body)
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with broker:
+        async with session_factory() as session, session.begin():
+            await broker.publish(
+                {"v": "in-flight"},
+                queue="orders",
+                session=session,
+                timer_id="cant-cancel",
+            )
+        # Wait for the handler to enter; the row is now leased.
+        await asyncio.wait_for(handler_started.wait(), timeout=3.0)
+        async with session_factory() as session, session.begin():
+            cancelled = await broker.cancel_timer(queue="orders", timer_id="cant-cancel", session=session)
+        assert cancelled is False  # lease guard prevented the DELETE
+        release_handler.set()
+        await _wait_until(lambda: received, timeout=3.0)
+    assert received == [{"v": "in-flight"}]
+
+
+async def test_cancel_timer_unknown_returns_false(pg_engine, outbox_table) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with session_factory() as session, session.begin():
+        cancelled = await broker.cancel_timer(queue="orders", timer_id="nope", session=session)
+    assert cancelled is False
+
+
+async def test_publish_returns_inserted_row_id(pg_engine, outbox_table) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with session_factory() as session, session.begin():
+        row_id = await broker.publish({"x": 1}, queue="orders", session=session)
+    assert isinstance(row_id, int)
+    assert row_id > 0
+
+
+async def test_publish_batch_with_activate_in_delays_all_rows(pg_engine, outbox_table) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with session_factory() as session, session.begin():
+        await broker.publish_batch(
+            {"i": 1},
+            {"i": 2},
+            {"i": 3},
+            queue="orders",
+            session=session,
+            activate_in=_dt.timedelta(minutes=10),  # well past any test horizon
+        )
+    # Rows are inserted but invisible to fetch (next_attempt_at in the future).
+    assert await _row_count(pg_engine, outbox_table) == 3
+    client = OutboxClient(pg_engine, outbox_table)
+    assert await client.fetch(["orders"], limit=10, lease_ttl_seconds=60.0) == []
+
+
 async def test_notify_payload_carries_queue_name(pg_engine, outbox_table) -> None:
     """The NOTIFY payload Postgres delivers to LISTEN clients must equal the queue name."""
     received_payloads: list[str] = []

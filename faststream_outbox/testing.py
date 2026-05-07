@@ -43,6 +43,7 @@ class _FakeRow:
     last_attempt_at: _dt.datetime | None = None
     acquired_at: _dt.datetime | None = None
     acquired_token: uuid.UUID | None = None
+    timer_id: str | None = None
 
 
 class FakeOutboxClient:
@@ -59,13 +60,19 @@ class FakeOutboxClient:
         payload: bytes,
         headers: dict[str, str] | None = None,
         next_attempt_at: _dt.datetime | None = None,
-    ) -> int:
+        timer_id: str | None = None,
+    ) -> int | None:
+        # Mirror the real client's partial-unique-on-(queue, timer_id) behavior:
+        # re-feeding a timer that already exists is a no-op.
+        if timer_id is not None and any(r.queue == queue and r.timer_id == timer_id for r in self._rows):
+            return None
         row = _FakeRow(
             id=self._next_id,
             queue=queue,
             payload=payload,
             headers=headers,
             next_attempt_at=next_attempt_at or _utcnow(),
+            timer_id=timer_id,
         )
         self._rows.append(row)
         self._next_id += 1
@@ -153,6 +160,14 @@ class FakeOutboxClient:
                 return True
         return False
 
+    async def cancel_timer(self, *, queue: str, timer_id: str) -> bool:
+        """Mirror :meth:`OutboxBroker.cancel_timer` — drop a not-yet-leased timer row."""
+        for i, row in enumerate(self._rows):
+            if row.queue == queue and row.timer_id == timer_id and row.acquired_token is None:
+                del self._rows[i]
+                return True
+        return False
+
     async def validate_schema(self) -> None:
         return
 
@@ -193,13 +208,15 @@ class TestOutboxBroker(TestBroker[OutboxBroker]):  # ty: ignore[invalid-type-arg
         *,
         headers: dict[str, str] | None = None,
         next_attempt_at: _dt.datetime | None = None,
-    ) -> int:
-        """Insert a row directly into the in-memory store. Returns the row id."""
+        timer_id: str | None = None,
+    ) -> int | None:
+        """Insert a row directly into the in-memory store. Returns the row id, or None on timer_id conflict."""
         return self.fake_client.feed(
             queue=queue,
             payload=payload,
             headers=headers,
             next_attempt_at=next_attempt_at,
+            timer_id=timer_id,
         )
 
     @contextmanager

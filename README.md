@@ -36,9 +36,9 @@ async with session_factory() as session, session.begin():
 
 `make_outbox_table(metadata, table_name="outbox")` returns a `sqlalchemy.Table` that you attach to your own `MetaData` and migrate via Alembic. The package does **not** own your schema; it only describes the columns it needs.
 
-`broker.publish(body, *, queue, session, headers=None, correlation_id=None)` inserts one outbox row through the caller's `AsyncSession`. It does not flush, commit, or open its own transaction — the whole point is that the row commits atomically with the caller's domain writes. Use it inside an `async with session.begin():` block.
+`broker.publish(body, *, queue, session, headers=None, correlation_id=None, activate_in=None, activate_at=None, timer_id=None)` inserts one outbox row through the caller's `AsyncSession`. It does not flush, commit, or open its own transaction — the whole point is that the row commits atomically with the caller's domain writes. Use it inside an `async with session.begin():` block. See [Timers](#timers-delayed-delivery) for `activate_in` / `activate_at` / `timer_id`.
 
-`broker.publish_batch(*bodies, queue, session, headers=None)` inserts many rows in a single round-trip with the same transactional contract.
+`broker.publish_batch(*bodies, queue, session, headers=None, activate_in=None, activate_at=None)` inserts many rows in a single round-trip with the same transactional contract.
 
 A subscriber owns two async loops:
 
@@ -48,6 +48,40 @@ A subscriber owns two async loops:
 The `acquired_token` is critical: a slow handler whose lease expired and was re-claimed by another worker will find its terminal `DELETE`/`UPDATE` to be a no-op (the token no longer matches), preventing it from clobbering the new lease holder's row.
 
 `lease_ttl_seconds` (default `60.0`) **must exceed your handler's P99 duration with margin** — otherwise healthy in-flight handlers race their own lease expiry and the row gets re-claimed by another worker, triggering a duplicate delivery.
+
+## Timers (delayed delivery)
+
+Schedule a publish to fire later by passing `activate_in` (relative) or `activate_at` (absolute, tz-aware) — exactly one. Pass `timer_id` to deduplicate per `(queue, timer_id)`; cancel a not-yet-leased timer with `broker.cancel_timer(...)`.
+
+```python
+import datetime as dt
+
+# Fire 30 seconds from now, deduplicated by timer_id:
+await broker.publish(
+    {"order_id": 1},
+    queue="orders",
+    session=session,
+    activate_in=dt.timedelta(seconds=30),
+    timer_id=f"order-confirm-{order.id}",
+)
+
+# Fire at a specific UTC instant:
+await broker.publish(
+    {"x": 1}, queue="orders", session=session,
+    activate_at=dt.datetime(2026, 6, 1, 9, tzinfo=dt.UTC),
+)
+
+# Cancel before it fires (no-op if the row is already in flight):
+await broker.cancel_timer(queue="orders", timer_id="order-confirm-42", session=session)
+```
+
+`publish` returns the inserted row's `id`, or `None` if a row with the same `(queue, timer_id)` already exists. `cancel_timer` returns `True` if it deleted the row; `False` means either the timer didn't exist or was already leased to a worker (in which case delivery completes normally).
+
+`publish_batch` accepts `activate_in` / `activate_at` to schedule every row in the batch identically — but no `timer_id` (per-row dedup makes no sense for a batch).
+
+**Latency floor:** firing latency is bounded by the subscriber's `max_fetch_interval` (default 10s) after `next_attempt_at` elapses. Lower it for sub-10s precision; sub-second precision is not a goal of this broker.
+
+**Migration note:** existing deployments must regenerate Alembic migrations after upgrading — the new `timer_id` column and `<table>_timer_id_uq` partial unique index need to land in the database before publish-with-`timer_id` works.
 
 ## Schema validation
 
