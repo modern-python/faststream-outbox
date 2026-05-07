@@ -15,7 +15,7 @@ from faststream_outbox import (
     make_outbox_table,
 )
 from faststream_outbox.envelope import _encode_payload as encode_payload
-from faststream_outbox.testing import _FakeRow
+from faststream_outbox.testing import FakeOutboxClient, _FakeRow
 
 
 def _make_broker() -> OutboxBroker:
@@ -580,3 +580,14 @@ async def test_router_subscriber_receives_plain_queue_publish() -> None:
         await _wait_until(lambda: received, timeout=3.0)
 
     assert received == ["via-router"]
+
+
+async def test_fake_client_fetch_with_conn_mirrors_fetch() -> None:
+    fake = FakeOutboxClient()
+    fake.feed(queue="q", payload=b"x")
+
+    rows = await fake.fetch_with_conn(None, ["q"], limit=10, lease_ttl_seconds=60.0)
+
+    assert len(rows) == 1
+    assert rows[0].queue == "q"
+    assert rows[0].payload == b"x"

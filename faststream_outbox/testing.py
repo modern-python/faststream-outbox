@@ -79,6 +79,22 @@ class FakeOutboxClient:
     def table(self) -> typing.Any:
         return None
 
+    @property
+    def engine(self) -> None:
+        """No real engine — signals the subscriber loop to use the polling-only path."""
+        return None
+
+    async def fetch_with_conn(
+        self,
+        conn: typing.Any,  # noqa: ARG002
+        queues: "Sequence[str]",
+        *,
+        limit: int,
+        lease_ttl_seconds: float,
+    ) -> list[OutboxInnerMessage]:
+        """Mirror :meth:`OutboxClient.fetch_with_conn`; *conn* is ignored by the fake."""
+        return await self.fetch(queues, limit=limit, lease_ttl_seconds=lease_ttl_seconds)
+
     async def fetch(
         self,
         queues: "Sequence[str]",
