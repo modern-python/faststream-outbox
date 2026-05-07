@@ -52,8 +52,9 @@ class OutboxClient:
         self._engine = engine
         self._table = outbox_table
         # Stable advisory-lock key derived from the table name; ``hashtext`` returns int4.
-        self._advisory_lock_sql = text(
-            f"SELECT pg_try_advisory_xact_lock(hashtext('faststream_outbox:{outbox_table.name}'))"
+        # Parameterized to keep the table name out of SQL string interpolation.
+        self._advisory_lock_sql = text("SELECT pg_try_advisory_xact_lock(hashtext(:lock_key))").bindparams(
+            lock_key=f"faststream_outbox:{outbox_table.name}"
         )
 
     @property

@@ -15,6 +15,7 @@ from faststream_outbox import (
     OutboxState,
     make_outbox_table,
 )
+from faststream_outbox.client import OutboxClient
 from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.message import OutboxInnerMessage, OutboxMessage
 from faststream_outbox.parser.parser import OutboxParser
@@ -523,6 +524,20 @@ async def test_client_fetch_empty_queues_returns_empty() -> None:
     t = make_outbox_table(metadata)
     client = OutboxClient(AsyncMock(), t)
     assert await client.fetch([], limit=10) == []
+
+
+def test_advisory_lock_sql_parameterizes_table_name() -> None:
+    """Table name must be a bound parameter, never interpolated as SQL literal."""
+    metadata = MetaData()
+    hostile = "x'); DROP TABLE x; --"
+    t = make_outbox_table(metadata, table_name=hostile)
+    client = OutboxClient(AsyncMock(), t)
+
+    compiled = client._advisory_lock_sql.compile()  # noqa: SLF001
+    # Table name must NOT appear in the SQL string itself...
+    assert hostile not in str(compiled)
+    # ...but must appear as a bound param value.
+    assert any(hostile in str(v) for v in compiled.params.values())
 
 
 # --- OutboxMessage.reject + assert_state_set logger branch ---
