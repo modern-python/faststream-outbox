@@ -27,16 +27,17 @@ async def pg_engine() -> AsyncIterator[AsyncEngine]:
 
 @pytest.fixture
 async def outbox_table(pg_engine: AsyncEngine) -> AsyncIterator[Table]:
-    """Per-test outbox table with a unique name + the recommended partial index."""
+    """
+    Per-test outbox table.
+
+    The partial fetch index is declared on the Table itself, so ``create_all``
+    brings it up alongside the table.
+    """
     metadata = MetaData()
     table_name = f"test_outbox_{uuid.uuid4().hex[:12]}"
     table = make_outbox_table(metadata, table_name=table_name)
     async with pg_engine.begin() as conn:
         await conn.run_sync(metadata.create_all)
-        await conn.exec_driver_sql(
-            f'CREATE INDEX "{table_name}_pending_idx" ON "{table_name}" '
-            f"(queue, next_attempt_at) WHERE acquired_token IS NULL"
-        )
     yield table
     async with pg_engine.begin() as conn:
         await conn.run_sync(metadata.drop_all)
