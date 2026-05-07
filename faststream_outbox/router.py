@@ -62,11 +62,17 @@ class OutboxRoute(SubscriberRoute):
 
 
 class OutboxRouter(OutboxRegistrator, BrokerRouter[OutboxInnerMessage, BrokerConfig]):
-    """Includable router for ``OutboxBroker``."""
+    """
+    Includable router for ``OutboxBroker``.
+
+    Use it to register subscribers in a separate module and attach them to the
+    broker via ``broker.include_router(router)``. There is no ``prefix`` knob:
+    queues are routed by their literal name, so producers and consumers must
+    agree on the exact string. If you want namespacing, put it in the queue name.
+    """
 
     def __init__(  # noqa: PLR0913
         self,
-        prefix: str = "",
         handlers: Iterable[OutboxRoute] = (),
         *,
         dependencies: Iterable["Dependant"] = (),
@@ -83,7 +89,6 @@ class OutboxRouter(OutboxRegistrator, BrokerRouter[OutboxInnerMessage, BrokerCon
                 broker_parser=parser,
                 broker_decoder=decoder,
                 include_in_schema=include_in_schema,
-                prefix=prefix,
             ),
             handlers=handlers,  # ty: ignore[unknown-argument]
             routers=routers,

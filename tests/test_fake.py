@@ -8,6 +8,7 @@ from sqlalchemy import MetaData
 from faststream_outbox import (
     ConstantRetry,
     OutboxBroker,
+    OutboxRouter,
     RetryStrategyProto,
     TestOutboxBroker,
     make_outbox_table,
@@ -634,3 +635,25 @@ async def test_retry_strategy_can_branch_on_exception_type() -> None:
         await _wait_until(lambda: not test_broker.fake_client.rows, timeout=5.0)
 
     assert len(attempts) == 2  # transient retried once, then permanent terminated
+
+
+async def test_router_subscriber_receives_plain_queue_publish() -> None:
+    """A subscriber registered via OutboxRouter must receive rows whose queue matches literally."""
+    received: list[str] = []
+
+    router = OutboxRouter()
+
+    @router.subscriber("orders", min_fetch_interval=0.01, max_fetch_interval=0.05)
+    async def handle(body: str) -> None:
+        received.append(body)
+
+    broker = _make_broker()
+    broker.include_router(router)
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        p, h = encode_payload("via-router")
+        test_broker.feed("orders", p, headers=h)
+        await _wait_until(lambda: received, timeout=3.0)
+
+    assert received == ["via-router"]

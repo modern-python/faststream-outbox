@@ -46,9 +46,8 @@ if typing.TYPE_CHECKING:
 class OutboxSubscriberSpecification(SubscriberSpecification["OutboxBrokerConfig", OutboxSubscriberSpecificationConfig]):
     @property
     def name(self) -> str:
-        prefix = getattr(self._outer_config, "prefix", "")
         joined = ",".join(self.config.queues)
-        return f"{prefix}{joined}:{self.call_name}"
+        return f"{joined}:{self.call_name}"
 
     def get_schema(self) -> dict[str, SubscriberSpec]:
         return {
@@ -94,7 +93,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
 
     @property
     def _queues(self) -> list[str]:
-        return self._config.full_queues
+        return self._config.queues
 
     @typing.override
     async def start(self) -> None:

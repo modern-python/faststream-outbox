@@ -27,11 +27,6 @@ class OutboxSubscriberConfig(SubscriberUsecaseConfig):
     max_deliveries: int | None
 
     @property
-    def full_queues(self) -> list[str]:
-        prefix = self._outer_config.prefix or ""
-        return [f"{prefix}{q}" for q in self.queues]
-
-    @property
     def time_source(self) -> Callable[[], _dt.datetime]:
         return self._outer_config.time_source
 

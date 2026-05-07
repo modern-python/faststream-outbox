@@ -348,7 +348,7 @@ def test_duplicate_subscriber_warns() -> None:
 
 
 def test_router_can_be_constructed() -> None:
-    router = OutboxRouter(prefix="svc-")
+    router = OutboxRouter()
     assert router is not None
 
 
@@ -585,7 +585,7 @@ def test_subscriber_config_time_source_property() -> None:
     assert callable(sub._config.time_source)  # noqa: SLF001
 
 
-def test_subscriber_specification_name_with_prefix() -> None:
+def test_subscriber_specification_name_lists_queues() -> None:
     metadata = MetaData()
     t = make_outbox_table(metadata)
     broker = OutboxBroker(outbox_table=t)
