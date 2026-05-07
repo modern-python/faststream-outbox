@@ -207,7 +207,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             else:
                 if released:
                     self._log(
-                        log_level=logging.WARNING,
+                        log_level=logging.INFO,
                         message=f"release_stuck reset {released} stale rows back to pending",
                     )
             await anyio.sleep(interval)
