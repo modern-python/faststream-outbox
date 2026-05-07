@@ -6,15 +6,17 @@ The package does not own the schema. Users attach the returned ``Table`` to thei
 index (create it in your migration alongside the table)::
 
     CREATE INDEX outbox_pending_idx ON outbox (queue, next_attempt_at)
-      WHERE state = 'pending';
+      WHERE acquired_token IS NULL;
+
+A row is "available" iff its lease is unset (``acquired_token IS NULL``) or its lease
+is expired (``acquired_at < now() - lease_ttl_seconds``). The fetch query reclaims
+both cases inline; there is no separate state column or background reaper.
 """
 
-import enum
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     BigInteger,
-    CheckConstraint,
     Column,
     DateTime,
     Index,
@@ -31,25 +33,6 @@ if TYPE_CHECKING:
     from sqlalchemy import MetaData
 
 
-class OutboxState(enum.StrEnum):
-    """
-    Outbox row lifecycle.
-
-    User-inserted rows start as ``PENDING``. The fetch loop atomically claims them
-    via ``FOR UPDATE SKIP LOCKED``, flipping to ``PROCESSING``. After the handler
-    returns, the row is either ``DELETE``d (ack/reject/terminal nack) or returned
-    to ``PENDING`` with an updated ``next_attempt_at`` (retryable nack).
-    """
-
-    PENDING = "pending"
-    PROCESSING = "processing"
-
-
-# Allowed values for the state column. Stored as VARCHAR(16) with a CHECK constraint
-# rather than a native PG enum so adding states later is a non-breaking migration.
-_STATE_VALUES = tuple(s.value for s in OutboxState)
-
-
 def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table:
     """
     Build the outbox ``Table`` and attach it to *metadata*.
@@ -60,7 +43,6 @@ def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table
     The recommended composite partial index for fetch performance is documented in the
     module docstring above; create it explicitly in your migration.
     """
-    state_check = "state IN (" + ", ".join(f"'{v}'" for v in _STATE_VALUES) + ")"
     return Table(
         table_name,
         metadata,
@@ -68,13 +50,6 @@ def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table
         Column("queue", String(255), nullable=False, index=True),
         Column("payload", LargeBinary, nullable=False),
         Column("headers", JSONB, nullable=True),
-        Column(
-            "state",
-            String(16),
-            CheckConstraint(state_check, name=f"{table_name}_state_check"),
-            nullable=False,
-            server_default=OutboxState.PENDING.value,
-        ),
         Column("attempts_count", BigInteger, nullable=False, server_default="0"),
         Column("deliveries_count", BigInteger, nullable=False, server_default="0"),
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),

@@ -12,7 +12,6 @@ from faststream_outbox import (
     NoRetry,
     OutboxBroker,
     OutboxRouter,
-    OutboxState,
     make_outbox_table,
 )
 from faststream_outbox.client import OutboxClient
@@ -40,7 +39,6 @@ def test_make_outbox_table_columns_present() -> None:
         "queue",
         "payload",
         "headers",
-        "state",
         "attempts_count",
         "deliveries_count",
         "created_at",
@@ -168,7 +166,6 @@ def _make_msg(**overrides: object) -> OutboxInnerMessage:
         "queue": "q",
         "payload": b"p",
         "headers": None,
-        "state": OutboxState.PROCESSING,
         "attempts_count": 0,
         "deliveries_count": 1,
         "created_at": _dt.datetime.now(tz=_dt.UTC),
@@ -508,7 +505,6 @@ def test_outbox_router_config_engine_state_raises() -> None:
 
 
 def test_client_table_property() -> None:
-    from faststream_outbox.client import OutboxClient  # noqa: PLC0415
 
     metadata = MetaData()
     t = make_outbox_table(metadata)
@@ -517,26 +513,11 @@ def test_client_table_property() -> None:
 
 
 async def test_client_fetch_empty_queues_returns_empty() -> None:
-    from faststream_outbox.client import OutboxClient  # noqa: PLC0415
 
     metadata = MetaData()
     t = make_outbox_table(metadata)
     client = OutboxClient(AsyncMock(), t)
-    assert await client.fetch([], limit=10) == []
-
-
-def test_advisory_lock_sql_parameterizes_table_name() -> None:
-    """Table name must be a bound parameter, never interpolated as SQL literal."""
-    metadata = MetaData()
-    hostile = "x'); DROP TABLE x; --"
-    t = make_outbox_table(metadata, table_name=hostile)
-    client = OutboxClient(AsyncMock(), t)
-
-    compiled = client._advisory_lock_sql.compile()  # noqa: SLF001
-    # Table name must NOT appear in the SQL string itself...
-    assert hostile not in str(compiled)
-    # ...but must appear as a bound param value.
-    assert any(hostile in str(v) for v in compiled.params.values())
+    assert await client.fetch([], limit=10, lease_ttl_seconds=60.0) == []
 
 
 # --- OutboxMessage.reject + assert_state_set logger branch ---
@@ -628,7 +609,7 @@ async def test_fake_client_fetch_empty_queues() -> None:
     from faststream_outbox.testing import FakeOutboxClient  # noqa: PLC0415
 
     client = FakeOutboxClient()
-    assert await client.fetch([], limit=10) == []
+    assert await client.fetch([], limit=10, lease_ttl_seconds=60.0) == []
 
 
 async def test_fake_client_delete_miss() -> None:

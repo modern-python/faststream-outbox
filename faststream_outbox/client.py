@@ -2,13 +2,17 @@
 Postgres outbox client.
 
 All read/write paths against the outbox table live here. The fetch query is the
-load-bearing piece: a single CTE that selects due rows ``FOR UPDATE SKIP LOCKED``
-and immediately ``UPDATE``s them to ``processing`` with a fresh lease token,
+load-bearing piece: a single CTE that selects available rows ``FOR UPDATE SKIP LOCKED``
+and immediately ``UPDATE``s them with a fresh lease (``acquired_token`` + ``acquired_at``),
 ``RETURNING`` the row in one round-trip.
 
+A row is "available" iff its lease is unset *or* its lease has expired
+(``acquired_at < now() - lease_ttl_seconds``). This collapses what used to be a
+state column plus a separate ``release_stuck`` reaper into a single predicate.
+
 Every terminal write (``delete_with_lease``, ``mark_pending_with_lease``) filters
-on ``acquired_token`` so a slow handler whose lease was reclaimed by
-``release_stuck`` can no longer mutate that row.
+on ``acquired_token`` so a slow handler whose lease was reclaimed by a newer fetch
+can no longer mutate that row.
 """
 
 import datetime as _dt
@@ -18,7 +22,6 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     Float,
-    and_,
     bindparam,
     delete,
     func,
@@ -30,7 +33,6 @@ from sqlalchemy import (
 )
 
 from faststream_outbox.message import OutboxInnerMessage
-from faststream_outbox.schema import OutboxState
 
 
 if TYPE_CHECKING:
@@ -51,34 +53,40 @@ class OutboxClient:
     def __init__(self, engine: "AsyncEngine", outbox_table: "Table") -> None:
         self._engine = engine
         self._table = outbox_table
-        # Stable advisory-lock key derived from the table name; ``hashtext`` returns int4.
-        # Parameterized to keep the table name out of SQL string interpolation.
-        self._advisory_lock_sql = text("SELECT pg_try_advisory_xact_lock(hashtext(:lock_key))").bindparams(
-            lock_key=f"faststream_outbox:{outbox_table.name}"
-        )
 
     @property
     def table(self) -> "Table":
         return self._table
 
-    async def fetch(self, queues: "Sequence[str]", *, limit: int) -> list[OutboxInnerMessage]:
+    async def fetch(
+        self,
+        queues: "Sequence[str]",
+        *,
+        limit: int,
+        lease_ttl_seconds: float,
+    ) -> list[OutboxInnerMessage]:
         """
-        Atomically claim up to *limit* due rows for the given queue names.
+        Atomically claim up to *limit* available rows for the given queue names.
 
-        Returns the freshly-leased rows. Each row carries ``acquired_token`` which the
-        worker loop must echo back on the terminal ``DELETE``/``UPDATE``.
+        A row is available iff its lease is unset (``acquired_token IS NULL``) or its
+        lease is older than *lease_ttl_seconds*. Returns the freshly-leased rows; each
+        carries ``acquired_token`` which the worker loop must echo back on the terminal
+        ``DELETE``/``UPDATE``.
         """
         if not queues:
             return []
         token = uuid.uuid4()
         t = self._table
 
+        # ``make_interval(secs => :lease_ttl)`` keeps the cutoff computation server-side
+        # so lease expiry is immune to clock skew between worker and DB hosts.
+        lease_cutoff = func.now() - func.make_interval(0, 0, 0, 0, 0, 0, bindparam("lease_ttl", type_=Float))
         ready = (
             select(t.c.id)
             .where(
-                t.c.state == OutboxState.PENDING.value,
                 t.c.next_attempt_at <= func.now(),
                 or_(*(t.c.queue == q for q in queues)),
+                or_(t.c.acquired_token.is_(None), t.c.acquired_at < lease_cutoff),
             )
             .order_by(t.c.next_attempt_at)
             .limit(limit)
@@ -89,7 +97,6 @@ class OutboxClient:
             update(t)
             .where(t.c.id.in_(select(ready.c.id)))
             .values(
-                state=OutboxState.PROCESSING.value,
                 acquired_at=func.now(),
                 acquired_token=token,
                 deliveries_count=t.c.deliveries_count + 1,
@@ -97,7 +104,7 @@ class OutboxClient:
             .returning(*t.c)
         )
         async with self._engine.begin() as conn:
-            result = await conn.execute(stmt)
+            result = await conn.execute(stmt, {"lease_ttl": max(0.0, lease_ttl_seconds)})
             rows = result.mappings().all()
         return [_row_to_message(dict(row)) for row in rows]
 
@@ -120,7 +127,7 @@ class OutboxClient:
         last_attempt_at: _dt.datetime,
     ) -> bool:
         """
-        Move *message_id* back to ``pending`` for retry, iff it still holds the lease.
+        Release the lease on *message_id* and reschedule it for retry, iff it still holds the lease.
 
         ``next_attempt_at`` is computed server-side as ``now() + delay_seconds`` so
         retry timing uses the DB clock, not the worker's. Returns True if the row was updated.
@@ -131,7 +138,6 @@ class OutboxClient:
             update(t)
             .where(t.c.id == message_id, t.c.acquired_token == acquired_token)
             .values(
-                state=OutboxState.PENDING.value,
                 next_attempt_at=next_attempt_at_expr,
                 attempts_count=attempts_count,
                 first_attempt_at=first_attempt_at,
@@ -143,40 +149,6 @@ class OutboxClient:
         async with self._engine.begin() as conn:
             result = await conn.execute(stmt, {"delay": max(0.0, delay_seconds)})
         return (result.rowcount or 0) > 0
-
-    async def release_stuck(self, *, timeout_seconds: float) -> int:
-        """
-        Flip ``processing`` rows back to ``pending`` once their lease is older than *timeout_seconds*.
-
-        Wrapped in ``pg_try_advisory_xact_lock`` so multiple processes don't fight over
-        the same rows. Returns the number of rows released (``0`` if the lock was not
-        acquired — another process is doing the work).
-        """
-        t = self._table
-        # ``make_interval(secs => :timeout)`` keeps the cutoff computation server-side so
-        # release_stuck windows are immune to clock skew between worker and DB hosts.
-        stale_cutoff = func.now() - func.make_interval(0, 0, 0, 0, 0, 0, bindparam("timeout", type_=Float))
-        stmt = (
-            update(t)
-            .where(
-                and_(
-                    t.c.state == OutboxState.PROCESSING.value,
-                    t.c.acquired_at.isnot(None),
-                    t.c.acquired_at < stale_cutoff,
-                )
-            )
-            .values(
-                state=OutboxState.PENDING.value,
-                acquired_at=None,
-                acquired_token=None,
-            )
-        )
-        async with self._engine.begin() as conn:
-            lock_result = await conn.execute(self._advisory_lock_sql)
-            if not lock_result.scalar():
-                return 0
-            result = await conn.execute(stmt, {"timeout": timeout_seconds})
-        return result.rowcount or 0
 
     async def validate_schema(self) -> None:
         """
@@ -207,7 +179,6 @@ def _row_to_message(row: dict) -> OutboxInnerMessage:
         queue=row["queue"],
         payload=row["payload"],
         headers=row["headers"],
-        state=OutboxState(row["state"]),
         attempts_count=row["attempts_count"],
         deliveries_count=row["deliveries_count"],
         created_at=row["created_at"],

@@ -40,13 +40,14 @@ async with session_factory() as session, session.begin():
 
 `broker.publish_batch(*bodies, queue, session, headers=None)` inserts many rows in a single round-trip with the same transactional contract.
 
-A subscriber owns three async loops:
+A subscriber owns two async loops:
 
-1. **fetch** — claims due rows via `SELECT … FOR UPDATE SKIP LOCKED → UPDATE state='processing', acquired_token=:uuid RETURNING *` in a single CTE.
+1. **fetch** — claims available rows via `SELECT … FOR UPDATE SKIP LOCKED → UPDATE acquired_token=:uuid, acquired_at=now() RETURNING *` in a single CTE. A row is "available" iff its lease is unset *or* expired (`acquired_at < now() - lease_ttl_seconds`), so the fetch query reclaims stuck rows inline — no separate reaper is needed.
 2. **workers** (× `max_workers`) — dispatch to the handler. On success, `DELETE WHERE id=:id AND acquired_token=:token`. On failure, the retry strategy decides: schedule another attempt, or terminal `DELETE`.
-3. **release-stuck** — periodically flips `processing` rows back to `pending` if their lease is older than `release_stuck_timeout`. Wrapped in a Postgres advisory lock so multiple processes don't compete.
 
 The `acquired_token` is critical: a slow handler whose lease expired and was re-claimed by another worker will find its terminal `DELETE`/`UPDATE` to be a no-op (the token no longer matches), preventing it from clobbering the new lease holder's row.
+
+`lease_ttl_seconds` (default `60.0`) **must exceed your handler's P99 duration with margin** — otherwise healthy in-flight handlers race their own lease expiry and the row gets re-claimed by another worker, triggering a duplicate delivery.
 
 ## Recommended index
 
@@ -54,7 +55,7 @@ Add this to your Alembic migration alongside the table:
 
 ```sql
 CREATE INDEX outbox_pending_idx ON outbox (queue, next_attempt_at)
-  WHERE state = 'pending';
+  WHERE acquired_token IS NULL;
 ```
 
 ## Schema validation
@@ -111,8 +112,7 @@ Per-subscriber knobs (passed to `@broker.subscriber("…", …)`):
 - `max_workers` (default `1`) — concurrent handlers per subscriber.
 - `fetch_batch_size` (default `10`) — rows claimed per fetch cycle.
 - `min_fetch_interval` / `max_fetch_interval` (default `1.0` / `10.0` s) — base + ceiling for the adaptive idle backoff with jitter.
-- `release_stuck_timeout` (default `300.0` s) — how long a `processing` row may live before being released back to `pending`.
-- `release_stuck_interval` (default `release_stuck_timeout / 2`).
-- `max_deliveries` (default `None` — unbounded) — total claims (including stuck-recovery re-claims) after which the row is dropped without invoking the handler. Defends against handlers that consistently wedge.
+- `lease_ttl_seconds` (default `60.0` s) — how long a claim is valid before another fetch may reclaim it. **Must exceed your handler's P99 duration with margin.**
+- `max_deliveries` (default `None` — unbounded) — total claims (including lease-expiry re-claims) after which the row is dropped without invoking the handler. Defends against handlers that consistently wedge.
 
 ## 📝 [License](LICENSE)

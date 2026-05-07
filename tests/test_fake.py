@@ -1,5 +1,6 @@
 import asyncio
 import datetime as _dt
+import uuid
 from collections.abc import Callable
 
 import pytest
@@ -14,6 +15,7 @@ from faststream_outbox import (
     make_outbox_table,
 )
 from faststream_outbox.envelope import _encode_payload as encode_payload
+from faststream_outbox.testing import _FakeRow
 
 
 def _make_broker() -> OutboxBroker:
@@ -167,7 +169,7 @@ async def test_fake_broker_correlation_id_in_handler_context() -> None:
     assert seen == ["trace-xyz"]
 
 
-async def test_fake_broker_release_stuck_recovers_processing_row() -> None:
+async def test_fake_broker_expired_lease_is_reclaimed() -> None:
     broker = _make_broker()
     received: list[str] = []
 
@@ -175,20 +177,14 @@ async def test_fake_broker_release_stuck_recovers_processing_row() -> None:
         "orders",
         min_fetch_interval=0.01,
         max_fetch_interval=0.05,
-        release_stuck_timeout=0.1,
-        release_stuck_interval=0.05,
+        lease_ttl_seconds=0.1,
     )
     async def handle(body: str) -> None:
         received.append(body)
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        # Manually create a "stuck" processing row with old acquired_at
-        import uuid as _uuid  # noqa: PLC0415
-
-        from faststream_outbox.schema import OutboxState  # noqa: PLC0415
-        from faststream_outbox.testing import _FakeRow  # noqa: PLC0415
-
+        # Manually create a row with an expired lease — fetch must reclaim it.
         old = _dt.datetime.now(tz=_dt.UTC) - _dt.timedelta(seconds=10)
         test_broker.fake_client._rows.append(  # noqa: SLF001
             _FakeRow(
@@ -196,9 +192,8 @@ async def test_fake_broker_release_stuck_recovers_processing_row() -> None:
                 queue="orders",
                 payload=encode_payload("stuck-payload")[0],
                 headers=encode_payload("stuck-payload")[1],
-                state=OutboxState.PROCESSING.value,
                 acquired_at=old,
-                acquired_token=_uuid.uuid4(),
+                acquired_token=uuid.uuid4(),
             )
         )
         test_broker.fake_client._next_id = 100  # noqa: SLF001
@@ -243,12 +238,12 @@ async def test_fetch_loop_recovers_from_client_error() -> None:
             super().__init__()
             self._raised = False
 
-        async def fetch(self, queues, *, limit):
+        async def fetch(self, queues, *, limit, lease_ttl_seconds):
             if not self._raised:
                 self._raised = True
                 msg = "transient db error"
                 raise RuntimeError(msg)
-            return await super().fetch(queues, limit=limit)
+            return await super().fetch(queues, limit=limit, lease_ttl_seconds=lease_ttl_seconds)
 
     broker = _make_broker()
     received: list[str] = []
@@ -297,77 +292,6 @@ async def test_fetch_loop_backs_off_when_inflight_full() -> None:
         await _wait_until(lambda: len(received) == 2, timeout=5.0)
 
 
-async def test_release_stuck_loop_recovers_from_client_error() -> None:
-    from faststream_outbox.testing import FakeOutboxClient  # noqa: PLC0415
-
-    class FlakyReleaseStuckClient(FakeOutboxClient):
-        def __init__(self) -> None:
-            super().__init__()
-            self.release_calls = 0
-
-        async def release_stuck(self, *, timeout_seconds):
-            self.release_calls += 1
-            if self.release_calls == 1:
-                msg = "transient"
-                raise RuntimeError(msg)
-            return await super().release_stuck(timeout_seconds=timeout_seconds)
-
-    broker = _make_broker()
-
-    @broker.subscriber(
-        "orders",
-        min_fetch_interval=0.01,
-        max_fetch_interval=0.05,
-        release_stuck_interval=0.05,
-        release_stuck_timeout=0.1,
-    )
-    async def handle(body: str) -> None: ...
-
-    flaky = FlakyReleaseStuckClient()
-    test_broker = TestOutboxBroker(broker)
-    test_broker.fake_client = flaky
-    async with test_broker:
-        await _wait_until(lambda: flaky.release_calls >= 2, timeout=5.0)
-
-
-async def test_release_stuck_loop_logs_when_rows_released() -> None:
-    import uuid as _uuid  # noqa: PLC0415
-
-    from faststream_outbox.schema import OutboxState  # noqa: PLC0415
-    from faststream_outbox.testing import _FakeRow  # noqa: PLC0415
-
-    broker = _make_broker()
-    received: list[str] = []
-
-    @broker.subscriber(
-        "orders",
-        min_fetch_interval=0.01,
-        max_fetch_interval=0.05,
-        release_stuck_interval=0.05,
-        release_stuck_timeout=0.1,
-    )
-    async def handle(body: str) -> None:
-        received.append(body)
-
-    test_broker = TestOutboxBroker(broker)
-    async with test_broker:
-        old = _dt.datetime.now(tz=_dt.UTC) - _dt.timedelta(seconds=10)
-        p, h = encode_payload("stuck")
-        test_broker.fake_client._rows.append(  # noqa: SLF001
-            _FakeRow(
-                id=99,
-                queue="orders",
-                payload=p,
-                headers=h,
-                state=OutboxState.PROCESSING.value,
-                acquired_at=old,
-                acquired_token=_uuid.uuid4(),
-            )
-        )
-        test_broker.fake_client._next_id = 100  # noqa: SLF001
-        await _wait_until(lambda: received, timeout=5.0)
-
-
 async def test_subscriber_with_no_handler_skips_loop_setup() -> None:
     """Calling subscriber.start() with no handler attached early-returns; no loops spawn."""
     from faststream_outbox.subscriber.factory import create_subscriber  # noqa: PLC0415
@@ -382,8 +306,7 @@ async def test_subscriber_with_no_handler_skips_loop_setup() -> None:
         fetch_batch_size=1,
         min_fetch_interval=1.0,
         max_fetch_interval=10.0,
-        release_stuck_timeout=300.0,
-        release_stuck_interval=150.0,
+        lease_ttl_seconds=60.0,
         max_deliveries=None,
         config=broker.config.broker_config,  # type: ignore[arg-type]
     )
@@ -491,8 +414,8 @@ async def test_flush_with_no_lease_token_is_noop() -> None:
     from faststream_outbox.testing import FakeOutboxClient  # noqa: PLC0415
 
     class TokenStrippingClient(FakeOutboxClient):
-        async def fetch(self, queues, *, limit):
-            rows = await super().fetch(queues, limit=limit)
+        async def fetch(self, queues, *, limit, lease_ttl_seconds):
+            rows = await super().fetch(queues, limit=limit, lease_ttl_seconds=lease_ttl_seconds)
             for row in rows:
                 row.acquired_token = None  # strip the lease
             return rows
@@ -517,8 +440,8 @@ async def test_flush_retry_with_no_lease_token_is_noop() -> None:
     from faststream_outbox.testing import FakeOutboxClient  # noqa: PLC0415
 
     class TokenStrippingClient(FakeOutboxClient):
-        async def fetch(self, queues, *, limit):
-            rows = await super().fetch(queues, limit=limit)
+        async def fetch(self, queues, *, limit, lease_ttl_seconds):
+            rows = await super().fetch(queues, limit=limit, lease_ttl_seconds=lease_ttl_seconds)
             for row in rows:
                 row.acquired_token = None
             return rows

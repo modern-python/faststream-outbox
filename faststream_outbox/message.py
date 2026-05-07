@@ -2,7 +2,7 @@
 Outbox message representations.
 
 ``OutboxInnerMessage`` is the in-memory mirror of a row claimed by the fetch loop.
-Its ``ack``/``nack``/``reject`` methods only mutate in-memory state — the actual
+Its ``ack``/``nack``/``reject`` methods only mutate in-memory intent — the actual
 ``DELETE`` or ``UPDATE`` is issued by the worker loop, scoped by ``acquired_token``
 so a re-claimed row's lease holder is the only writer.
 
@@ -18,8 +18,6 @@ from typing import TYPE_CHECKING
 
 from faststream.message.message import StreamMessage
 
-from faststream_outbox.schema import OutboxState
-
 
 if TYPE_CHECKING:
     from faststream._internal.basic_types import LoggerProto
@@ -34,17 +32,17 @@ def _utcnow() -> _dt.datetime:
 @dataclass(kw_only=True)
 class OutboxInnerMessage:
     """
-    In-memory copy of a claimed outbox row, plus state-machine helpers.
+    In-memory copy of a claimed outbox row, plus ack/nack/reject intent helpers.
 
-    The state machine here is purely *intent* — what should happen next when the
-    worker loop flushes results. The actual DB write is the worker loop's job.
+    The ack/nack/reject methods set in-memory intent flags (``to_delete``,
+    ``pending_delay_seconds``). The worker loop reads those flags and issues the
+    actual DB write, scoped by ``acquired_token``.
     """
 
     id: int
     queue: str
     payload: bytes
     headers: dict[str, str] | None
-    state: OutboxState
     attempts_count: int
     deliveries_count: int
     created_at: _dt.datetime

@@ -1,16 +1,16 @@
 """
 Outbox subscriber — the consume loop that backs ``@broker.subscriber("queue")``.
 
-Three async tasks run per subscriber:
+Two async tasks run per subscriber:
 
-* ``_fetch_loop`` claims due rows from Postgres and pushes them onto an
-  in-process queue. Adaptive idle backoff with jitter when the queue is empty.
+* ``_fetch_loop`` claims available rows from Postgres and pushes them onto an
+  in-process queue. A row is available iff its lease is unset *or* expired
+  (``acquired_at < now() - lease_ttl_seconds``); the fetch CTE reclaims both cases
+  in one round-trip. Adaptive idle backoff with jitter when the queue is empty.
 * ``_worker_loop`` (one per ``max_workers``) pulls rows, dispatches via
   ``consume()``, and writes the terminal state back through the client. Every
   terminal write is filtered by ``acquired_token`` so a row whose lease was
-  released doesn't get clobbered.
-* ``_release_stuck_loop`` periodically flips ``processing`` rows older than
-  ``release_stuck_timeout`` back to ``pending`` (advisory-locked, idempotent).
+  reclaimed by a newer fetch doesn't get clobbered by the stale handler.
 """
 
 import asyncio
@@ -104,7 +104,6 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         for _ in range(self._config.max_workers):
             self.add_task(self._worker_loop)
         self.add_task(self._fetch_loop)
-        self.add_task(self._release_stuck_loop)
 
     @typing.override
     async def stop(self) -> None:
@@ -123,7 +122,11 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                 await anyio.sleep(base)
                 continue
             try:
-                rows = await self._client.fetch(self._queues, limit=min(free, self._config.fetch_batch_size))
+                rows = await self._client.fetch(
+                    self._queues,
+                    limit=min(free, self._config.fetch_batch_size),
+                    lease_ttl_seconds=self._config.lease_ttl_seconds,
+                )
             except Exception as e:  # noqa: BLE001
                 self._log(log_level=logging.ERROR, message=f"Outbox fetch error: {e!r}", exc_info=e)
                 error_attempt = min(error_attempt + 1, _BACKOFF_EXP_CAP)
@@ -195,22 +198,6 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                 log_level=logging.INFO,
                 message=f"Outbox row {row} lease expired before retry update; skipping",
             )
-
-    async def _release_stuck_loop(self) -> None:
-        interval = self._config.release_stuck_interval
-        timeout = self._config.release_stuck_timeout
-        while self.running:
-            try:
-                released = await self._client.release_stuck(timeout_seconds=timeout)
-            except Exception as e:  # noqa: BLE001
-                self._log(log_level=logging.ERROR, message=f"release_stuck error: {e!r}", exc_info=e)
-            else:
-                if released:
-                    self._log(
-                        log_level=logging.INFO,
-                        message=f"release_stuck reset {released} stale rows back to pending",
-                    )
-            await anyio.sleep(interval)
 
     @typing.override
     async def get_one(self, *, timeout: float = 5.0) -> typing.NoReturn:

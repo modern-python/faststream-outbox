@@ -35,7 +35,7 @@ async def outbox_table(pg_engine: AsyncEngine) -> AsyncIterator[Table]:
         await conn.run_sync(metadata.create_all)
         await conn.exec_driver_sql(
             f'CREATE INDEX "{table_name}_pending_idx" ON "{table_name}" '
-            f"(queue, next_attempt_at) WHERE state = 'pending'"
+            f"(queue, next_attempt_at) WHERE acquired_token IS NULL"
         )
     yield table
     async with pg_engine.begin() as conn:
