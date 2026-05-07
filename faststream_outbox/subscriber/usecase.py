@@ -180,12 +180,12 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             )
 
     async def _flush_retry(self, row: OutboxInnerMessage) -> None:
-        if row.acquired_token is None:
+        if row.acquired_token is None or row.pending_delay_seconds is None:
             return
         updated = await self._client.mark_pending_with_lease(
             row.id,
             row.acquired_token,
-            next_attempt_at=row.next_attempt_at,
+            delay_seconds=row.pending_delay_seconds,
             attempts_count=row.attempts_count,
             first_attempt_at=row.first_attempt_at,  # ty: ignore[invalid-argument-type]
             last_attempt_at=row.last_attempt_at,  # ty: ignore[invalid-argument-type]

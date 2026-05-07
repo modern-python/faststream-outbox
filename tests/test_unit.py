@@ -102,7 +102,7 @@ def _make_times() -> tuple[_dt.datetime, _dt.datetime]:
 def test_no_retry_always_terminal() -> None:
     first, last = _make_times()
     assert (
-        NoRetry().get_next_attempt_at(
+        NoRetry().get_next_attempt_delay(
             first_attempt_at=first,
             last_attempt_at=last,
             attempts_count=1,
@@ -111,53 +111,52 @@ def test_no_retry_always_terminal() -> None:
     )
 
 
-def test_constant_retry_returns_last_plus_delay() -> None:
+def test_constant_retry_returns_delay() -> None:
     first, last = _make_times()
-    next_at = ConstantRetry(delay_seconds=30).get_next_attempt_at(
+    delay = ConstantRetry(delay_seconds=30).get_next_attempt_delay(
         first_attempt_at=first,
         last_attempt_at=last,
         attempts_count=1,
     )
-    assert next_at == last + _dt.timedelta(seconds=30)
+    assert delay == 30.0
 
 
 def test_constant_retry_max_attempts_reached() -> None:
     first, last = _make_times()
     s = ConstantRetry(delay_seconds=1, max_attempts=3)
-    assert s.get_next_attempt_at(first_attempt_at=first, last_attempt_at=last, attempts_count=3) is None
-    assert s.get_next_attempt_at(first_attempt_at=first, last_attempt_at=last, attempts_count=2) is not None
+    assert s.get_next_attempt_delay(first_attempt_at=first, last_attempt_at=last, attempts_count=3) is None
+    assert s.get_next_attempt_delay(first_attempt_at=first, last_attempt_at=last, attempts_count=2) is not None
 
 
 def test_constant_retry_max_total_delay_exceeded() -> None:
     first, last = _make_times()
     s = ConstantRetry(delay_seconds=100, max_total_delay_seconds=50)
-    assert s.get_next_attempt_at(first_attempt_at=first, last_attempt_at=last, attempts_count=1) is None
+    assert s.get_next_attempt_delay(first_attempt_at=first, last_attempt_at=last, attempts_count=1) is None
 
 
 def test_linear_retry_grows_with_attempts() -> None:
     first, last = _make_times()
     s = LinearRetry(initial_delay_seconds=10, step_seconds=5)
-    n1 = s.get_next_attempt_at(first_attempt_at=first, last_attempt_at=last, attempts_count=1)
-    n2 = s.get_next_attempt_at(first_attempt_at=first, last_attempt_at=last, attempts_count=3)
-    assert n1 is not None
-    assert n2 is not None
-    assert n2 > n1
+    d1 = s.get_next_attempt_delay(first_attempt_at=first, last_attempt_at=last, attempts_count=1)
+    d2 = s.get_next_attempt_delay(first_attempt_at=first, last_attempt_at=last, attempts_count=3)
+    assert d1 is not None
+    assert d2 is not None
+    assert d2 > d1
 
 
 def test_exponential_retry_caps_at_max_delay() -> None:
     first, last = _make_times()
     s = ExponentialRetry(initial_delay_seconds=1, multiplier=2, max_delay_seconds=10)
-    next_at = s.get_next_attempt_at(first_attempt_at=first, last_attempt_at=last, attempts_count=10)
-    assert next_at == last + _dt.timedelta(seconds=10)
+    delay = s.get_next_attempt_delay(first_attempt_at=first, last_attempt_at=last, attempts_count=10)
+    assert delay == 10.0
 
 
 def test_exponential_retry_with_jitter_within_bounds() -> None:
     first, last = _make_times()
     s = ExponentialRetry(initial_delay_seconds=10, multiplier=1.0, jitter_factor=0.5)
-    next_at = s.get_next_attempt_at(first_attempt_at=first, last_attempt_at=last, attempts_count=1)
-    assert next_at is not None
-    delta = (next_at - last).total_seconds()
-    assert 10.0 <= delta <= 15.0
+    delay = s.get_next_attempt_delay(first_attempt_at=first, last_attempt_at=last, attempts_count=1)
+    assert delay is not None
+    assert 10.0 <= delay <= 15.0
 
 
 # --- OutboxInnerMessage state machine ---
@@ -201,7 +200,7 @@ async def test_inner_message_nack_with_strategy_schedules_retry() -> None:
     await msg.nack()
     assert not msg.to_delete
     assert msg.last_attempt_at is not None
-    assert msg.next_attempt_at > msg.last_attempt_at
+    assert msg.pending_delay_seconds == 60.0
 
 
 async def test_inner_message_reject_is_terminal() -> None:
@@ -647,7 +646,7 @@ async def test_fake_client_mark_pending_miss() -> None:
     updated = await client.mark_pending_with_lease(
         999,
         uuid.uuid4(),
-        next_attempt_at=now,
+        delay_seconds=0.0,
         attempts_count=1,
         first_attempt_at=now,
         last_attempt_at=now,

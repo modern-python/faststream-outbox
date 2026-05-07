@@ -553,18 +553,18 @@ async def test_fake_connect_is_noop() -> None:
 
 
 async def test_retry_strategy_receives_handler_exception() -> None:
-    """RetryStrategyProto.get_next_attempt_at must see the raised exception, not None."""
+    """RetryStrategyProto.get_next_attempt_delay must see the raised exception, not None."""
     seen_exceptions: list[BaseException | None] = []
 
     class RecordingStrategy(RetryStrategyProto):
-        def get_next_attempt_at(
+        def get_next_attempt_delay(
             self,
             *,
             first_attempt_at: _dt.datetime,  # noqa: ARG002
             last_attempt_at: _dt.datetime,  # noqa: ARG002
             attempts_count: int,  # noqa: ARG002
             exception: BaseException | None = None,
-        ) -> _dt.datetime | None:
+        ) -> float | None:
             seen_exceptions.append(exception)
             return None  # terminal so the test wraps up promptly
 
@@ -598,17 +598,17 @@ async def test_retry_strategy_can_branch_on_exception_type() -> None:
     attempts: list[str] = []
 
     class TransientOnlyStrategy(RetryStrategyProto):
-        def get_next_attempt_at(
+        def get_next_attempt_delay(
             self,
             *,
             first_attempt_at: _dt.datetime,  # noqa: ARG002
-            last_attempt_at: _dt.datetime,
+            last_attempt_at: _dt.datetime,  # noqa: ARG002
             attempts_count: int,  # noqa: ARG002
             exception: BaseException | None = None,
-        ) -> _dt.datetime | None:
+        ) -> float | None:
             if isinstance(exception, ValueError):
                 return None  # permanent → terminal
-            return last_attempt_at + _dt.timedelta(seconds=0.05)  # transient → retry
+            return 0.05  # transient → retry
 
     broker = _make_broker()
 

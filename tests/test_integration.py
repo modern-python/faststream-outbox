@@ -5,7 +5,7 @@ import datetime as _dt
 import uuid
 
 import pytest
-from sqlalchemy import insert, select
+from sqlalchemy import insert, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from faststream_outbox import (
@@ -121,11 +121,10 @@ async def test_mark_pending_with_lease(pg_engine, outbox_table) -> None:
     client = OutboxClient(pg_engine, outbox_table)
     rows = await client.fetch(["orders"], limit=1)
     msg = rows[0]
-    future = _dt.datetime.now(tz=_dt.UTC) + _dt.timedelta(minutes=10)
     updated = await client.mark_pending_with_lease(
         msg.id,
         msg.acquired_token,  # ty: ignore[invalid-argument-type]
-        next_attempt_at=future,
+        delay_seconds=600.0,  # 10 minutes in the future
         attempts_count=1,
         first_attempt_at=_dt.datetime.now(tz=_dt.UTC),
         last_attempt_at=_dt.datetime.now(tz=_dt.UTC),
@@ -134,6 +133,34 @@ async def test_mark_pending_with_lease(pg_engine, outbox_table) -> None:
     # Refetch — should be empty because next_attempt_at is in the future
     rows2 = await client.fetch(["orders"], limit=10)
     assert rows2 == []
+
+
+async def test_mark_pending_with_lease_uses_db_clock(pg_engine, outbox_table) -> None:
+    """next_attempt_at must be computed server-side as now() + delay, not from the worker's clock."""
+    async with pg_engine.begin() as conn:
+        await conn.execute(insert(outbox_table).values(queue="orders", payload=b"x"))
+    client = OutboxClient(pg_engine, outbox_table)
+    rows = await client.fetch(["orders"], limit=1)
+    msg = rows[0]
+    delay = 10.0
+    # Use clock_timestamp(), not now(): now() returns transaction start time and
+    # would freeze inside the outer connection.
+    async with pg_engine.connect() as conn:
+        db_before = (await conn.execute(text("SELECT clock_timestamp()"))).scalar()
+    await client.mark_pending_with_lease(
+        msg.id,
+        msg.acquired_token,  # ty: ignore[invalid-argument-type]
+        delay_seconds=delay,
+        attempts_count=1,
+        first_attempt_at=_dt.datetime.now(tz=_dt.UTC),
+        last_attempt_at=_dt.datetime.now(tz=_dt.UTC),
+    )
+    async with pg_engine.connect() as conn:
+        db_after = (await conn.execute(text("SELECT clock_timestamp()"))).scalar()
+        next_at = (await conn.execute(select(outbox_table.c.next_attempt_at))).scalar_one()
+    # next_attempt_at was set inside the mark_pending_with_lease transaction whose
+    # now() falls between db_before and db_after.
+    assert db_before + _dt.timedelta(seconds=delay) <= next_at <= db_after + _dt.timedelta(seconds=delay)
 
 
 async def test_release_stuck_recovers_old_processing_rows(pg_engine, outbox_table) -> None:

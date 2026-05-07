@@ -59,6 +59,9 @@ class OutboxInnerMessage:
 
     state_set: bool = field(default=False, init=False)
     to_delete: bool = field(default=False, init=False)
+    # Set by ``_nack`` when the strategy schedules a retry; consumed by the
+    # subscriber's ``_flush_retry`` to drive ``mark_pending_with_lease``.
+    pending_delay_seconds: float | None = field(default=None, init=False)
 
     async def ack(self) -> None:
         await self._update_state_if_not_set(self._ack)
@@ -81,8 +84,8 @@ class OutboxInnerMessage:
 
     async def _nack(self) -> None:
         self._record_attempt()
-        next_at = (
-            self.retry_strategy.get_next_attempt_at(
+        delay = (
+            self.retry_strategy.get_next_attempt_delay(
                 first_attempt_at=self.first_attempt_at or self.last_attempt_at,  # ty: ignore[invalid-argument-type]
                 last_attempt_at=self.last_attempt_at,  # ty: ignore[invalid-argument-type]
                 attempts_count=self.attempts_count,
@@ -91,10 +94,10 @@ class OutboxInnerMessage:
             if self.retry_strategy is not None
             else None
         )
-        if next_at is None:
+        if delay is None:
             self.to_delete = True
         else:
-            self.next_attempt_at = next_at
+            self.pending_delay_seconds = delay
 
     async def _reject(self) -> None:
         self._record_attempt()
