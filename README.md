@@ -49,15 +49,6 @@ The `acquired_token` is critical: a slow handler whose lease expired and was re-
 
 `lease_ttl_seconds` (default `60.0`) **must exceed your handler's P99 duration with margin** — otherwise healthy in-flight handlers race their own lease expiry and the row gets re-claimed by another worker, triggering a duplicate delivery.
 
-## Recommended index
-
-Add this to your Alembic migration alongside the table:
-
-```sql
-CREATE INDEX outbox_pending_idx ON outbox (queue, next_attempt_at)
-  WHERE acquired_token IS NULL;
-```
-
 ## Schema validation
 
 Schema validation is opt-in:
