@@ -36,6 +36,7 @@ from faststream_outbox.registrator import OutboxRegistrator
 
 if typing.TYPE_CHECKING:
     from fast_depends.dependencies import Dependant
+    from fast_depends.library.serializer import SerializerProto
     from faststream._internal.context.repository import ContextRepo
     from sqlalchemy import Table
     from sqlalchemy.ext.asyncio import AsyncEngine
@@ -114,6 +115,7 @@ class OutboxBroker(
         log_level: int = logging.INFO,
         # FastDepends
         apply_types: bool = True,
+        serializer: "SerializerProto | None" = EMPTY,
         # AsyncAPI
         description: str | None = None,
         tags: Iterable[Tag | TagDict] = (),
@@ -121,7 +123,7 @@ class OutboxBroker(
         self._outbox_table = outbox_table
         engine_state = EngineState(engine)
         client = OutboxClient(engine, outbox_table) if engine is not None else None
-        fd_config = FastDependsConfig(use_fastdepends=apply_types)
+        fd_config = FastDependsConfig(use_fastdepends=apply_types, serializer=serializer)
         broker_config = OutboxBrokerConfig(
             engine_state=engine_state,
             client=client,
@@ -222,7 +224,13 @@ class OutboxBroker(
         if activate_in is not None and activate_at is not None:
             msg = "broker.publish accepts at most one of activate_in / activate_at"
             raise ValueError(msg)
-        payload, hdrs = _encode_payload(body, headers=headers, correlation_id=correlation_id)
+        serializer = self.config.broker_config.fd_config._serializer  # noqa: SLF001
+        payload, hdrs = _encode_payload(
+            body,
+            headers=headers,
+            correlation_id=correlation_id,
+            serializer=serializer,
+        )
         t = self._outbox_table
         values: dict[str, typing.Any] = {"queue": queue, "payload": payload, "headers": hdrs}
         # Server-side compute keeps timing immune to worker/DB clock skew (mirrors
@@ -291,9 +299,10 @@ class OutboxBroker(
             next_at = _dt.datetime.now(tz=_dt.UTC) + activate_in
         elif activate_at is not None:
             next_at = activate_at
+        serializer = self.config.broker_config.fd_config._serializer  # noqa: SLF001
         rows = []
         for body in bodies:
-            payload, hdrs = _encode_payload(body, headers=headers)
+            payload, hdrs = _encode_payload(body, headers=headers, serializer=serializer)
             row: dict[str, typing.Any] = {"queue": queue, "payload": payload, "headers": hdrs}
             if next_at is not None:
                 row["next_attempt_at"] = next_at
