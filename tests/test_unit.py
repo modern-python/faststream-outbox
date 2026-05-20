@@ -527,6 +527,46 @@ async def test_broker_cancel_timer_emits_delete_with_lease_guard() -> None:
     assert params["timer_id_1"] == "email-1"
 
 
+async def test_broker_fetch_unprocessed_rejects_non_async_session() -> None:
+    broker = _make_broker()
+    with pytest.raises(TypeError, match="AsyncSession"):
+        await broker.fetch_unprocessed(session=object())  # ty: ignore[invalid-argument-type]
+
+
+def _fetch_unprocessed_session_mock() -> AsyncMock:
+    """AsyncSession mock whose ``execute().mappings().all()`` returns an empty list."""
+    session = AsyncMock(spec=AsyncSession)
+    result = MagicMock()
+    result.mappings.return_value.all.return_value = []
+    session.execute.return_value = result
+    return session
+
+
+async def test_broker_fetch_unprocessed_builds_select_all_columns() -> None:
+    broker = _make_broker()
+    session = _fetch_unprocessed_session_mock()
+    rows = await broker.fetch_unprocessed(session=session)
+    assert rows == []
+    stmt = session.execute.await_args_list[0].args[0]
+    sql = str(stmt)
+    assert "SELECT" in sql
+    assert "FROM outbox" in sql
+    assert "ORDER BY outbox.id" in sql
+    # No queue filter compiled when queue=None
+    assert "WHERE" not in sql
+
+
+async def test_broker_fetch_unprocessed_filters_by_queue() -> None:
+    broker = _make_broker()
+    session = _fetch_unprocessed_session_mock()
+    await broker.fetch_unprocessed(session=session, queue="orders")
+    stmt = session.execute.await_args_list[0].args[0]
+    sql = str(stmt)
+    assert "WHERE outbox.queue =" in sql
+    params = stmt.compile().params
+    assert params["queue_1"] == "orders"
+
+
 async def test_broker_cancel_timer_returns_false_when_nothing_deleted() -> None:
     broker = _make_broker()
     session = AsyncMock(spec=AsyncSession)

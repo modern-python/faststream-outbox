@@ -23,11 +23,11 @@ from faststream._internal.logger.logging import get_broker_logger
 from faststream._internal.types import BrokerMiddleware, CustomCallable
 from faststream.specification.schema import BrokerSpec
 from faststream.specification.schema.extra import Tag, TagDict
-from sqlalchemy import Float, bindparam, delete, func, insert, text
+from sqlalchemy import Float, bindparam, delete, func, insert, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from faststream_outbox.client import OutboxClient
+from faststream_outbox.client import OutboxClient, _row_to_message
 from faststream_outbox.configs import EngineState, OutboxBrokerConfig
 from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.message import OutboxInnerMessage
@@ -328,6 +328,31 @@ class OutboxBroker(
         )
         result = await session.execute(stmt)
         return (result.rowcount or 0) > 0  # ty: ignore[unresolved-attribute]
+
+    async def fetch_unprocessed(
+        self,
+        *,
+        session: AsyncSession,
+        queue: str | None = None,
+    ) -> list[OutboxInnerMessage]:
+        """
+        Return outbox rows currently in the table — pending, in-flight, or future-dated.
+
+        Intended for test assertions: a successful delivery deletes the row, so anything
+        still in the table is "unprocessed". Pass *queue* to filter to a single queue;
+        omit it to return rows across all queues. Runs on the caller's session (same
+        transactional contract as :meth:`publish`); does not acquire a lease and does
+        not mutate row state, so it is safe to call alongside running subscribers.
+        """
+        if not isinstance(session, AsyncSession):
+            msg = "broker.fetch_unprocessed requires an sqlalchemy.ext.asyncio.AsyncSession"
+            raise TypeError(msg)
+        t = self._outbox_table
+        stmt = select(*t.c).order_by(t.c.id)
+        if queue is not None:
+            stmt = stmt.where(t.c.queue == queue)
+        result = await session.execute(stmt)
+        return [_row_to_message(dict(row)) for row in result.mappings().all()]
 
     async def _notify(self, session: AsyncSession, queue: str) -> None:
         """

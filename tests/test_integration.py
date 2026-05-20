@@ -595,3 +595,65 @@ async def test_notify_payload_carries_queue_name(pg_engine, outbox_table) -> Non
         await listener.close()
 
     assert received_payloads == ["orders"]
+
+
+async def test_fetch_unprocessed_returns_all_queues(pg_engine, outbox_table) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with session_factory() as session, session.begin():
+        await broker.publish("o-1", queue="orders", session=session)
+        await broker.publish("o-2", queue="orders", session=session)
+        await broker.publish("s-1", queue="shipments", session=session)
+
+    async with session_factory() as session:
+        rows = await broker.fetch_unprocessed(session=session)
+
+    assert [r.queue for r in rows] == ["orders", "orders", "shipments"]
+    assert [r.id for r in rows] == sorted(r.id for r in rows)  # ordered by id
+
+
+async def test_fetch_unprocessed_filters_by_queue(pg_engine, outbox_table) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with session_factory() as session, session.begin():
+        await broker.publish("o-1", queue="orders", session=session)
+        await broker.publish("s-1", queue="shipments", session=session)
+
+    async with session_factory() as session:
+        orders = await broker.fetch_unprocessed(session=session, queue="orders")
+
+    assert len(orders) == 1
+    assert orders[0].queue == "orders"
+
+
+async def test_fetch_unprocessed_includes_future_dated_rows(pg_engine, outbox_table) -> None:
+    """Future-dated rows (activate_in) are unprocessed too — fetch_unprocessed must surface them."""
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with session_factory() as session, session.begin():
+        await broker.publish("now", queue="orders", session=session)
+        await broker.publish(
+            "later",
+            queue="orders",
+            session=session,
+            activate_in=_dt.timedelta(minutes=5),
+        )
+
+    async with session_factory() as session:
+        rows = await broker.fetch_unprocessed(session=session, queue="orders")
+
+    assert len(rows) == 2
+    now = _dt.datetime.now(tz=_dt.UTC)
+    future = [r for r in rows if r.next_attempt_at > now + _dt.timedelta(minutes=1)]
+    assert len(future) == 1
+
+
+async def test_fetch_unprocessed_reads_uncommitted_writes_in_same_session(pg_engine, outbox_table) -> None:
+    """Same-session contract: a read inside the producer's open transaction sees its own writes."""
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with session_factory() as session, session.begin():
+        await broker.publish("pre-commit", queue="orders", session=session)
+        rows = await broker.fetch_unprocessed(session=session)
+        assert len(rows) == 1
+        assert rows[0].queue == "orders"
