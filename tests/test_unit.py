@@ -1,8 +1,10 @@
 import datetime as _dt
+import json
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import BaseModel
 from sqlalchemy import MetaData
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -113,6 +115,21 @@ def test_encode_payload_passes_through_bytes() -> None:
 def test_encode_payload_merges_user_headers() -> None:
     _, headers = _encode_payload({"x": 1}, headers={"x-tenant": "acme"})
     assert headers["x-tenant"] == "acme"
+    assert headers["content-type"] == "application/json"
+
+
+class _PydanticBody(BaseModel):
+    order_id: int
+    name: str
+
+
+def test_encode_payload_serializes_pydantic_model_with_default_serializer() -> None:
+    """Default broker resolves PydanticSerializer so BaseModel encodes as JSON."""
+    broker = _make_broker()
+    serializer = broker.config.broker_config.fd_config._serializer  # noqa: SLF001
+    body = _PydanticBody(order_id=1, name="x")
+    payload, headers = _encode_payload(body, serializer=serializer)
+    assert json.loads(payload) == body.model_dump()
     assert headers["content-type"] == "application/json"
 
 
@@ -312,12 +329,36 @@ async def test_broker_publish_executes_insert_then_pg_notify_on_session() -> Non
     assert "INSERT INTO" in str(insert_stmt)
     params = insert_stmt.compile().params
     assert params["queue"] == "orders"
-    assert params["payload"] == b'{"order_id": 1}'
+    assert json.loads(params["payload"]) == {"order_id": 1}
     assert params["headers"]["content-type"] == "application/json"
     notify_stmt, notify_params = session.execute.await_args_list[1].args
     assert "pg_notify" in str(notify_stmt)
     assert notify_params["channel"] == "outbox_outbox"
     assert notify_params["payload"] == "orders"
+
+
+async def test_broker_publish_encodes_pydantic_model() -> None:
+    broker = _make_broker()
+    session = _make_session_mock()
+    body = _PydanticBody(order_id=7, name="alpha")
+    await broker.publish(body, queue="orders", session=session)
+    insert_stmt = session.execute.await_args_list[0].args[0]
+    params = insert_stmt.compile().params
+    assert json.loads(params["payload"]) == body.model_dump()
+    assert params["headers"]["content-type"] == "application/json"
+
+
+async def test_broker_publish_batch_encodes_pydantic_models() -> None:
+    broker = _make_broker()
+    session = _make_session_mock()
+    bodies = [_PydanticBody(order_id=1, name="a"), _PydanticBody(order_id=2, name="b")]
+    await broker.publish_batch(*bodies, queue="orders", session=session)
+    # First execute is the INSERT (executemany), second is pg_notify.
+    insert_call = session.execute.await_args_list[0]
+    rows = insert_call.args[1]
+    assert [json.loads(row["payload"]) for row in rows] == [b.model_dump() for b in bodies]
+    for row in rows:
+        assert row["headers"]["content-type"] == "application/json"
 
 
 async def test_broker_publish_does_not_commit() -> None:
@@ -882,6 +923,17 @@ async def test_subscriber_get_one_raises() -> None:
         await sub.get_one()
     # _make_response_publisher returns ()
     assert sub._make_response_publisher(MagicMock()) == ()  # noqa: SLF001
+
+
+async def test_subscriber_client_property_raises_when_broker_has_no_engine() -> None:
+    broker = _make_broker()  # no engine → broker_config.client is None
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> None: ...
+
+    sub = next(iter(broker._subscribers))  # noqa: SLF001
+    with pytest.raises(RuntimeError, match="not connected"):
+        _ = sub._client  # noqa: SLF001
 
 
 # --- _open_listen_connection fallback paths ---
