@@ -12,10 +12,12 @@ import typing
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from unittest import mock
 
 from faststream._internal.testing.broker import TestBroker
 
 from faststream_outbox.broker import OutboxBroker
+from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.message import OutboxInnerMessage
 
 
@@ -192,6 +194,98 @@ def _to_inner(row: _FakeRow) -> OutboxInnerMessage:
     )
 
 
+def _build_fake_publish(
+    fake_client: FakeOutboxClient,
+    serializer: typing.Any,
+) -> typing.Callable[..., typing.Awaitable[int | None]]:
+    async def fake_publish(  # noqa: PLR0913
+        body: typing.Any,
+        *,
+        queue: str,
+        session: typing.Any = None,
+        headers: dict[str, str] | None = None,
+        correlation_id: str | None = None,
+        activate_in: _dt.timedelta | None = None,
+        activate_at: _dt.datetime | None = None,
+        timer_id: str | None = None,
+    ) -> int | None:
+        # session is ignored in test mode — the fake client has no transaction.
+        del session
+        if activate_in is not None and activate_at is not None:
+            msg = "broker.publish accepts at most one of activate_in / activate_at"
+            raise ValueError(msg)
+        payload, hdrs = _encode_payload(
+            body,
+            headers=headers,
+            correlation_id=correlation_id,
+            serializer=serializer,
+        )
+        next_at: _dt.datetime | None = None
+        if activate_in is not None:
+            next_at = _utcnow() + activate_in
+        elif activate_at is not None:
+            next_at = activate_at
+        return fake_client.feed(
+            queue=queue,
+            payload=payload,
+            headers=hdrs,
+            next_attempt_at=next_at,
+            timer_id=timer_id,
+        )
+
+    return fake_publish
+
+
+def _build_fake_publish_batch(
+    fake_client: FakeOutboxClient,
+    serializer: typing.Any,
+) -> typing.Callable[..., typing.Awaitable[None]]:
+    async def fake_publish_batch(
+        *bodies: typing.Any,
+        queue: str,
+        session: typing.Any = None,
+        headers: dict[str, str] | None = None,
+        activate_in: _dt.timedelta | None = None,
+        activate_at: _dt.datetime | None = None,
+    ) -> None:
+        del session
+        if activate_in is not None and activate_at is not None:
+            msg = "broker.publish_batch accepts at most one of activate_in / activate_at"
+            raise ValueError(msg)
+        if not bodies:
+            return
+        next_at: _dt.datetime | None = None
+        if activate_in is not None:
+            next_at = _utcnow() + activate_in
+        elif activate_at is not None:
+            next_at = activate_at
+        for body in bodies:
+            payload, hdrs = _encode_payload(body, headers=headers, serializer=serializer)
+            fake_client.feed(
+                queue=queue,
+                payload=payload,
+                headers=hdrs,
+                next_attempt_at=next_at,
+            )
+
+    return fake_publish_batch
+
+
+def _build_fake_cancel_timer(
+    fake_client: FakeOutboxClient,
+) -> typing.Callable[..., typing.Awaitable[bool]]:
+    async def fake_cancel_timer(
+        *,
+        queue: str,
+        timer_id: str,
+        session: typing.Any = None,
+    ) -> bool:
+        del session
+        return await fake_client.cancel_timer(queue=queue, timer_id=timer_id)
+
+    return fake_cancel_timer
+
+
 class TestOutboxBroker(TestBroker[OutboxBroker]):  # ty: ignore[invalid-type-arguments]
     """Test harness that runs the real subscriber loops against an in-memory client."""
 
@@ -229,8 +323,19 @@ class TestOutboxBroker(TestBroker[OutboxBroker]):  # ty: ignore[invalid-type-arg
     def _patch_broker(self, broker: OutboxBroker) -> "Iterator[None]":
         original_client = broker.config.broker_config.client
         broker.config.broker_config.client = self.fake_client
+        # Mirror real publish's serializer wiring so pydantic / dataclass bodies
+        # encode identically in tests.
+        serializer = broker.config.broker_config.fd_config._serializer  # noqa: SLF001
+        fake_publish = _build_fake_publish(self.fake_client, serializer)
+        fake_publish_batch = _build_fake_publish_batch(self.fake_client, serializer)
+        fake_cancel_timer = _build_fake_cancel_timer(self.fake_client)
         try:
-            with super()._patch_broker(broker):
+            with (
+                mock.patch.object(broker, "publish", new=fake_publish),
+                mock.patch.object(broker, "publish_batch", new=fake_publish_batch),
+                mock.patch.object(broker, "cancel_timer", new=fake_cancel_timer),
+                super()._patch_broker(broker),
+            ):
                 yield
         finally:
             broker.config.broker_config.client = original_client

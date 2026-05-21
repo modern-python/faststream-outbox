@@ -219,12 +219,182 @@ async def test_fake_broker_request_raises() -> None:
             await broker.request(b"x")
 
 
-async def test_fake_broker_publish_rejects_non_async_session() -> None:
+async def test_fake_broker_publish_triggers_handler() -> None:
+    """
+    ``broker.publish`` inside ``TestOutboxBroker`` must route to the fake client and fire the handler.
+
+    This is the standard FastStream test-broker idiom — the same call site works in
+    tests as in production, with the session argument ignored in test mode.
+    """
+    broker = _make_broker()
+    received: list[dict] = []
+
+    @broker.subscriber("orders", min_fetch_interval=0.01, max_fetch_interval=0.05)
+    async def handle(body: dict) -> None:
+        received.append(body)
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish({"order_id": 1}, queue="orders")  # ty: ignore[missing-argument]
+        await _wait_until(lambda: received, timeout=2.0)
+
+    assert received == [{"order_id": 1}]
+    assert test_broker.fake_client.rows == []  # row deleted after ack
+
+
+async def test_fake_broker_publish_batch_triggers_handler() -> None:
+    broker = _make_broker()
+    received: list[str] = []
+
+    @broker.subscriber("orders", min_fetch_interval=0.01, max_fetch_interval=0.05)
+    async def handle(body: str) -> None:
+        received.append(body)
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish_batch("a", "b", "c", queue="orders")  # ty: ignore[missing-argument]
+        await _wait_until(lambda: len(received) == 3, timeout=2.0)
+
+    assert sorted(received) == ["a", "b", "c"]
+
+
+async def test_fake_broker_publish_with_timer_id_dedups() -> None:
+    broker = _make_broker()
+
+    @broker.subscriber("orders", min_fetch_interval=10.0, max_fetch_interval=10.0)
+    async def handle(body: str) -> None: ...
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        first = await broker.publish("x", queue="orders", timer_id="email-1")  # ty: ignore[missing-argument]
+        second = await broker.publish("y", queue="orders", timer_id="email-1")  # ty: ignore[missing-argument]
+    assert first is not None
+    assert second is None
+    assert len(test_broker.fake_client.rows) == 1
+
+
+async def test_fake_broker_publish_with_activate_in_delays_delivery() -> None:
+    broker = _make_broker()
+    received: list[str] = []
+
+    @broker.subscriber("orders", min_fetch_interval=0.01, max_fetch_interval=0.05)
+    async def handle(body: str) -> None:
+        received.append(body)
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish(  # ty: ignore[missing-argument]
+            "delayed",
+            queue="orders",
+            activate_in=_dt.timedelta(milliseconds=300),
+        )
+        await asyncio.sleep(0.1)
+        assert received == []
+        await _wait_until(lambda: received, timeout=2.0)
+    assert received == ["delayed"]
+
+
+async def test_fake_broker_publish_rejects_both_activate_in_and_activate_at() -> None:
     broker = _make_broker()
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        with pytest.raises(TypeError, match="AsyncSession"):
-            await broker.publish(b"x", queue="orders", session=object())  # ty: ignore[invalid-argument-type]
+        with pytest.raises(ValueError, match="at most one of activate_in / activate_at"):
+            await broker.publish(  # ty: ignore[missing-argument]
+                "x",
+                queue="orders",
+                activate_in=_dt.timedelta(seconds=1),
+                activate_at=_dt.datetime.now(tz=_dt.UTC),
+            )
+
+
+async def test_fake_broker_cancel_timer_removes_row() -> None:
+    broker = _make_broker()
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish("x", queue="orders", timer_id="email-1")  # ty: ignore[missing-argument]
+        assert len(test_broker.fake_client.rows) == 1
+        cancelled = await broker.cancel_timer(queue="orders", timer_id="email-1")  # ty: ignore[missing-argument]
+        assert cancelled is True
+        assert test_broker.fake_client.rows == []
+
+
+async def test_fake_broker_publish_with_activate_at_delays_delivery() -> None:
+    broker = _make_broker()
+    received: list[str] = []
+
+    @broker.subscriber("orders", min_fetch_interval=0.01, max_fetch_interval=0.05)
+    async def handle(body: str) -> None:
+        received.append(body)
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        future = _dt.datetime.now(tz=_dt.UTC) + _dt.timedelta(milliseconds=300)
+        await broker.publish("at-future", queue="orders", activate_at=future)  # ty: ignore[missing-argument]
+        await asyncio.sleep(0.1)
+        assert received == []
+        await _wait_until(lambda: received, timeout=2.0)
+    assert received == ["at-future"]
+
+
+async def test_fake_broker_publish_batch_with_activate_in_delays_delivery() -> None:
+    broker = _make_broker()
+    received: list[str] = []
+
+    @broker.subscriber("orders", min_fetch_interval=0.01, max_fetch_interval=0.05)
+    async def handle(body: str) -> None:
+        received.append(body)
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish_batch(  # ty: ignore[missing-argument]
+            "a",
+            "b",
+            queue="orders",
+            activate_in=_dt.timedelta(milliseconds=300),
+        )
+        await asyncio.sleep(0.1)
+        assert received == []
+        await _wait_until(lambda: len(received) == 2, timeout=2.0)
+    assert sorted(received) == ["a", "b"]
+
+
+async def test_fake_broker_publish_batch_with_activate_at_delays_delivery() -> None:
+    broker = _make_broker()
+    received: list[str] = []
+
+    @broker.subscriber("orders", min_fetch_interval=0.01, max_fetch_interval=0.05)
+    async def handle(body: str) -> None:
+        received.append(body)
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        future = _dt.datetime.now(tz=_dt.UTC) + _dt.timedelta(milliseconds=300)
+        await broker.publish_batch("a", "b", queue="orders", activate_at=future)  # ty: ignore[missing-argument]
+        await asyncio.sleep(0.1)
+        assert received == []
+        await _wait_until(lambda: len(received) == 2, timeout=2.0)
+    assert sorted(received) == ["a", "b"]
+
+
+async def test_fake_broker_publish_batch_rejects_both_activate_in_and_activate_at() -> None:
+    broker = _make_broker()
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        with pytest.raises(ValueError, match="at most one of activate_in / activate_at"):
+            await broker.publish_batch(  # ty: ignore[missing-argument]
+                "x",
+                queue="orders",
+                activate_in=_dt.timedelta(seconds=1),
+                activate_at=_dt.datetime.now(tz=_dt.UTC),
+            )
+
+
+async def test_fake_broker_publish_batch_empty_bodies_is_noop() -> None:
+    broker = _make_broker()
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish_batch(queue="orders")  # ty: ignore[missing-argument]
+    assert test_broker.fake_client.rows == []
 
 
 # --- subscriber error paths via subclassed FakeOutboxClient ---
