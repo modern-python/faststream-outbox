@@ -969,7 +969,10 @@ async def test_open_listen_connection_returns_none_when_asyncpg_connect_fails() 
     sub = _make_subscriber_for_listener_test()
     engine = MagicMock()
     engine.url.drivername = "postgresql+asyncpg"
-    engine.url.set.return_value.render_as_string.return_value = "postgresql://u:p@h/db"
+    engine.dialect.create_connect_args.return_value = (
+        [],
+        {"host": "h", "user": "u", "password": "p", "database": "db"},
+    )
 
     with (
         patch.object(sub, "_log") as log_mock,
@@ -983,3 +986,46 @@ async def test_open_listen_connection_returns_none_when_asyncpg_connect_fails() 
     assert result is None
     log_mock.assert_called_once()
     assert "LISTEN setup failed" in log_mock.call_args.kwargs["message"]
+
+
+async def test_open_listen_connection_passes_multihost_kwargs_to_asyncpg() -> None:
+    """
+    Multi-host URLs must reach asyncpg as host/port lists, not a re-rendered DSN.
+
+    ``?host=h1:5432&host=h2:5432`` renders back as URL-encoded host tokens asyncpg
+    can't parse. SQLAlchemy-only kwargs (``prepared_statement_cache_size``, ...) must
+    be stripped before ``asyncpg.connect``, which rejects unknown kwargs.
+    """
+    sub = _make_subscriber_for_listener_test()
+    engine = MagicMock()
+    engine.url.drivername = "postgresql+asyncpg"
+    engine.dialect.create_connect_args.return_value = (
+        [],
+        {
+            "host": ["h1", "h2"],
+            "port": [5432, 5432],
+            "user": "u",
+            "password": "p",
+            "database": "db",
+            "prepared_statement_cache_size": 100,
+        },
+    )
+
+    fake_conn = MagicMock()
+    fake_conn.add_listener = AsyncMock()
+    connect_mock = AsyncMock(return_value=fake_conn)
+
+    with (
+        patch("faststream_outbox.subscriber.usecase._asyncpg.connect", new=connect_mock),
+        patch.object(OutboxSubscriber, "_notify_channel", new="outbox_orders"),
+    ):
+        result = await sub._open_listen_connection(engine)  # noqa: SLF001
+
+    assert result is fake_conn
+    connect_mock.assert_awaited_once()
+    assert connect_mock.await_args is not None
+    kwargs = connect_mock.await_args.kwargs
+    assert kwargs["host"] == ["h1", "h2"]
+    assert kwargs["port"] == [5432, 5432]
+    assert "prepared_statement_cache_size" not in kwargs
+    fake_conn.add_listener.assert_awaited_once()

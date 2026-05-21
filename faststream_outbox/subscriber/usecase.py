@@ -236,12 +236,15 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         """
         if _asyncpg is None or "asyncpg" not in (engine.url.drivername or ""):
             return None
-        # SQLAlchemy URL with the +asyncpg suffix isn't a valid raw asyncpg DSN; strip it.
-        # ``str(url)`` hides the password — use ``render_as_string(hide_password=False)``
-        # so asyncpg.connect actually sees the credentials.
-        dsn = engine.url.set(drivername="postgresql").render_as_string(hide_password=False)
+        # Delegate URL → asyncpg kwargs translation to SQLAlchemy's dialect so multi-host
+        # URLs (``?host=h1:5432&host=h2:5432``) become ``host=[...], port=[...]``. Round-
+        # tripping through ``render_as_string`` URL-encodes ``host:port`` into one token
+        # asyncpg can't parse and fails for failover/replica clusters.
+        _, opts = engine.dialect.create_connect_args(engine.url)
+        for sa_only_key in ("prepared_statement_cache_size", "async_fallback", "async_creator_fn"):
+            opts.pop(sa_only_key, None)
         try:
-            conn = await _asyncpg.connect(dsn)
+            conn = await _asyncpg.connect(**opts)
             await conn.add_listener(self._notify_channel, self._on_notify)
         except Exception as e:  # noqa: BLE001
             self._log(
