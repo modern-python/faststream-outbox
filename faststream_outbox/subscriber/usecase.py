@@ -154,7 +154,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             # cleanly (rather than raising RuntimeError) prevents FastStream's supervisor
             # from restarting the task and leaking a pending coroutine at GC time.
             client = self._outer_config.client
-            if client is None:
+            if client is None:  # pragma: no cover  # defensive teardown race; hard to deterministically hit
                 return
             engine = client.engine
             try:

@@ -716,6 +716,35 @@ async def test_subscriber_with_no_handler_skips_loop_setup() -> None:
         assert sub.tasks == [] or all(t.done() for t in sub.tasks)
 
 
+async def test_sync_publish_skips_callless_subscriber() -> None:
+    """``_find_subscriber_for_queue`` must skip subscribers that have no registered call."""
+    from faststream_outbox.subscriber.factory import create_subscriber  # noqa: PLC0415
+
+    metadata = MetaData()
+    t = make_outbox_table(metadata)
+    broker = OutboxBroker(outbox_table=t)
+    # Add a call-less subscriber for "orphans" — sync-dispatch's lookup must skip it
+    # so the row stays in the fake client instead of crashing on a missing handler.
+    sub = create_subscriber(
+        queues=["orphans"],
+        max_workers=1,
+        retry_strategy=None,
+        fetch_batch_size=1,
+        min_fetch_interval=1.0,
+        max_fetch_interval=10.0,
+        lease_ttl_seconds=60.0,
+        max_deliveries=None,
+        config=broker.config.broker_config,  # type: ignore[arg-type]
+    )
+    broker._subscribers.add(sub)  # noqa: SLF001  # ty: ignore[unresolved-attribute]
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish("ignored", queue="orphans")  # ty: ignore[missing-argument]
+
+    assert len(test_broker.fake_client.rows) == 1
+
+
 # --- TestOutboxBroker plumbing --------------------------------------------------------
 
 
