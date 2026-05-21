@@ -3,6 +3,7 @@ import json
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import faststream.asgi.factories.asyncapi.try_it_out
 import pytest
 from pydantic import BaseModel
 from sqlalchemy import MetaData
@@ -16,6 +17,7 @@ from faststream_outbox import (
     NoRetry,
     OutboxBroker,
     OutboxRouter,
+    TestOutboxBroker,
     make_outbox_table,
 )
 from faststream_outbox.client import OutboxClient
@@ -23,6 +25,11 @@ from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.message import OutboxInnerMessage, OutboxMessage
 from faststream_outbox.parser.parser import OutboxParser
 from faststream_outbox.subscriber.usecase import OutboxSubscriber
+
+
+def test_outbox_broker_registered_in_try_it_out_registry() -> None:
+    registry = faststream.asgi.factories.asyncapi.try_it_out._get_broker_registry()  # noqa: SLF001
+    assert registry[OutboxBroker] is TestOutboxBroker  # ty: ignore[invalid-argument-type]
 
 
 def _make_broker(engine: object | None = None, table_name: str = "outbox") -> OutboxBroker:
