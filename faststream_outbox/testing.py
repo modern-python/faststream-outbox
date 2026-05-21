@@ -4,10 +4,12 @@ Test broker with an in-memory ``OutboxClient`` substitute.
 ``TestOutboxBroker`` wraps an ``OutboxBroker`` and swaps in a ``FakeOutboxClient``
 backed by a list of dicts. Defaults to **sync dispatch**: ``await broker.publish(...)``
 finds the matching subscriber and awaits its consume pipeline before returning, the
-same model as ``TestKafkaBroker`` / ``TestRabbitBroker``. Pass ``run_loops=True`` to
-restore the loop-driven behavior — the real ``_fetch_loop`` / ``_worker_loop`` run
-against the in-memory client; required for tests that exercise retry rescheduling,
-lease expiry, or fetch-loop error recovery. ``feed()`` simulates a row insert.
+same model as ``TestKafkaBroker`` / ``TestRabbitBroker``. Timers fire immediately in
+sync mode — ``activate_in`` / ``activate_at`` are recorded on the fake row but not
+honored. Pass ``run_loops=True`` to restore the loop-driven behavior — the real
+``_fetch_loop`` / ``_worker_loop`` run against the in-memory client; required for
+tests that exercise retry rescheduling, lease expiry, fetch-loop error recovery,
+or scheduled delivery actually waiting. ``feed()`` simulates a row insert.
 """
 
 import datetime as _dt
@@ -264,11 +266,10 @@ def _build_fake_publish(
             next_attempt_at=next_at,
             timer_id=timer_id,
         )
-        # Sync dispatch only when:
-        # - loop mode is off (loops would re-dispatch the row otherwise),
-        # - the insert wasn't a timer-dedup no-op,
-        # - the row is eligible now (future-dated rows wait for their gate, same as production).
-        if not run_loops and row_id is not None and (next_at is None or next_at <= _utcnow()):
+        # Sync dispatch ignores next_attempt_at — timers fire immediately in test mode.
+        # Skip only when loop mode is on (loops would re-dispatch) or the insert was a
+        # timer-dedup no-op.
+        if not run_loops and row_id is not None:
             await _sync_dispatch(fake_client, broker, queue, row_id)
         return row_id
 
@@ -301,7 +302,6 @@ def _build_fake_publish_batch(
             next_at = _utcnow() + activate_in
         elif activate_at is not None:
             next_at = activate_at
-        eligible_now = next_at is None or next_at <= _utcnow()
         for body in bodies:
             payload, hdrs = _encode_payload(body, headers=headers, serializer=serializer)
             row_id = fake_client.feed(
@@ -310,7 +310,7 @@ def _build_fake_publish_batch(
                 headers=hdrs,
                 next_attempt_at=next_at,
             )
-            if not run_loops and row_id is not None and eligible_now:
+            if not run_loops and row_id is not None:
                 await _sync_dispatch(fake_client, broker, queue, row_id)
 
     return fake_publish_batch

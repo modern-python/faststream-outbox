@@ -165,14 +165,14 @@ async def test_fake_broker_publish_with_timer_id_dedups() -> None:
     assert len(test_broker.fake_client.rows) == 1
 
 
-async def test_fake_broker_publish_with_activate_in_skips_sync_dispatch() -> None:
-    """Future-dated rows are not dispatched in sync mode — they wait for the gate (production parity)."""
+async def test_fake_broker_publish_with_activate_in_dispatches_immediately() -> None:
+    """Sync mode ignores activate_in — timers fire immediately."""
     broker = _make_broker()
     received: list[str] = []
 
     @broker.subscriber("orders")
     async def handle(body: str) -> None:
-        received.append(body)  # pragma: no cover  # handler must not fire for future-dated rows
+        received.append(body)
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
@@ -182,34 +182,34 @@ async def test_fake_broker_publish_with_activate_in_skips_sync_dispatch() -> Non
             activate_in=_dt.timedelta(seconds=5),
         )
 
-    assert received == []
-    assert len(test_broker.fake_client.rows) == 1
+    assert received == ["delayed"]
+    assert test_broker.fake_client.rows == []
 
 
-async def test_fake_broker_publish_with_activate_at_skips_sync_dispatch() -> None:
+async def test_fake_broker_publish_with_activate_at_dispatches_immediately() -> None:
     broker = _make_broker()
     received: list[str] = []
 
     @broker.subscriber("orders")
     async def handle(body: str) -> None:
-        received.append(body)  # pragma: no cover
+        received.append(body)
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
         future = _dt.datetime.now(tz=_dt.UTC) + _dt.timedelta(seconds=5)
         await broker.publish("at-future", queue="orders", activate_at=future)  # ty: ignore[missing-argument]
 
-    assert received == []
-    assert len(test_broker.fake_client.rows) == 1
+    assert received == ["at-future"]
+    assert test_broker.fake_client.rows == []
 
 
-async def test_fake_broker_publish_batch_with_activate_in_skips_sync_dispatch() -> None:
+async def test_fake_broker_publish_batch_with_activate_in_dispatches_immediately() -> None:
     broker = _make_broker()
     received: list[str] = []
 
     @broker.subscriber("orders")
     async def handle(body: str) -> None:
-        received.append(body)  # pragma: no cover
+        received.append(body)
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
@@ -220,25 +220,25 @@ async def test_fake_broker_publish_batch_with_activate_in_skips_sync_dispatch() 
             activate_in=_dt.timedelta(seconds=5),
         )
 
-    assert received == []
-    assert len(test_broker.fake_client.rows) == 2
+    assert received == ["a", "b"]
+    assert test_broker.fake_client.rows == []
 
 
-async def test_fake_broker_publish_batch_with_activate_at_skips_sync_dispatch() -> None:
+async def test_fake_broker_publish_batch_with_activate_at_dispatches_immediately() -> None:
     broker = _make_broker()
     received: list[str] = []
 
     @broker.subscriber("orders")
     async def handle(body: str) -> None:
-        received.append(body)  # pragma: no cover
+        received.append(body)
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
         future = _dt.datetime.now(tz=_dt.UTC) + _dt.timedelta(seconds=5)
         await broker.publish_batch("a", "b", queue="orders", activate_at=future)  # ty: ignore[missing-argument]
 
-    assert received == []
-    assert len(test_broker.fake_client.rows) == 2
+    assert received == ["a", "b"]
+    assert test_broker.fake_client.rows == []
 
 
 async def test_fake_broker_publish_rejects_both_activate_in_and_activate_at() -> None:
