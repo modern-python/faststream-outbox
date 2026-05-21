@@ -81,6 +81,37 @@ await broker.cancel_timer(queue="orders", timer_id="order-confirm-42", session=s
 
 **Latency floor:** firing latency is bounded by the subscriber's `max_fetch_interval` (default 10s) after `next_attempt_at` elapses. Lower it for sub-10s precision; sub-second precision is not a goal of this broker.
 
+*In tests using `TestOutboxBroker` (default sync mode), `activate_in` / `activate_at` are ignored and timers fire immediately — see [Testing](#testing).*
+
+## Testing
+
+`TestOutboxBroker` (in `faststream_outbox.testing`) swaps the SQLAlchemy-backed client for an in-memory fake so unit tests don't need Postgres. By default it dispatches handlers **synchronously inside `publish`** — matching `TestKafkaBroker` / `TestRabbitBroker`. No `_wait_until`, no `sleep`.
+
+```python
+from faststream_outbox.testing import TestOutboxBroker
+
+async def test_handler() -> None:
+    received: list[int] = []
+
+    @broker.subscriber("orders")
+    async def handle(order_id: int) -> None:
+        received.append(order_id)
+
+    async with TestOutboxBroker(broker):
+        await broker.publish(1, queue="orders")
+        # Handler has already run.
+    assert received == [1]
+```
+
+Sync mode ignores `activate_in` / `activate_at` — **timers fire immediately**, so straight-line tests work for scheduled publishes without waiting on wall clock. The schedule is still recorded on the fake row (`broker.fake_client.rows[0].next_attempt_at`) if a test needs to assert on it. `cancel_timer` still works for queues without a registered handler.
+
+For tests that need real polling semantics — retry rescheduling, lease expiry / reclaim, `_fetch_loop` error recovery, or honoring `activate_in` delays — opt in to the loop-driven mode:
+
+```python
+async with TestOutboxBroker(broker, run_loops=True):
+    ...  # use feed() / _wait_until to drive the real loops
+```
+
 ## Schema validation
 
 Schema validation is opt-in:
