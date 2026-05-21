@@ -154,7 +154,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             # cleanly (rather than raising RuntimeError) prevents FastStream's supervisor
             # from restarting the task and leaking a pending coroutine at GC time.
             client = self._outer_config.client
-            if client is None:
+            if client is None:  # pragma: no cover  # defensive teardown race; hard to deterministically hit
                 return
             engine = client.engine
             try:
@@ -262,26 +262,38 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         self._notify_event.set()
 
     async def _worker_loop(self) -> None:
-        logger = self._outer_config.logger.logger.logger if self._outer_config.logger else None
         while self.running:
             row = await self._inflight.get()
             try:
-                row.retry_strategy = self._config.retry_strategy
-                if not row.allow_delivery(max_deliveries=self._config.max_deliveries, logger=logger):
-                    await self._flush_terminal(row)
-                    continue
-                # AckPolicy middleware catches handler exceptions; _CaptureExceptionMiddleware
-                # stashes exc onto row.last_exception before nack runs, so retry strategies
-                # can branch on exception type.
-                try:
-                    await self.consume(row)
-                finally:
-                    await row.assert_state_set(logger)
-                await self._flush_result(row)
-            except Exception as e:  # noqa: BLE001
-                self._log(log_level=logging.ERROR, message=f"Outbox worker error: {e!r}", exc_info=e)
+                await self.dispatch_one(row)
             finally:
                 self._inflight.task_done()
+
+    async def dispatch_one(self, row: OutboxInnerMessage) -> None:
+        """
+        Run a single already-leased row through the full consume pipeline.
+
+        Mirrors the per-row body of ``_worker_loop`` so ``TestOutboxBroker`` can drive
+        the handler synchronously from ``broker.publish``, matching the FastStream
+        test-broker idiom (``TestKafkaBroker`` / ``TestRabbitBroker``). The caller is
+        responsible for having acquired the row's lease before invoking this.
+        """
+        logger = self._outer_config.logger.logger.logger if self._outer_config.logger else None
+        try:
+            row.retry_strategy = self._config.retry_strategy
+            if not row.allow_delivery(max_deliveries=self._config.max_deliveries, logger=logger):
+                await self._flush_terminal(row)
+                return
+            # AckPolicy middleware catches handler exceptions; _CaptureExceptionMiddleware
+            # stashes exc onto row.last_exception before nack runs, so retry strategies
+            # can branch on exception type.
+            try:
+                await self.consume(row)
+            finally:
+                await row.assert_state_set(logger)
+            await self._flush_result(row)
+        except Exception as e:  # noqa: BLE001
+            self._log(log_level=logging.ERROR, message=f"Outbox worker error: {e!r}", exc_info=e)
 
     async def _flush_result(self, row: OutboxInnerMessage) -> None:
         if row.to_delete:
