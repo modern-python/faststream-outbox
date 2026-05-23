@@ -26,8 +26,8 @@ import logging
 import random
 import time
 import typing
-from collections.abc import Sequence
-from contextlib import suppress
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
 
 import anyio
 from faststream._internal.endpoint.subscriber import SubscriberSpecification, SubscriberUsecase
@@ -47,12 +47,22 @@ except ImportError:  # pragma: no cover
 
 
 _BACKOFF_EXP_CAP = 30
+_BACKOFF_MAX_SECONDS = 30.0
 # Periodic probe of the LISTEN connection so silent drops (firewall RST, NAT idle timeout,
 # asyncpg reader-task death) surface as exceptions and the outer loop reconnects. The
 # bounded `wait_for` timeout is load-bearing: an unwrapped SELECT 1 against a half-dead
 # TCP socket can hang on the kernel keepalive default (~2.5h on Linux) before failing.
 _LISTEN_HEALTH_CHECK_INTERVAL = 30.0
 _LISTEN_HEALTH_CHECK_TIMEOUT = 5.0
+
+
+def _compute_backoff(attempt: int, ceiling: float, *, base: float = 1.0) -> float:
+    """
+    Exponential backoff with ±50% jitter, capped at *ceiling*.
+
+    *attempt* is 1-based — the first attempt sleeps ~``base * U(0.5, 1.5)``.
+    """
+    return min(base * (2.0 ** (attempt - 1)) * random.uniform(0.5, 1.5), ceiling)  # noqa: S311
 
 
 if typing.TYPE_CHECKING:
@@ -147,43 +157,35 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         return f"outbox_{self._client.table.name}"
 
     async def _fetch_loop(self) -> None:
-        """
-        Outer loop: own connection lifecycle, back off and reconnect on error.
+        """Thin wrapper around :meth:`_run_with_reconnect` for the fetch path."""
+        await self._run_with_reconnect(
+            name="fetch",
+            open_resources=self._open_fetch_resources,
+            inner=self._fetch_inner,
+        )
 
-        When the client has no real engine (test broker), drives the inner loop without
-        a persistent connection — uses ``client.fetch(...)`` for each iteration and never
-        sets up LISTEN. The ``_notify_event`` simply never fires; behavior is polling-only.
+    @asynccontextmanager
+    async def _open_fetch_resources(
+        self,
+        engine: "AsyncEngine | None",
+    ) -> AsyncIterator[Mapping[str, object]]:
         """
-        error_attempt = 0
-        while self.running:
-            # Read client lazily inside the loop: in the test broker path the client is
-            # patched in/out via mock.patch, so it can be None after teardown. Returning
-            # cleanly (rather than raising RuntimeError) prevents FastStream's supervisor
-            # from restarting the task and leaking a pending coroutine at GC time.
-            client = self._outer_config.client
-            if client is None:  # pragma: no cover  # defensive teardown race; hard to deterministically hit
-                return
-            engine = client.engine
+        Yield the kwargs ``_fetch_inner`` needs, owning fetch_conn + listen_conn lifetimes.
+
+        Production path opens a long-lived ``AsyncConnection`` for the fetch CTE and a
+        separate raw asyncpg connection for LISTEN. Test-broker path (``engine is None``)
+        skips both and lets ``_fetch_inner`` fall back to ``client.fetch(...)`` per tick.
+        """
+        if engine is None:
+            yield {"fetch_conn": None, "listen_conn": None}
+            return
+        async with engine.connect() as fetch_conn:
+            listen_conn = await self._open_listen_connection(engine)
             try:
-                if engine is None:
-                    await self._fetch_inner(fetch_conn=None, listen_conn=None)
-                else:
-                    async with engine.connect() as fetch_conn:
-                        listen_conn = await self._open_listen_connection(engine)
-                        try:
-                            await self._fetch_inner(fetch_conn=fetch_conn, listen_conn=listen_conn)
-                        finally:
-                            if listen_conn is not None:
-                                await listen_conn.close()
-            except Exception as e:  # noqa: BLE001
-                self._log(
-                    log_level=logging.ERROR,
-                    message=f"Outbox fetch loop error: {e!r}; reconnecting",
-                    exc_info=e,
-                )
-                error_attempt = min(error_attempt + 1, _BACKOFF_EXP_CAP)
-                delay = min(2.0 ** (error_attempt - 1) * random.uniform(0.5, 1.5), 30.0)  # noqa: S311
-                await anyio.sleep(delay)
+                yield {"fetch_conn": fetch_conn, "listen_conn": listen_conn}
+            finally:
+                if listen_conn is not None:
+                    await listen_conn.close()
 
     async def _fetch_inner(
         self,
@@ -236,8 +238,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                     await self._inflight.put(row)
             else:
                 idle_count = min(idle_count + 1, _BACKOFF_EXP_CAP)
-                delay = min(base * (2.0 ** (idle_count - 1)) * random.uniform(0.5, 1.5), max_idle)  # noqa: S311
-                await self._wait_for_notify_or_timeout(delay)
+                await self._wait_for_notify_or_timeout(_compute_backoff(idle_count, max_idle, base=base))
 
     async def _wait_for_notify_or_timeout(self, timeout: float) -> None:  # noqa: ASYNC109
         """Sleep up to *timeout* seconds, but wake immediately on a NOTIFY."""
@@ -288,39 +289,64 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         self._notify_event.set()
 
     async def _worker_loop(self) -> None:
+        """Thin wrapper around :meth:`_run_with_reconnect` for the worker path."""
+        await self._run_with_reconnect(
+            name="worker",
+            open_resources=self._open_worker_resources,
+            inner=self._worker_inner,
+        )
+
+    @asynccontextmanager
+    async def _open_worker_resources(
+        self,
+        engine: "AsyncEngine | None",
+    ) -> AsyncIterator[Mapping[str, object]]:
         """
-        Outer loop: own a long-lived writer connection, back off and reconnect on error.
+        Yield ``writer_conn`` for ``_worker_inner``, owning its lifetime across all flushes.
 
-        Mirrors :meth:`_fetch_loop`: open one ``AsyncConnection`` at the loop boundary,
-        reuse it across every terminal write, rebuild it on DB error. Without this each
-        :meth:`_flush_terminal` / :meth:`_flush_retry` would do a pool checkout + BEGIN /
-        COMMIT per row, churning the pool and risking exhaustion under burst.
+        One long-lived ``AsyncConnection`` per outer reconnect cycle — every terminal/retry
+        write reuses it, so a drain of N rows costs O(workers) pool checkouts, not O(rows).
+        Test-broker path (``engine is None``) yields ``None`` and the worker takes the
+        one-shot client-wrapper path.
+        """
+        if engine is None:
+            yield {"writer_conn": None}
+            return
+        async with engine.connect() as writer_conn:
+            yield {"writer_conn": writer_conn}
 
-        When the client has no real engine (test broker, ``client.engine is None``), we
-        skip the persistent-connection path entirely and let the inner loop call the
-        one-shot wrappers on :class:`FakeOutboxClient`.
+    async def _run_with_reconnect(
+        self,
+        *,
+        name: str,
+        open_resources: Callable[["AsyncEngine | None"], AbstractAsyncContextManager[Mapping[str, object]]],
+        inner: Callable[..., Awaitable[None]],
+    ) -> None:
+        """
+        Reconnect-with-backoff scaffold shared by ``_fetch_loop`` and ``_worker_loop``.
+
+        Reads the client lazily inside the loop (the test broker patches it in/out via
+        ``mock.patch``, so it can be ``None`` after teardown — returning cleanly avoids
+        leaking a pending coroutine via FastStream's task supervisor). On any exception
+        from ``inner`` or resource open/close, logs, backs off (exponential with jitter,
+        capped at ``_BACKOFF_MAX_SECONDS``), and reopens.
         """
         error_attempt = 0
         while self.running:
             client = self._outer_config.client
             if client is None:  # pragma: no cover  # defensive teardown race
                 return
-            engine = client.engine
             try:
-                if engine is None:
-                    await self._worker_inner(writer_conn=None)
-                else:
-                    async with engine.connect() as writer_conn:
-                        await self._worker_inner(writer_conn=writer_conn)
+                async with open_resources(client.engine) as kwargs:
+                    await inner(**kwargs)
             except Exception as e:  # noqa: BLE001
                 self._log(
                     log_level=logging.ERROR,
-                    message=f"Outbox worker loop error: {e!r}; reconnecting",
+                    message=f"Outbox {name} loop error: {e!r}; reconnecting",
                     exc_info=e,
                 )
                 error_attempt = min(error_attempt + 1, _BACKOFF_EXP_CAP)
-                delay = min(2.0 ** (error_attempt - 1) * random.uniform(0.5, 1.5), 30.0)  # noqa: S311
-                await anyio.sleep(delay)
+                await anyio.sleep(_compute_backoff(error_attempt, _BACKOFF_MAX_SECONDS))
 
     async def _worker_inner(self, *, writer_conn: "AsyncConnection | None") -> None:
         """
