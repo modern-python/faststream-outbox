@@ -256,6 +256,15 @@ def _validate_schema_sync(connection: "Connection", table: "Table") -> list[str]
     ``add_*`` and ``modify_*`` ops fail validation (the DB is missing or has the wrong shape for
     something the broker needs). ``remove_*`` ops are ignored — the user may have extra columns
     or indexes for their own use, and we don't care.
+
+    NOT validated: server defaults (``compare_server_default=False``). Alembic's server-default
+    comparison is notoriously flaky against Postgres' normalized expressions (``func.now()`` vs
+    ``CURRENT_TIMESTAMP`` vs ``now()``), so we disable it to avoid false positives. The cost: a
+    table missing ``server_default=func.now()`` on ``next_attempt_at`` will leave fresh rows
+    with NULL ``next_attempt_at``, which the fetch CTE's ``next_attempt_at <= now()`` predicate
+    silently filters out — a silent broker outage. If you change the canonical table to rely on
+    additional server defaults, add a targeted ``information_schema`` probe rather than flipping
+    this flag.
     """
     if _alembic_compare_metadata is None or _AlembicMigrationContext is None:
         msg = "validate_schema() requires alembic. Install with `pip install faststream-outbox[validate]`."
@@ -308,7 +317,7 @@ def _flatten_drift_errors(diff: "Sequence[typing.Any]", table_name: str) -> list
     return errors
 
 
-def _drift_entry_to_error(entry: tuple, table_name: str) -> str | None:
+def _drift_entry_to_error(entry: "tuple[typing.Any, ...]", table_name: str) -> str | None:
     """
     Map one Alembic op tuple to a human-readable error string, or None to ignore.
 

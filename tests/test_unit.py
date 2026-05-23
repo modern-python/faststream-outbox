@@ -20,7 +20,7 @@ from faststream_outbox import (
     TestOutboxBroker,
     make_outbox_table,
 )
-from faststream_outbox.client import OutboxClient
+from faststream_outbox.client import OutboxClient, _validate_schema_sync
 from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.message import OutboxInnerMessage, OutboxMessage
 from faststream_outbox.parser.parser import OutboxParser
@@ -680,8 +680,6 @@ async def test_broker_validate_schema_delegates_to_client() -> None:
 
 def test_validate_schema_sync_raises_when_alembic_missing() -> None:
     """Without alembic installed the validator must raise ImportError with the install hint."""
-    from faststream_outbox.client import _validate_schema_sync  # noqa: PLC0415
-
     metadata = MetaData()
     t = make_outbox_table(metadata)
     # Alembic is imported at module load; simulate "not installed" by zeroing the
