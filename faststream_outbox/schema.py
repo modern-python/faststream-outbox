@@ -91,4 +91,17 @@ def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table
         unique=True,
         postgresql_where=table.c.timer_id.is_not(None),
     )
+    # Partial index that backs the fetch query's expired-lease branch
+    # (`WHERE acquired_token IS NOT NULL AND acquired_at < lease_cutoff`). Without it,
+    # the OR's second arm forces a seq-scan of the whole table on every fetch — invisible
+    # under healthy steady-state (Branch A dominates) but the tail grows linearly with
+    # table size when handlers wedge or `lease_ttl_seconds < P99`. Trade-off: every fetch
+    # UPDATE rewrites (acquired_token, acquired_at), so this index pays write amplification
+    # proportional to the claim rate.
+    Index(
+        f"{table_name}_lease_idx",
+        table.c.queue,
+        table.c.acquired_at,
+        postgresql_where=table.c.acquired_token.is_not(None),
+    )
     return table

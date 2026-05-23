@@ -92,6 +92,18 @@ def test_make_outbox_table_declares_timer_unique_index() -> None:
     assert timer_idx.dialect_options["postgresql"]["where"] is not None
 
 
+def test_make_outbox_table_declares_lease_idx() -> None:
+    metadata = MetaData()
+    t = make_outbox_table(metadata, table_name="my_outbox")
+    lease_idx = next(idx for idx in t.indexes if idx.name == "my_outbox_lease_idx")
+    assert lease_idx.unique is False
+    assert [c.name for c in lease_idx.columns] == ["queue", "acquired_at"]
+    # Partial-index predicate `acquired_token IS NOT NULL` — the fetch CTE's
+    # Branch B (expired-lease reclaim) relies on this; without it, the OR
+    # disjunct degrades to seq-scan even with `_pending_idx` covering Branch A.
+    assert lease_idx.dialect_options["postgresql"]["where"] is not None
+
+
 def test_make_outbox_table_attaches_to_metadata() -> None:
     metadata = MetaData()
     t = make_outbox_table(metadata, table_name="outbox")
