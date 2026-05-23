@@ -1,3 +1,4 @@
+import asyncio
 import datetime as _dt
 import json
 import uuid
@@ -1046,3 +1047,59 @@ async def test_open_listen_connection_passes_multihost_kwargs_to_asyncpg() -> No
     assert kwargs["port"] == [5432, 5432]
     assert "prepared_statement_cache_size" not in kwargs
     fake_conn.add_listener.assert_awaited_once()
+
+
+# --- listen_conn health check (H2 — silent listener death) ---
+
+
+async def test_fetch_inner_raises_when_listen_health_check_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A dead listen_conn must surface as an exception so the outer loop reconnects."""
+    monkeypatch.setattr("faststream_outbox.subscriber.usecase._LISTEN_HEALTH_CHECK_INTERVAL", 0.0)
+    sub = _make_subscriber_for_listener_test()
+    sub.running = True
+
+    fake_listen_conn = MagicMock()
+    fake_listen_conn.fetchval = AsyncMock(side_effect=ConnectionResetError("listener dead"))
+
+    with pytest.raises(ConnectionResetError):
+        await sub._fetch_inner(fetch_conn=None, listen_conn=fake_listen_conn)  # noqa: SLF001
+
+    fake_listen_conn.fetchval.assert_awaited_once_with("SELECT 1")
+
+
+async def test_fetch_inner_listen_health_check_succeeds_and_resumes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A healthy listen_conn probe updates last_listen_check and the loop continues."""
+    monkeypatch.setattr("faststream_outbox.subscriber.usecase._LISTEN_HEALTH_CHECK_INTERVAL", 0.0)
+    sub = _make_subscriber_for_listener_test()
+    sub.running = True
+
+    fake_listen_conn = MagicMock()
+
+    async def _ok_then_stop(*_args: object) -> int:
+        sub.running = False
+        return 1
+
+    fake_listen_conn.fetchval = _ok_then_stop
+
+    # Bypass the fetch branch by saturating inflight; the health check still runs before that.
+    for _ in range(sub._inflight.maxsize):  # noqa: SLF001
+        sub._inflight.put_nowait(MagicMock())  # noqa: SLF001
+
+    await sub._fetch_inner(fetch_conn=None, listen_conn=fake_listen_conn)  # noqa: SLF001
+
+
+async def test_fetch_inner_raises_on_listen_health_check_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A listen_conn whose probe hangs must surface as TimeoutError via wait_for."""
+    monkeypatch.setattr("faststream_outbox.subscriber.usecase._LISTEN_HEALTH_CHECK_INTERVAL", 0.0)
+    monkeypatch.setattr("faststream_outbox.subscriber.usecase._LISTEN_HEALTH_CHECK_TIMEOUT", 0.01)
+    sub = _make_subscriber_for_listener_test()
+    sub.running = True
+
+    async def _hang(*_args: object) -> None:
+        await asyncio.sleep(60)
+
+    fake_listen_conn = MagicMock()
+    fake_listen_conn.fetchval = _hang
+
+    with pytest.raises(TimeoutError):
+        await sub._fetch_inner(fetch_conn=None, listen_conn=fake_listen_conn)  # noqa: SLF001

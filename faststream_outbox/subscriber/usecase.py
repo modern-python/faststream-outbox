@@ -24,6 +24,7 @@ in the next iteration.
 import asyncio
 import logging
 import random
+import time
 import typing
 from collections.abc import Sequence
 from contextlib import suppress
@@ -46,6 +47,12 @@ except ImportError:  # pragma: no cover
 
 
 _BACKOFF_EXP_CAP = 30
+# Periodic probe of the LISTEN connection so silent drops (firewall RST, NAT idle timeout,
+# asyncpg reader-task death) surface as exceptions and the outer loop reconnects. The
+# bounded `wait_for` timeout is load-bearing: an unwrapped SELECT 1 against a half-dead
+# TCP socket can hang on the kernel keepalive default (~2.5h on Linux) before failing.
+_LISTEN_HEALTH_CHECK_INTERVAL = 30.0
+_LISTEN_HEALTH_CHECK_TIMEOUT = 5.0
 
 
 if typing.TYPE_CHECKING:
@@ -159,12 +166,12 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             engine = client.engine
             try:
                 if engine is None:
-                    await self._fetch_inner(fetch_conn=None)
+                    await self._fetch_inner(fetch_conn=None, listen_conn=None)
                 else:
                     async with engine.connect() as fetch_conn:
                         listen_conn = await self._open_listen_connection(engine)
                         try:
-                            await self._fetch_inner(fetch_conn=fetch_conn)
+                            await self._fetch_inner(fetch_conn=fetch_conn, listen_conn=listen_conn)
                         finally:
                             if listen_conn is not None:
                                 await listen_conn.close()
@@ -178,17 +185,33 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                 delay = min(2.0 ** (error_attempt - 1) * random.uniform(0.5, 1.5), 30.0)  # noqa: S311
                 await anyio.sleep(delay)
 
-    async def _fetch_inner(self, *, fetch_conn: "AsyncConnection | None") -> None:
+    async def _fetch_inner(
+        self,
+        *,
+        fetch_conn: "AsyncConnection | None",
+        listen_conn: "_asyncpg.Connection | None",
+    ) -> None:
         """
         Fetch + adaptive backoff, with NOTIFY-driven wakeup.
 
         Returns when ``self.running`` goes False, or raises on any DB error so the outer
-        loop can rebuild the connection.
+        loop can rebuild the connection. Periodically probes ``listen_conn`` with a bounded
+        ``SELECT 1`` so silent disconnects surface as exceptions rather than degrading
+        dispatch latency to ``max_fetch_interval`` for the life of the process.
         """
         base = self._config.min_fetch_interval
         max_idle = self._config.max_fetch_interval
         idle_count = 0
+        last_listen_check = time.monotonic()
         while self.running:
+            if listen_conn is not None:
+                now = time.monotonic()
+                if now - last_listen_check >= _LISTEN_HEALTH_CHECK_INTERVAL:
+                    await asyncio.wait_for(
+                        listen_conn.fetchval("SELECT 1"),
+                        timeout=_LISTEN_HEALTH_CHECK_TIMEOUT,
+                    )
+                    last_listen_check = now
             free = self._inflight.maxsize - self._inflight.qsize()
             if free <= 0:
                 await self._wait_for_notify_or_timeout(base)
