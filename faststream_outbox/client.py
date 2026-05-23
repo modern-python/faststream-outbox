@@ -162,16 +162,39 @@ class OutboxClient:
                 lease_ttl_seconds=lease_ttl_seconds,
             )
 
-    async def delete_with_lease(self, message_id: int, acquired_token: uuid.UUID) -> bool:
-        """Delete *message_id* iff it still holds *acquired_token*. Returns True if deleted."""
+    async def delete_with_lease_with_conn(
+        self,
+        conn: "AsyncConnection",
+        message_id: int,
+        acquired_token: uuid.UUID,
+    ) -> bool:
+        """
+        Delete *message_id* iff it still holds *acquired_token* on a caller-supplied connection.
+
+        Mirrors :meth:`delete_with_lease`; lets the subscriber's worker loop reuse a long-lived
+        writer connection instead of acquiring one per row from the pool. Opens its own
+        transaction via ``async with conn.begin():``.
+        """
         t = self._table
         stmt = delete(t).where(t.c.id == message_id, t.c.acquired_token == acquired_token)
-        async with self._engine.begin() as conn:
+        async with conn.begin():
             result = await conn.execute(stmt)
         return (result.rowcount or 0) > 0
 
-    async def mark_pending_with_lease(  # noqa: PLR0913
+    async def delete_with_lease(self, message_id: int, acquired_token: uuid.UUID) -> bool:
+        """
+        Delete *message_id* iff it still holds *acquired_token*. Returns True if deleted.
+
+        Convenience wrapper that opens a one-shot connection and delegates to
+        :meth:`delete_with_lease_with_conn`. The subscriber worker loop uses the
+        ``_with_conn`` variant directly with a long-lived connection.
+        """
+        async with self._engine.connect() as conn:
+            return await self.delete_with_lease_with_conn(conn, message_id, acquired_token)
+
+    async def mark_pending_with_lease_with_conn(  # noqa: PLR0913
         self,
+        conn: "AsyncConnection",
         message_id: int,
         acquired_token: uuid.UUID,
         *,
@@ -181,10 +204,12 @@ class OutboxClient:
         last_attempt_at: _dt.datetime,
     ) -> bool:
         """
-        Release the lease on *message_id* and reschedule it for retry, iff it still holds the lease.
+        Release the lease on *message_id* and reschedule for retry on a caller-supplied connection.
 
-        ``next_attempt_at`` is computed server-side as ``now() + delay_seconds`` so
-        retry timing uses the DB clock, not the worker's. Returns True if the row was updated.
+        Mirrors :meth:`mark_pending_with_lease`; lets the subscriber's worker loop reuse a
+        long-lived writer connection instead of acquiring one per row from the pool. Opens
+        its own transaction via ``async with conn.begin():``. ``next_attempt_at`` is computed
+        server-side as ``now() + delay_seconds`` so retry timing uses the DB clock.
         """
         t = self._table
         next_attempt_at_expr = func.now() + func.make_interval(0, 0, 0, 0, 0, 0, bindparam("delay", type_=Float))
@@ -200,9 +225,37 @@ class OutboxClient:
                 acquired_token=None,
             )
         )
-        async with self._engine.begin() as conn:
+        async with conn.begin():
             result = await conn.execute(stmt, {"delay": max(0.0, delay_seconds)})
         return (result.rowcount or 0) > 0
+
+    async def mark_pending_with_lease(  # noqa: PLR0913
+        self,
+        message_id: int,
+        acquired_token: uuid.UUID,
+        *,
+        delay_seconds: float,
+        attempts_count: int,
+        first_attempt_at: _dt.datetime,
+        last_attempt_at: _dt.datetime,
+    ) -> bool:
+        """
+        Release the lease on *message_id* and reschedule it for retry, iff it still holds the lease.
+
+        Convenience wrapper that opens a one-shot connection and delegates to
+        :meth:`mark_pending_with_lease_with_conn`. The subscriber worker loop uses the
+        ``_with_conn`` variant directly with a long-lived connection.
+        """
+        async with self._engine.connect() as conn:
+            return await self.mark_pending_with_lease_with_conn(
+                conn,
+                message_id,
+                acquired_token,
+                delay_seconds=delay_seconds,
+                attempts_count=attempts_count,
+                first_attempt_at=first_attempt_at,
+                last_attempt_at=last_attempt_at,
+            )
 
     async def validate_schema(self) -> None:
         """
