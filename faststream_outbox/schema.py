@@ -30,6 +30,10 @@ from sqlalchemy.dialects.postgresql import JSONB
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
 
+# Postgres' NAMEDATALEN-1 — the maximum identifier byte length, which bounds
+# the LISTEN/NOTIFY channel name `outbox_<table>`.
+_POSTGRES_IDENT_MAX_BYTES = 63
+
 
 def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table:
     """
@@ -37,7 +41,20 @@ def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table
 
     The user wires the returned table into their own SQLAlchemy ``MetaData`` so it is
     discovered by Alembic's autogenerate. They are responsible for the actual migration.
+
+    Raises ``ValueError`` if *table_name* would push the NOTIFY channel
+    ``outbox_<table_name>`` past Postgres' 63-byte identifier limit (NAMEDATALEN-1).
     """
+    # Byte length, not char count — UTF-8 multibyte chars expand and would silently
+    # truncate the channel identifier on one side of LISTEN/NOTIFY.
+    encoded_channel = b"outbox_" + table_name.encode("utf-8")
+    if len(encoded_channel) > _POSTGRES_IDENT_MAX_BYTES:
+        msg = (
+            f"table_name {table_name!r} too long for NOTIFY channel "
+            f"'outbox_<table_name>': must fit in {_POSTGRES_IDENT_MAX_BYTES} bytes "
+            f"(got {len(encoded_channel)})"
+        )
+        raise ValueError(msg)
     table = Table(
         table_name,
         metadata,
