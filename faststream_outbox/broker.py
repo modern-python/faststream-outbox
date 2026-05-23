@@ -346,9 +346,11 @@ class OutboxBroker(
            in-flight lease; the delivery completes normally.
         2. Another caller already canceled the same ``(queue, timer_id)`` in a concurrent
            transaction.
-        3. No row was ever inserted with that ``(queue, timer_id)`` — e.g. the timer was
-           never scheduled, or the original ``publish(..., timer_id=...)`` hit the
-           ``ON CONFLICT DO NOTHING`` path and returned ``None``.
+        3. No row exists with that ``(queue, timer_id)`` — either the timer was never
+           scheduled, the original ``publish(..., timer_id=...)`` hit the
+           ``ON CONFLICT DO NOTHING`` path and returned ``None``, or (most common in
+           long-running deployments) the row was already delivered and removed by a
+           worker before this call.
 
         Treat ``False`` as "no cancellation needed from your transaction", not as
         "cancellation failed".
