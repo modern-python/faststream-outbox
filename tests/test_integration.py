@@ -834,11 +834,11 @@ async def test_fake_and_real_fetch_agree_on_eligibility_predicate(pg_engine, out
                 "queue": queue,
                 "payload": payload,
                 "headers": headers,
-                "next_attempt_at": text(f"now() + interval '{offset} seconds'"),
+                "next_attempt_at": text("now() + make_interval(secs => :next_s)").bindparams(next_s=offset),
             }
             if acq_age is not None:
                 values["acquired_token"] = uuid.uuid4()
-                values["acquired_at"] = text(f"now() - interval '{acq_age} seconds'")
+                values["acquired_at"] = text("now() - make_interval(secs => :acq_s)").bindparams(acq_s=acq_age)
             await session.execute(insert(outbox_table).values(**values))
     real_client = OutboxClient(pg_engine, outbox_table)
     async with pg_engine.connect() as conn:
