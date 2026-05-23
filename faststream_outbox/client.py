@@ -75,7 +75,7 @@ class OutboxClient:
         """
         return self._engine
 
-    async def fetch_with_conn(
+    async def fetch(
         self,
         conn: "AsyncConnection",
         queues: "Sequence[str]",
@@ -84,15 +84,16 @@ class OutboxClient:
         lease_ttl_seconds: float,
     ) -> list[OutboxInnerMessage]:
         """
-        Run the fetch CTE on a caller-supplied connection.
+        Atomically claim up to *limit* available rows for the given queue names on *conn*.
 
-        Same contract as :meth:`fetch`. Used by ``OutboxSubscriber._fetch_loop`` to reuse
-        a long-lived connection instead of acquiring one per fetch from the pool. Each
-        call opens its own transaction on *conn* via ``async with conn.begin():``.
-
-        Callers must pass a non-empty *queues*; the empty-queue short-circuit lives in
-        :meth:`fetch`.
+        A row is available iff its lease is unset (``acquired_token IS NULL``) or its
+        lease is older than *lease_ttl_seconds*. Returns the freshly-leased rows; each
+        carries ``acquired_token`` which the worker loop must echo back on the terminal
+        ``DELETE``/``UPDATE``. Opens its own transaction on *conn* via ``async with
+        conn.begin():``.
         """
+        if not queues:
+            return []
         token = uuid.uuid4()
         t = self._table
 
@@ -136,47 +137,18 @@ class OutboxClient:
             rows = result.mappings().all()
         return [_row_to_message(dict(row)) for row in rows]
 
-    async def fetch(
-        self,
-        queues: "Sequence[str]",
-        *,
-        limit: int,
-        lease_ttl_seconds: float,
-    ) -> list[OutboxInnerMessage]:
-        """
-        Atomically claim up to *limit* available rows for the given queue names.
-
-        A row is available iff its lease is unset (``acquired_token IS NULL``) or its
-        lease is older than *lease_ttl_seconds*. Returns the freshly-leased rows; each
-        carries ``acquired_token`` which the worker loop must echo back on the terminal
-        ``DELETE``/``UPDATE``.
-
-        Convenience wrapper that opens a one-shot connection and delegates to
-        :meth:`fetch_with_conn`. The subscriber loop uses ``fetch_with_conn`` directly
-        with a long-lived connection.
-        """
-        if not queues:
-            return []
-        async with self._engine.connect() as conn:
-            return await self.fetch_with_conn(
-                conn,
-                queues,
-                limit=limit,
-                lease_ttl_seconds=lease_ttl_seconds,
-            )
-
-    async def delete_with_lease_with_conn(
+    async def delete_with_lease(
         self,
         conn: "AsyncConnection",
         message_id: int,
         acquired_token: uuid.UUID,
     ) -> bool:
         """
-        Delete *message_id* iff it still holds *acquired_token* on a caller-supplied connection.
+        Delete *message_id* iff it still holds *acquired_token*. Returns True if deleted.
 
-        Mirrors :meth:`delete_with_lease`; lets the subscriber's worker loop reuse a long-lived
-        writer connection instead of acquiring one per row from the pool. Opens its own
-        transaction via ``async with conn.begin():``.
+        Opens its own transaction on *conn* via ``async with conn.begin():``. The lease
+        guard means a slow handler whose lease was reclaimed by a newer fetch finds
+        ``rowcount == 0`` and is silently dropped.
         """
         t = self._table
         stmt = delete(t).where(t.c.id == message_id, t.c.acquired_token == acquired_token)
@@ -184,18 +156,7 @@ class OutboxClient:
             result = await conn.execute(stmt)
         return (result.rowcount or 0) > 0
 
-    async def delete_with_lease(self, message_id: int, acquired_token: uuid.UUID) -> bool:
-        """
-        Delete *message_id* iff it still holds *acquired_token*. Returns True if deleted.
-
-        Convenience wrapper that opens a one-shot connection and delegates to
-        :meth:`delete_with_lease_with_conn`. The subscriber worker loop uses the
-        ``_with_conn`` variant directly with a long-lived connection.
-        """
-        async with self._engine.connect() as conn:
-            return await self.delete_with_lease_with_conn(conn, message_id, acquired_token)
-
-    async def mark_pending_with_lease_with_conn(  # noqa: PLR0913
+    async def mark_pending_with_lease(  # noqa: PLR0913
         self,
         conn: "AsyncConnection",
         message_id: int,
@@ -207,12 +168,11 @@ class OutboxClient:
         last_attempt_at: _dt.datetime,
     ) -> bool:
         """
-        Release the lease on *message_id* and reschedule for retry on a caller-supplied connection.
+        Release the lease on *message_id* and reschedule it for retry, iff it still holds the lease.
 
-        Mirrors :meth:`mark_pending_with_lease`; lets the subscriber's worker loop reuse a
-        long-lived writer connection instead of acquiring one per row from the pool. Opens
-        its own transaction via ``async with conn.begin():``. ``next_attempt_at`` is computed
-        server-side as ``now() + delay_seconds`` so retry timing uses the DB clock.
+        Opens its own transaction on *conn* via ``async with conn.begin():``.
+        ``next_attempt_at`` is computed server-side as ``now() + delay_seconds`` so retry
+        timing uses the DB clock.
         """
         t = self._table
         next_attempt_at_expr = func.now() + func.make_interval(0, 0, 0, 0, 0, 0, bindparam("delay", type_=Float))
@@ -231,34 +191,6 @@ class OutboxClient:
         async with conn.begin():
             result = await conn.execute(stmt, {"delay": max(0.0, delay_seconds)})
         return (result.rowcount or 0) > 0
-
-    async def mark_pending_with_lease(  # noqa: PLR0913
-        self,
-        message_id: int,
-        acquired_token: uuid.UUID,
-        *,
-        delay_seconds: float,
-        attempts_count: int,
-        first_attempt_at: _dt.datetime,
-        last_attempt_at: _dt.datetime,
-    ) -> bool:
-        """
-        Release the lease on *message_id* and reschedule it for retry, iff it still holds the lease.
-
-        Convenience wrapper that opens a one-shot connection and delegates to
-        :meth:`mark_pending_with_lease_with_conn`. The subscriber worker loop uses the
-        ``_with_conn`` variant directly with a long-lived connection.
-        """
-        async with self._engine.connect() as conn:
-            return await self.mark_pending_with_lease_with_conn(
-                conn,
-                message_id,
-                acquired_token,
-                delay_seconds=delay_seconds,
-                attempts_count=attempts_count,
-                first_attempt_at=first_attempt_at,
-                last_attempt_at=last_attempt_at,
-            )
 
     async def validate_schema(self) -> None:
         """

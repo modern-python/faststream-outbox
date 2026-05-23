@@ -98,19 +98,9 @@ class FakeOutboxClient:
         """No real engine — signals the subscriber loop to use the polling-only path."""
         return None
 
-    async def fetch_with_conn(
-        self,
-        conn: typing.Any,  # noqa: ARG002
-        queues: "Sequence[str]",
-        *,
-        limit: int,
-        lease_ttl_seconds: float,
-    ) -> list[OutboxInnerMessage]:
-        """Mirror :meth:`OutboxClient.fetch_with_conn`; *conn* is ignored by the fake."""
-        return await self.fetch(queues, limit=limit, lease_ttl_seconds=lease_ttl_seconds)
-
     async def fetch(
         self,
+        conn: typing.Any,  # noqa: ARG002
         queues: "Sequence[str]",
         *,
         limit: int,
@@ -139,45 +129,21 @@ class FakeOutboxClient:
             out.append(_to_inner(row))
         return out
 
-    async def delete_with_lease_with_conn(
+    async def delete_with_lease(
         self,
         conn: typing.Any,  # noqa: ARG002
         message_id: int,
         acquired_token: uuid.UUID,
     ) -> bool:
-        """Mirror :meth:`OutboxClient.delete_with_lease_with_conn`; *conn* is ignored by the fake."""
-        return await self.delete_with_lease(message_id, acquired_token)
-
-    async def delete_with_lease(self, message_id: int, acquired_token: uuid.UUID) -> bool:
         for i, row in enumerate(self._rows):
             if row.id == message_id and row.acquired_token == acquired_token:
                 del self._rows[i]
                 return True
         return False
 
-    async def mark_pending_with_lease_with_conn(  # noqa: PLR0913
-        self,
-        conn: typing.Any,  # noqa: ARG002
-        message_id: int,
-        acquired_token: uuid.UUID,
-        *,
-        delay_seconds: float,
-        attempts_count: int,
-        first_attempt_at: _dt.datetime,
-        last_attempt_at: _dt.datetime,
-    ) -> bool:
-        """Mirror :meth:`OutboxClient.mark_pending_with_lease_with_conn`; *conn* is ignored by the fake."""
-        return await self.mark_pending_with_lease(
-            message_id,
-            acquired_token,
-            delay_seconds=delay_seconds,
-            attempts_count=attempts_count,
-            first_attempt_at=first_attempt_at,
-            last_attempt_at=last_attempt_at,
-        )
-
     async def mark_pending_with_lease(  # noqa: PLR0913
         self,
+        conn: typing.Any,  # noqa: ARG002
         message_id: int,
         acquired_token: uuid.UUID,
         *,

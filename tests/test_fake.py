@@ -346,7 +346,7 @@ async def test_fake_broker_publish_invokes_flush_terminal_when_lease_lost() -> N
     """``delete_with_lease`` returning False is logged and skipped, not raised."""
 
     class LeaseLostClient(FakeOutboxClient):
-        async def delete_with_lease(self, message_id: int, acquired_token: uuid.UUID) -> bool:  # noqa: ARG002
+        async def delete_with_lease(self, conn: object, message_id: int, acquired_token: uuid.UUID) -> bool:  # noqa: ARG002
             return False
 
     broker = _make_broker()
@@ -396,12 +396,12 @@ async def test_fake_broker_publish_swallows_post_consume_failure() -> None:
             super().__init__()
             self.calls = 0
 
-        async def delete_with_lease(self, message_id: int, acquired_token: uuid.UUID) -> bool:
+        async def delete_with_lease(self, conn: object, message_id: int, acquired_token: uuid.UUID) -> bool:
             self.calls += 1
             if self.calls == 1:
                 msg = "delete blew up"
                 raise RuntimeError(msg)
-            return await super().delete_with_lease(message_id, acquired_token)
+            return await super().delete_with_lease(conn, message_id, acquired_token)
 
     broker = _make_broker()
     received: list[str] = []
@@ -560,12 +560,12 @@ async def test_loop_mode_fetch_loop_recovers_from_client_error() -> None:
             super().__init__()
             self._raised = False
 
-        async def fetch(self, queues, *, limit, lease_ttl_seconds):
+        async def fetch(self, conn, queues, *, limit, lease_ttl_seconds):
             if not self._raised:
                 self._raised = True
                 msg = "transient db error"
                 raise RuntimeError(msg)
-            return await super().fetch(queues, limit=limit, lease_ttl_seconds=lease_ttl_seconds)
+            return await super().fetch(conn, queues, limit=limit, lease_ttl_seconds=lease_ttl_seconds)
 
     broker = _make_broker()
     received: list[str] = []
@@ -618,8 +618,8 @@ async def test_loop_mode_flush_with_no_lease_token_is_noop() -> None:
     """Fetch strips the lease token → _flush_terminal early-returns. Loop-only path."""
 
     class TokenStrippingClient(FakeOutboxClient):
-        async def fetch(self, queues, *, limit, lease_ttl_seconds):
-            rows = await super().fetch(queues, limit=limit, lease_ttl_seconds=lease_ttl_seconds)
+        async def fetch(self, conn, queues, *, limit, lease_ttl_seconds):
+            rows = await super().fetch(conn, queues, limit=limit, lease_ttl_seconds=lease_ttl_seconds)
             for row in rows:
                 row.acquired_token = None
             return rows
@@ -641,8 +641,8 @@ async def test_loop_mode_flush_with_no_lease_token_is_noop() -> None:
 
 async def test_loop_mode_flush_retry_with_no_lease_token_is_noop() -> None:
     class TokenStrippingClient(FakeOutboxClient):
-        async def fetch(self, queues, *, limit, lease_ttl_seconds):
-            rows = await super().fetch(queues, limit=limit, lease_ttl_seconds=lease_ttl_seconds)
+        async def fetch(self, conn, queues, *, limit, lease_ttl_seconds):
+            rows = await super().fetch(conn, queues, limit=limit, lease_ttl_seconds=lease_ttl_seconds)
             for row in rows:
                 row.acquired_token = None
             return rows
@@ -790,17 +790,6 @@ async def test_test_broker_feed_forwards_timer_id() -> None:
 # --- FakeOutboxClient unit tests ------------------------------------------------------
 
 
-async def test_fake_client_fetch_with_conn_mirrors_fetch() -> None:
-    fake = FakeOutboxClient()
-    fake.feed(queue="q", payload=b"x")
-
-    rows = await fake.fetch_with_conn(None, ["q"], limit=10, lease_ttl_seconds=60.0)
-
-    assert len(rows) == 1
-    assert rows[0].queue == "q"
-    assert rows[0].payload == b"x"
-
-
 async def test_fake_client_feed_timer_id_dedup() -> None:
     fake = FakeOutboxClient()
     first = fake.feed(queue="q", payload=b"x", timer_id="email-1")
@@ -824,7 +813,7 @@ async def test_fake_client_future_next_attempt_is_invisible_to_fetch() -> None:
     fake = FakeOutboxClient()
     future = _dt.datetime.now(tz=_dt.UTC) + _dt.timedelta(minutes=5)
     fake.feed(queue="q", payload=b"x", next_attempt_at=future)
-    rows = await fake.fetch(["q"], limit=10, lease_ttl_seconds=60.0)
+    rows = await fake.fetch(None, ["q"], limit=10, lease_ttl_seconds=60.0)
     assert rows == []
 
 

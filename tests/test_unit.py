@@ -913,7 +913,7 @@ async def test_client_fetch_empty_queues_returns_empty() -> None:
     metadata = MetaData()
     t = make_outbox_table(metadata)
     client = OutboxClient(AsyncMock(), t)
-    assert await client.fetch([], limit=10, lease_ttl_seconds=60.0) == []
+    assert await client.fetch(AsyncMock(), [], limit=10, lease_ttl_seconds=60.0) == []
 
 
 # --- OutboxMessage.reject + assert_state_set logger branch ---
@@ -1005,14 +1005,14 @@ async def test_fake_client_fetch_empty_queues() -> None:
     from faststream_outbox.testing import FakeOutboxClient  # noqa: PLC0415
 
     client = FakeOutboxClient()
-    assert await client.fetch([], limit=10, lease_ttl_seconds=60.0) == []
+    assert await client.fetch(None, [], limit=10, lease_ttl_seconds=60.0) == []
 
 
 async def test_fake_client_delete_miss() -> None:
     from faststream_outbox.testing import FakeOutboxClient  # noqa: PLC0415
 
     client = FakeOutboxClient()
-    assert await client.delete_with_lease(123, uuid.uuid4()) is False
+    assert await client.delete_with_lease(None, 123, uuid.uuid4()) is False
 
 
 async def test_fake_client_mark_pending_miss() -> None:
@@ -1021,6 +1021,7 @@ async def test_fake_client_mark_pending_miss() -> None:
     client = FakeOutboxClient()
     now = _dt.datetime.now(tz=_dt.UTC)
     updated = await client.mark_pending_with_lease(
+        None,
         999,
         uuid.uuid4(),
         delay_seconds=0.0,
@@ -1261,96 +1262,33 @@ async def test_fake_client_fetch_ties_break_on_id() -> None:
     id_c = client.feed(queue="orders", payload=b"c", next_attempt_at=same_time)
     assert (id_a, id_b, id_c) == (1, 2, 3)
 
-    fetched = await client.fetch(["orders"], limit=3, lease_ttl_seconds=60.0)
+    fetched = await client.fetch(None, ["orders"], limit=3, lease_ttl_seconds=60.0)
     assert [r.id for r in fetched] == [1, 2, 3]
 
 
-async def test_fake_client_delete_with_lease_with_conn_delegates() -> None:
-    """The fake's ``_with_conn`` shim ignores conn and returns the delegate result."""
-    client = FakeOutboxClient()
-    token = uuid.uuid4()
-    client.feed(queue="orders", payload=b"x")
-    client.rows[0].acquired_token = token
-    sentinel_conn = MagicMock()  # any non-conn object — the fake must ignore it
-
-    assert await client.delete_with_lease_with_conn(sentinel_conn, client.rows[0].id, token) is True
-    # second call: row was deleted, so the lease check fails → False
-    assert await client.delete_with_lease_with_conn(sentinel_conn, 999, token) is False
-
-
-async def test_fake_client_mark_pending_with_lease_with_conn_delegates() -> None:
-    """The fake's ``_with_conn`` shim ignores conn and forwards all kwargs."""
-    client = FakeOutboxClient()
-    token = uuid.uuid4()
-    row_id = client.feed(queue="orders", payload=b"x")
-    assert row_id is not None
-    client.rows[0].acquired_token = token
-    now = _dt.datetime.now(tz=_dt.UTC)
-    sentinel_conn = MagicMock()
-
-    updated = await client.mark_pending_with_lease_with_conn(
-        sentinel_conn,
-        row_id,
-        token,
-        delay_seconds=5.0,
-        attempts_count=3,
-        first_attempt_at=now,
-        last_attempt_at=now,
-    )
-    assert updated is True
-    assert client.rows[0].attempts_count == 3
-    assert client.rows[0].acquired_token is None  # lease released
-
-
-async def test_dispatch_one_with_writer_conn_calls_with_conn_variant() -> None:
-    """When ``writer_conn`` is provided, the conn-taking client method is invoked, not the one-shot."""
-    fake = FakeOutboxClient()
-    broker, test_broker = _make_broker_for_dispatch(fake)
-    # deliveries_count=2 with max_deliveries=1 → allow_delivery returns False, dispatch_one
-    # skips consume() and goes straight to the flush path we want to assert against.
-    msg = _make_msg_over_max_deliveries()
-    sentinel_conn = MagicMock()
-
-    # Use AsyncMock(return_value=True) for both so the _with_conn variant doesn't delegate
-    # to the one-shot (which is what FakeOutboxClient normally does to share storage).
-    with (
-        patch.object(fake, "delete_with_lease_with_conn", new=AsyncMock(return_value=True)) as spy_with,
-        patch.object(fake, "delete_with_lease", new=AsyncMock(return_value=True)) as spy_one_shot,
-    ):
-        async with test_broker:
-            sub = next(iter(broker._subscribers))  # noqa: SLF001
-            await sub.dispatch_one(msg, writer_conn=sentinel_conn)
-
-    spy_with.assert_awaited_once()
-    await_args = spy_with.await_args
-    assert await_args is not None
-    assert await_args.args[0] is sentinel_conn
-    spy_one_shot.assert_not_awaited()
-
-
-async def test_dispatch_one_without_writer_conn_calls_one_shot_variant() -> None:
-    """When ``writer_conn`` is None (test broker / sync dispatch), the one-shot method is invoked."""
+@pytest.mark.parametrize("writer_conn", [None, "sentinel"])
+async def test_dispatch_one_threads_writer_conn_into_delete(writer_conn: object) -> None:
+    """``dispatch_one`` forwards ``writer_conn`` (sentinel or ``None``) into ``delete_with_lease``."""
     fake = FakeOutboxClient()
     broker, test_broker = _make_broker_for_dispatch(fake)
     msg = _make_msg_over_max_deliveries()
+    conn_arg = MagicMock() if writer_conn == "sentinel" else None
 
-    with (
-        patch.object(fake, "delete_with_lease_with_conn", new=AsyncMock(return_value=True)) as spy_with,
-        patch.object(fake, "delete_with_lease", new=AsyncMock(return_value=True)) as spy_one_shot,
-    ):
+    with patch.object(fake, "delete_with_lease", new=AsyncMock(return_value=True)) as spy:
         async with test_broker:
             sub = next(iter(broker._subscribers))  # noqa: SLF001
-            await sub.dispatch_one(msg, writer_conn=None)
+            await sub.dispatch_one(msg, writer_conn=conn_arg)
 
-    spy_with.assert_not_awaited()
-    spy_one_shot.assert_awaited_once()
+    spy.assert_awaited_once()
+    assert spy.await_args is not None
+    assert spy.await_args.args[0] is conn_arg
 
 
 async def test_dispatch_one_propagates_flush_error_when_writer_conn_set() -> None:
     """A flush error against a cached writer conn must propagate so _worker_loop can reconnect."""
 
     class RaisingFake(FakeOutboxClient):
-        async def delete_with_lease_with_conn(self, conn: object, message_id: int, acquired_token: uuid.UUID) -> bool:  # noqa: ARG002
+        async def delete_with_lease(self, conn: object, message_id: int, acquired_token: uuid.UUID) -> bool:  # noqa: ARG002
             msg = "writer conn poisoned"
             raise RuntimeError(msg)
 
@@ -1367,8 +1305,8 @@ async def test_dispatch_one_swallows_flush_error_when_writer_conn_none() -> None
     """Legacy behavior: without a writer_conn, a raising delete is logged and swallowed."""
 
     class RaisingFake(FakeOutboxClient):
-        async def delete_with_lease(self, message_id: int, acquired_token: uuid.UUID) -> bool:  # noqa: ARG002
-            msg = "one-shot delete blew up"
+        async def delete_with_lease(self, conn: object, message_id: int, acquired_token: uuid.UUID) -> bool:  # noqa: ARG002
+            msg = "delete blew up"
             raise RuntimeError(msg)
 
     broker, test_broker = _make_broker_for_dispatch(RaisingFake())
@@ -1380,31 +1318,23 @@ async def test_dispatch_one_swallows_flush_error_when_writer_conn_none() -> None
         await sub.dispatch_one(msg, writer_conn=None)
 
 
-async def test_flush_retry_with_writer_conn_calls_with_conn_variant() -> None:
-    """``_flush_retry`` routes to the conn-taking client method when writer_conn is set."""
+@pytest.mark.parametrize("writer_conn", [None, "sentinel"])
+async def test_flush_retry_threads_writer_conn_into_mark_pending(writer_conn: object) -> None:
+    """``_flush_retry`` forwards ``writer_conn`` (sentinel or ``None``) into ``mark_pending_with_lease``."""
     fake = FakeOutboxClient()
     broker, test_broker = _make_broker_for_dispatch(fake)
     msg = _make_msg()
     msg.pending_delay_seconds = 1.0  # set post-construction; field is init=False
-    sentinel_conn = MagicMock()
+    conn_arg = MagicMock() if writer_conn == "sentinel" else None
 
-    with (
-        patch.object(
-            fake,
-            "mark_pending_with_lease_with_conn",
-            new=AsyncMock(return_value=True),
-        ) as spy_with,
-        patch.object(fake, "mark_pending_with_lease", new=AsyncMock(return_value=True)) as spy_one_shot,
-    ):
+    with patch.object(fake, "mark_pending_with_lease", new=AsyncMock(return_value=True)) as spy:
         async with test_broker:
             sub = next(iter(broker._subscribers))  # noqa: SLF001
-            await sub._flush_retry(msg, writer_conn=sentinel_conn)  # noqa: SLF001
+            await sub._flush_retry(msg, writer_conn=conn_arg)  # noqa: SLF001
 
-    spy_with.assert_awaited_once()
-    await_args = spy_with.await_args
-    assert await_args is not None
-    assert await_args.args[0] is sentinel_conn
-    spy_one_shot.assert_not_awaited()
+    spy.assert_awaited_once()
+    assert spy.await_args is not None
+    assert spy.await_args.args[0] is conn_arg
 
 
 async def test_dispatch_one_outer_except_swallows_consume_failure() -> None:
@@ -1480,7 +1410,7 @@ async def test_flush_retry_propagates_error_with_writer_conn() -> None:
     """``_flush_retry`` propagates client errors when writer_conn is provided (production path)."""
 
     class RaisingFake(FakeOutboxClient):
-        async def mark_pending_with_lease_with_conn(self, *args: object, **kwargs: object) -> bool:  # noqa: ARG002
+        async def mark_pending_with_lease(self, *args: object, **kwargs: object) -> bool:  # noqa: ARG002
             msg = "retry write poisoned"
             raise RuntimeError(msg)
 
@@ -1610,8 +1540,8 @@ async def test_worker_loop_reconnects_after_error(monkeypatch: pytest.MonkeyPatc
     assert sleeps[0] > 0
 
 
-async def test_outbox_client_delete_with_lease_with_conn_uses_caller_conn() -> None:
-    """Pin that the new ``_with_conn`` method runs its statement on the supplied conn, not engine.begin()."""
+async def test_outbox_client_delete_with_lease_uses_caller_conn() -> None:
+    """``delete_with_lease`` runs its statement on the supplied conn, not via engine.begin()."""
     metadata = MetaData()
     t = make_outbox_table(metadata)
     engine = MagicMock()
@@ -1624,7 +1554,7 @@ async def test_outbox_client_delete_with_lease_with_conn_uses_caller_conn() -> N
     fake_conn.begin = MagicMock(return_value=begin_cm)
     fake_conn.execute = AsyncMock(return_value=MagicMock(rowcount=1))
 
-    deleted = await client.delete_with_lease_with_conn(fake_conn, 42, uuid.uuid4())
+    deleted = await client.delete_with_lease(fake_conn, 42, uuid.uuid4())
 
     assert deleted is True
     fake_conn.begin.assert_called_once()
@@ -1633,8 +1563,8 @@ async def test_outbox_client_delete_with_lease_with_conn_uses_caller_conn() -> N
     engine.begin.assert_not_called()
 
 
-async def test_outbox_client_mark_pending_with_lease_with_conn_uses_caller_conn() -> None:
-    """Pin that the new ``_with_conn`` retry method runs its statement on the supplied conn."""
+async def test_outbox_client_mark_pending_with_lease_uses_caller_conn() -> None:
+    """``mark_pending_with_lease`` runs its statement on the supplied conn."""
     metadata = MetaData()
     t = make_outbox_table(metadata)
     engine = MagicMock()
@@ -1648,7 +1578,7 @@ async def test_outbox_client_mark_pending_with_lease_with_conn_uses_caller_conn(
     fake_conn.execute = AsyncMock(return_value=MagicMock(rowcount=1))
     now = _dt.datetime.now(tz=_dt.UTC)
 
-    updated = await client.mark_pending_with_lease_with_conn(
+    updated = await client.mark_pending_with_lease(
         fake_conn,
         7,
         uuid.uuid4(),
