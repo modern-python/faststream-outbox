@@ -1397,15 +1397,18 @@ async def test_dispatch_one_outer_except_swallows_consume_failure() -> None:
 
 async def test_flush_terminal_logs_lease_lost_at_warning_with_structured_fields() -> None:
     """M7: when delete returns rowcount=0 (lease reclaimed) the broker emits a WARNING with structured fields."""
-    fake = FakeOutboxClient()
-    broker, test_broker = _make_broker_for_dispatch(fake)
+
+    class LeaseLostFake(FakeOutboxClient):
+        async def delete_with_lease(self, *args: object, **kwargs: object) -> bool:  # noqa: ARG002
+            return False
+
+    broker, test_broker = _make_broker_for_dispatch(LeaseLostFake())
     msg = _make_msg(id=42, queue="orders", deliveries_count=3)
 
-    with patch.object(fake, "delete_with_lease", new=AsyncMock(return_value=False)):
-        async with test_broker:
-            sub = next(iter(broker._subscribers))  # noqa: SLF001
-            with patch.object(sub, "_log") as spy_log:
-                await sub._flush_terminal(msg, writer_conn=None)  # noqa: SLF001
+    async with test_broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        with patch.object(sub, "_log") as spy_log:
+            await sub._flush_terminal(msg, writer_conn=None)  # noqa: SLF001
 
     spy_log.assert_called_once()
     call = spy_log.call_args
@@ -1420,16 +1423,19 @@ async def test_flush_terminal_logs_lease_lost_at_warning_with_structured_fields(
 
 async def test_flush_retry_logs_lease_lost_at_warning_with_structured_fields() -> None:
     """M7: when retry UPDATE returns rowcount=0 (lease reclaimed) the broker emits a WARNING with structured fields."""
-    fake = FakeOutboxClient()
-    broker, test_broker = _make_broker_for_dispatch(fake)
+
+    class LeaseLostFake(FakeOutboxClient):
+        async def mark_pending_with_lease(self, *args: object, **kwargs: object) -> bool:  # noqa: ARG002
+            return False
+
+    broker, test_broker = _make_broker_for_dispatch(LeaseLostFake())
     msg = _make_msg(id=99, queue="orders", deliveries_count=2)
     msg.pending_delay_seconds = 1.0
 
-    with patch.object(fake, "mark_pending_with_lease", new=AsyncMock(return_value=False)):
-        async with test_broker:
-            sub = next(iter(broker._subscribers))  # noqa: SLF001
-            with patch.object(sub, "_log") as spy_log:
-                await sub._flush_retry(msg, writer_conn=None)  # noqa: SLF001
+    async with test_broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        with patch.object(sub, "_log") as spy_log:
+            await sub._flush_retry(msg, writer_conn=None)  # noqa: SLF001
 
     spy_log.assert_called_once()
     call = spy_log.call_args
