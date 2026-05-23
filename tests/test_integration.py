@@ -8,7 +8,7 @@ from unittest import mock
 
 import pytest
 from sqlalchemy import event, insert, select, text
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from faststream_outbox import (
     ConstantRetry,
@@ -866,3 +866,67 @@ async def test_fake_and_real_fetch_agree_on_eligibility_predicate(pg_engine, out
     assert real_labels == fake_labels == expected_eligible, (
         f"predicate drift — real={real_labels} fake={fake_labels} expected={expected_eligible}"
     )
+
+
+async def test_concurrent_drain_with_eight_workers_holds_pool_bounded(pg_engine, outbox_table) -> None:
+    """
+    T2 — multi-worker drain: 500 rows + max_workers=8 keeps pool checkouts O(workers).
+
+    The M3 baseline (test above) exercises max_workers=1 (2 steady-state pool
+    connections: 1 fetch + 1 writer). This test raises the bar to max_workers=8
+    (9 steady-state: 1 fetch + 8 writers) and asserts under sustained concurrent
+    drain: no duplicate deliveries, no lost rows, all terminal writes land, and
+    checkouts stay bounded by O(workers). Uses a locally-tuned engine
+    (``pool_size=20``) so the test's connection budget is self-documenting and
+    doesn't perturb the conftest fixture used by every other integration test.
+    """
+    # ``str(url)`` masks the password as ``***``; render with hide_password=False so
+    # asyncpg authenticates against the real DSN.
+    dsn = pg_engine.url.render_as_string(hide_password=False)
+    local_engine = create_async_engine(dsn, future=True, pool_size=20, max_overflow=5)
+    try:
+        broker = OutboxBroker(local_engine, outbox_table=outbox_table)
+        n_rows = 500
+        received: list[int] = []
+
+        @broker.subscriber(
+            "orders",
+            max_workers=8,
+            fetch_batch_size=50,
+            min_fetch_interval=0.02,
+            max_fetch_interval=0.1,
+        )
+        async def handle(body: dict) -> None:
+            received.append(body["i"])
+
+        # Seed BEFORE attaching the checkout listener so seed round-trips don't pollute the count.
+        session_factory = async_sessionmaker(local_engine, expire_on_commit=False)
+        bodies = [{"i": i} for i in range(n_rows)]
+        async with session_factory() as session, session.begin():
+            await broker.publish_batch(*bodies, queue="orders", session=session)
+
+        checkouts: list[None] = []
+
+        def _on_checkout(*_args: object) -> None:
+            checkouts.append(None)
+
+        event.listen(local_engine.sync_engine, "checkout", _on_checkout)
+        try:
+            async with broker:
+                await _wait_until(lambda: len(received) == n_rows, timeout=30.0)
+                # Settle: allow terminal DELETEs from 8 workers to flush before shutdown.
+                await asyncio.sleep(0.5)
+        finally:
+            event.remove(local_engine.sync_engine, "checkout", _on_checkout)
+
+        assert sorted(received) == list(range(n_rows)), "lost or out-of-range rows"
+        assert len(received) == len(set(received)), "duplicate deliveries"
+        assert await _row_count(local_engine, outbox_table) == 0, "terminal writes did not land"
+        # Steady-state: 9 SQLAlchemy connections (1 fetch + 8 writers). Allow ~16
+        # of startup/health-probe churn. Pre-M3 with n=500 would be 500+ checkouts.
+        assert len(checkouts) <= 25, (
+            f"pool checkouts during {n_rows}-row drain at max_workers=8: {len(checkouts)}; "
+            f"expected O(workers), not O(rows)"
+        )
+    finally:
+        await local_engine.dispose()
