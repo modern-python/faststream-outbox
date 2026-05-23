@@ -8,6 +8,7 @@ from sqlalchemy import MetaData
 
 from faststream_outbox import (
     ConstantRetry,
+    NoRetry,
     OutboxBroker,
     OutboxRouter,
     RetryStrategyProto,
@@ -105,7 +106,7 @@ async def test_fake_broker_publish_to_unhandled_queue_leaves_row() -> None:
 async def test_fake_broker_failing_handler_with_no_retry_deletes_row() -> None:
     broker = _make_broker()
 
-    @broker.subscriber("orders")
+    @broker.subscriber("orders", retry_strategy=NoRetry())
     async def handle(body: str) -> None:
         del body
         msg = "boom"
@@ -116,6 +117,26 @@ async def test_fake_broker_failing_handler_with_no_retry_deletes_row() -> None:
         await broker.publish("x", queue="orders")  # ty: ignore[missing-argument]
 
     assert test_broker.fake_client.rows == []
+
+
+async def test_fake_broker_failing_handler_with_default_retry_keeps_row() -> None:
+    """The default retry policy must reschedule (not delete) on a transient handler error."""
+    broker = _make_broker()
+
+    @broker.subscriber("orders")
+    async def handle(body: str) -> None:
+        del body
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish("x", queue="orders")  # ty: ignore[missing-argument]
+
+    assert len(test_broker.fake_client.rows) == 1
+    row = test_broker.fake_client.rows[0]
+    assert row.attempts_count == 1
+    assert row.next_attempt_at > _dt.datetime.now(tz=_dt.UTC)  # rescheduled, not deleted
 
 
 async def test_fake_broker_correlation_id_in_handler_context() -> None:

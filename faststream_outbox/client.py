@@ -22,10 +22,10 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     Float,
+    MetaData,
     bindparam,
     delete,
     func,
-    inspect,
     or_,
     select,
     text,
@@ -33,10 +33,24 @@ from sqlalchemy import (
 )
 
 from faststream_outbox.message import OutboxInnerMessage
+from faststream_outbox.schema import make_outbox_table
+
+
+# Optional dependency: alembic backs validate_schema() only. Importing at module
+# level (per the project's "no inline imports" convention) means we resolve once
+# at import time; users who don't call validate_schema() never trigger the path
+# and never need the dependency installed.
+try:
+    from alembic.autogenerate import compare_metadata as _alembic_compare_metadata
+    from alembic.migration import MigrationContext as _AlembicMigrationContext
+except ImportError:  # pragma: no cover  # alembic is in the dev group so the except branch is unreachable in CI
+    _alembic_compare_metadata = None  # ty: ignore[invalid-assignment]
+    _AlembicMigrationContext = None  # ty: ignore[invalid-assignment]
 
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    import typing
+    from collections.abc import Mapping, Sequence
 
     from sqlalchemy import Connection, Table
     from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
@@ -231,14 +245,101 @@ def _row_to_message(row: dict) -> OutboxInnerMessage:
 
 
 def _validate_schema_sync(connection: "Connection", table: "Table") -> list[str]:
-    insp = inspect(connection)
+    """
+    Run Alembic's autogenerate diff against the live DB and surface any "missing schema" drift.
+
+    The canonical schema is whatever ``make_outbox_table`` produces — the same Table the user
+    attaches to their own ``MetaData``. Delegating to Alembic avoids re-implementing column /
+    index comparison logic (which would diverge from the declaration over time) and keeps the
+    package out of the schema-management business that Alembic already owns.
+
+    ``add_*`` and ``modify_*`` ops fail validation (the DB is missing or has the wrong shape for
+    something the broker needs). ``remove_*`` ops are ignored — the user may have extra columns
+    or indexes for their own use, and we don't care.
+    """
+    if _alembic_compare_metadata is None or _AlembicMigrationContext is None:
+        msg = "validate_schema() requires alembic. Install with `pip install faststream-outbox[validate]`."
+        raise ImportError(msg)
+
+    # Isolated MetaData containing ONLY the canonical outbox table, so the user's
+    # domain tables (in their own MetaData) don't show up in the diff.
+    canonical_metadata = MetaData()
+    make_outbox_table(canonical_metadata, table_name=table.name)
+
+    def _include_name(name: str | None, type_: str, parent_names: "Mapping[str, str | None]") -> bool:
+        if type_ == "schema":
+            return True
+        if type_ == "table":
+            return name == table.name
+        return parent_names.get("table_name") == table.name
+
+    ctx = _AlembicMigrationContext.configure(
+        connection,
+        opts={
+            "compare_type": True,
+            "compare_server_default": False,
+            "include_name": _include_name,
+            "target_metadata": canonical_metadata,
+        },
+    )
+    diff = _alembic_compare_metadata(ctx, canonical_metadata)
+    return _flatten_drift_errors(diff, table.name)
+
+
+def _flatten_drift_errors(diff: "Sequence[typing.Any]", table_name: str) -> list[str]:
+    """
+    Walk Alembic's nested diff and surface only the ops that mean *missing schema*.
+
+    Top-level entries are tuples for table-level ops (``add_table``, ``remove_table``) and
+    lists of nested tuples for column / index ops on existing tables. ``remove_*`` ops are
+    skipped — extras are user business.
+    """
     errors: list[str] = []
-    if not insp.has_table(table.name):
-        errors.append(f"table '{table.name}' does not exist")
-        return errors
-    actual = {c["name"] for c in insp.get_columns(table.name)}
-    expected = {c.name for c in table.columns}
-    missing = expected - actual
-    if missing:
-        errors.append(f"table '{table.name}' missing columns: {sorted(missing)}")
+    for entry in diff:
+        if isinstance(entry, list):
+            for nested in entry:
+                err = _drift_entry_to_error(nested, table_name)
+                if err is not None:
+                    errors.append(err)
+        else:
+            err = _drift_entry_to_error(entry, table_name)
+            if err is not None:
+                errors.append(err)
     return errors
+
+
+def _drift_entry_to_error(entry: tuple, table_name: str) -> str | None:
+    """
+    Map one Alembic op tuple to a human-readable error string, or None to ignore.
+
+    Tuple shapes per Alembic's autogenerate contract:
+      add_column       -> (op, schema, table_name, Column)
+      modify_type      -> (op, schema, table_name, column_name, opts, existing_type, metadata_type)
+      modify_nullable  -> (op, schema, table_name, column_name, opts, existing_null, metadata_null)
+      add_index        -> (op, Index)
+
+    The canonical outbox table declares no CHECK / FK / UNIQUE constraints
+    (only the autoincrement PK, which Alembic emits as part of ``add_table``),
+    so ``add_constraint`` is not a reachable op here.
+    """
+    op = entry[0]
+    if op == "add_table":
+        return f"table '{table_name}' does not exist"
+    if op == "add_column":
+        col = entry[3]
+        return f"table '{table_name}' missing column '{col.name}'"
+    if op == "modify_type":
+        col_name = entry[3]
+        existing_type = entry[5]
+        expected_type = entry[6]
+        return (
+            f"table '{table_name}' column '{col_name}' type mismatch: expected {expected_type!r}, got {existing_type!r}"
+        )
+    if op == "modify_nullable":
+        col_name = entry[3]
+        return f"table '{table_name}' column '{col_name}' nullability mismatch"
+    if op == "add_index":
+        idx = entry[1]
+        cols = [c.name for c in idx.columns]
+        return f"table '{table_name}' missing index over {cols} (name={idx.name!r}, unique={bool(idx.unique)})"
+    return None
