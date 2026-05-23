@@ -62,6 +62,8 @@ Every terminal write (`delete_with_lease`, `mark_pending_with_lease`) filters on
 
 `lease_ttl_seconds` (default `60.0`, per-subscriber) **must exceed the P99 handler duration with margin**, otherwise healthy in-flight handlers race their own lease expiry and trigger duplicate deliveries. The lease cutoff is computed server-side via `make_interval(secs => :lease_ttl)` to be immune to worker/DB clock skew.
 
+**Sizing tip — slow handlers.** When a small fraction of work is much slower than the rest (e.g. an occasional 5-minute job among 100ms typicals), don't crank `lease_ttl_seconds` globally — that delays reclaim of *actually* stuck rows on the fast path. Route slow work onto its own subscriber with a tall `lease_ttl_seconds`; keep the fast subscriber's TTL tight. `lease_ttl_seconds` is already per-subscriber, so the segregation costs nothing beyond an extra `@broker.subscriber(...)` decorator and routing producers to the right queue name.
+
 Lease-loss is logged at WARNING with `extra={"event": "lease_lost", "phase": "terminal" | "retry", "row_id": ..., "queue": ..., "deliveries_count": ...}` (in `_flush_terminal` / `_flush_retry`). Recurring `event=lease_lost` records mean `lease_ttl_seconds < handler P99` — that's the operator playbook signal. Log-pipeline aggregators (Datadog, CloudWatch, Loki) can count these records via the `event` field without parsing the message.
 
 ### Test broker
