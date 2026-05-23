@@ -45,6 +45,43 @@ if typing.TYPE_CHECKING:
     from faststream_outbox.subscriber.usecase import OutboxSubscriber
 
 
+def _validate_activate_args(
+    method_name: str,
+    activate_in: _dt.timedelta | None,
+    activate_at: _dt.datetime | None,
+) -> None:
+    """Mutex + tz-aware checks shared by ``publish`` / ``publish_batch`` (real broker + test fakes)."""
+    if activate_in is not None and activate_at is not None:
+        msg = f"{method_name} accepts at most one of activate_in / activate_at"
+        raise ValueError(msg)
+    if activate_at is not None and activate_at.tzinfo is None:
+        msg = f"{method_name} requires activate_at to be timezone-aware"
+        raise ValueError(msg)
+
+
+def _validate_publish_args(
+    method_name: str,
+    session: object,
+    activate_in: _dt.timedelta | None,
+    activate_at: _dt.datetime | None,
+) -> None:
+    """Full publish validation: session type + activate-args mutex/tz. Real broker only."""
+    if not isinstance(session, AsyncSession):
+        msg = f"{method_name} requires an sqlalchemy.ext.asyncio.AsyncSession"
+        raise TypeError(msg)
+    _validate_activate_args(method_name, activate_in, activate_at)
+
+
+def _compute_next_at_client_side(
+    activate_in: _dt.timedelta | None,
+    activate_at: _dt.datetime | None,
+) -> _dt.datetime | None:
+    """Resolve activate_in / activate_at to a single ``next_attempt_at`` value (client clock)."""
+    if activate_in is not None:
+        return _dt.datetime.now(tz=_dt.UTC) + activate_in
+    return activate_at
+
+
 class _CaptureExceptionMiddleware(BaseMiddleware):
     """
     Stash the handler exception on the inner row before AckMiddleware nacks.
@@ -215,15 +252,7 @@ class OutboxBroker(
         Returns the inserted row's ``id`` (BigInt PK), or ``None`` if a timer with
         the same ``(queue, timer_id)`` already exists.
         """
-        if not isinstance(session, AsyncSession):
-            msg = "broker.publish requires an sqlalchemy.ext.asyncio.AsyncSession"
-            raise TypeError(msg)
-        if activate_in is not None and activate_at is not None:
-            msg = "broker.publish accepts at most one of activate_in / activate_at"
-            raise ValueError(msg)
-        if activate_at is not None and activate_at.tzinfo is None:
-            msg = "broker.publish requires activate_at to be timezone-aware"
-            raise ValueError(msg)
+        _validate_publish_args("broker.publish", session, activate_in, activate_at)
         serializer = self.config.broker_config.fd_config._serializer  # noqa: SLF001
         payload, hdrs = _encode_payload(
             body,
@@ -288,26 +317,14 @@ class OutboxBroker(
         every row in the batch identically — per-row timer dedup is not supported,
         use :meth:`publish` for that.
         """
-        if not isinstance(session, AsyncSession):
-            msg = "broker.publish_batch requires an sqlalchemy.ext.asyncio.AsyncSession"
-            raise TypeError(msg)
-        if activate_in is not None and activate_at is not None:
-            msg = "broker.publish_batch accepts at most one of activate_in / activate_at"
-            raise ValueError(msg)
-        if activate_at is not None and activate_at.tzinfo is None:
-            msg = "broker.publish_batch requires activate_at to be timezone-aware"
-            raise ValueError(msg)
+        _validate_publish_args("broker.publish_batch", session, activate_in, activate_at)
         if not bodies:
             return
         # Client-side time for batch: executemany doesn't compose with column-level
         # SQL expressions easily, and a few-ms drift versus the DB is harmless for
         # user-supplied scheduling. (Retries still use server time via mark_pending_with_lease.)
         now = _dt.datetime.now(tz=_dt.UTC)
-        next_at: _dt.datetime | None = None
-        if activate_in is not None:
-            next_at = now + activate_in
-        elif activate_at is not None:
-            next_at = activate_at
+        next_at = _compute_next_at_client_side(activate_in, activate_at)
         serializer = self.config.broker_config.fd_config._serializer  # noqa: SLF001
         rows = []
         for body in bodies:

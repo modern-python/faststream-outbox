@@ -288,6 +288,31 @@ async def test_fake_broker_publish_batch_rejects_both_activate_in_and_activate_a
             )
 
 
+async def test_fake_broker_publish_rejects_naive_activate_at() -> None:
+    """Parity with real broker: a naive activate_at must raise so tests catch the bug pre-prod."""
+    broker = _make_broker()
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        with pytest.raises(ValueError, match=r"broker\.publish requires activate_at to be timezone-aware"):
+            await broker.publish(  # ty: ignore[missing-argument]
+                "x",
+                queue="orders",
+                activate_at=_dt.datetime.now(),  # noqa: DTZ005
+            )
+
+
+async def test_fake_broker_publish_batch_rejects_naive_activate_at() -> None:
+    broker = _make_broker()
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        with pytest.raises(ValueError, match=r"broker\.publish_batch requires activate_at to be timezone-aware"):
+            await broker.publish_batch(  # ty: ignore[missing-argument]
+                "x",
+                queue="orders",
+                activate_at=_dt.datetime.now(),  # noqa: DTZ005
+            )
+
+
 async def test_fake_broker_publish_batch_empty_bodies_is_noop() -> None:
     broker = _make_broker()
     test_broker = TestOutboxBroker(broker)

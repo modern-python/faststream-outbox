@@ -21,7 +21,11 @@ from unittest import mock
 
 from faststream._internal.testing.broker import TestBroker
 
-from faststream_outbox.broker import OutboxBroker
+from faststream_outbox.broker import (
+    OutboxBroker,
+    _compute_next_at_client_side,
+    _validate_activate_args,
+)
 from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.message import OutboxInnerMessage
 
@@ -241,20 +245,14 @@ def _build_fake_publish(
     ) -> int | None:
         # session is ignored in test mode — the fake client has no transaction.
         del session
-        if activate_in is not None and activate_at is not None:
-            msg = "broker.publish accepts at most one of activate_in / activate_at"
-            raise ValueError(msg)
+        _validate_activate_args("broker.publish", activate_in, activate_at)
         payload, hdrs = _encode_payload(
             body,
             headers=headers,
             correlation_id=correlation_id,
             serializer=serializer,
         )
-        next_at: _dt.datetime | None = None
-        if activate_in is not None:
-            next_at = _utcnow() + activate_in
-        elif activate_at is not None:
-            next_at = activate_at
+        next_at = _compute_next_at_client_side(activate_in, activate_at)
         row_id = fake_client.feed(
             queue=queue,
             payload=payload,
@@ -288,16 +286,10 @@ def _build_fake_publish_batch(
         activate_at: _dt.datetime | None = None,
     ) -> None:
         del session
-        if activate_in is not None and activate_at is not None:
-            msg = "broker.publish_batch accepts at most one of activate_in / activate_at"
-            raise ValueError(msg)
+        _validate_activate_args("broker.publish_batch", activate_in, activate_at)
         if not bodies:
             return
-        next_at: _dt.datetime | None = None
-        if activate_in is not None:
-            next_at = _utcnow() + activate_in
-        elif activate_at is not None:
-            next_at = activate_at
+        next_at = _compute_next_at_client_side(activate_in, activate_at)
         for body in bodies:
             payload, hdrs = _encode_payload(body, headers=headers, serializer=serializer)
             row_id = fake_client.feed(
