@@ -30,8 +30,3 @@ class OutboxBrokerConfig(BrokerConfig):
     async def disconnect(self) -> None:
         # Caller owns the engine — never dispose it here.
         pass
-
-
-@dataclass(kw_only=True)
-class OutboxRouterConfig(BrokerConfig):
-    pass

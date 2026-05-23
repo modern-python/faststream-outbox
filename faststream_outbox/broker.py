@@ -77,7 +77,7 @@ class OutboxParamsStorage(DefaultLoggerStorage):
             name="outbox",
             default_context={"queue": "", "message_id": ""},
             message_id_ln=-1,
-            fmt=("%(asctime)s %(levelname)-8s - %(queue)-7s | %(message_id)--1s - %(message)s"),
+            fmt="%(asctime)s %(levelname)-8s - %(queue)-7s | %(message_id)s - %(message)s",
             context=context,
             log_level=self.logger_log_level,
         )
