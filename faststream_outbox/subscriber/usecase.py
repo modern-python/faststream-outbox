@@ -71,7 +71,7 @@ if typing.TYPE_CHECKING:
     from faststream.message import StreamMessage
     from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-    from faststream_outbox.client import OutboxClient
+    from faststream_outbox.client import AbstractOutboxClient
     from faststream_outbox.configs import OutboxBrokerConfig
 
 
@@ -120,7 +120,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         self._notify_event: asyncio.Event = asyncio.Event()
 
     @property
-    def _client(self) -> "OutboxClient":
+    def _client(self) -> "AbstractOutboxClient":
         client = self._outer_config.client
         if client is None:
             msg = "OutboxSubscriber is not connected; the broker has no client."
@@ -219,19 +219,15 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                 await self._wait_for_notify_or_timeout(base)
                 continue
             limit = min(free, self._config.fetch_batch_size)
-            if fetch_conn is None:
-                rows = await self._client.fetch(
-                    self._queues,
-                    limit=limit,
-                    lease_ttl_seconds=self._config.lease_ttl_seconds,
-                )
-            else:
-                rows = await self._client.fetch_with_conn(
-                    fetch_conn,
-                    self._queues,
-                    limit=limit,
-                    lease_ttl_seconds=self._config.lease_ttl_seconds,
-                )
+            # fetch_conn is None only in the test-broker path against FakeOutboxClient
+            # (which ignores conn); the real OutboxClient raises if conn is None. The
+            # AbstractOutboxClient surface admits None so both implementations type-check.
+            rows = await self._client.fetch(
+                fetch_conn,
+                self._queues,
+                limit=limit,
+                lease_ttl_seconds=self._config.lease_ttl_seconds,
+            )
             if rows:
                 idle_count = 0
                 for row in rows:
@@ -418,19 +414,14 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         set, flush errors propagate so :meth:`_worker_loop` can close the poisoned
         connection and reopen a fresh one.
         """
+        flush = self._flush_terminal if terminal else self._flush_retry
         if writer_conn is None:
             try:
-                if terminal:
-                    await self._flush_terminal(row, writer_conn=None)
-                else:
-                    await self._flush_retry(row, writer_conn=None)
+                await flush(row, writer_conn=None)
             except Exception as e:  # noqa: BLE001
                 self._log(log_level=logging.ERROR, message=f"Outbox worker error: {e!r}", exc_info=e)
             return
-        if terminal:
-            await self._flush_terminal(row, writer_conn=writer_conn)
-        else:
-            await self._flush_retry(row, writer_conn=writer_conn)
+        await flush(row, writer_conn=writer_conn)
 
     async def _flush_terminal(
         self,
@@ -440,14 +431,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
     ) -> None:
         if row.acquired_token is None:
             return
-        if writer_conn is None:
-            deleted = await self._client.delete_with_lease(row.id, row.acquired_token)
-        else:
-            deleted = await self._client.delete_with_lease_with_conn(
-                writer_conn,
-                row.id,
-                row.acquired_token,
-            )
+        deleted = await self._client.delete_with_lease(writer_conn, row.id, row.acquired_token)
         if not deleted:
             self._log(
                 log_level=logging.WARNING,
@@ -469,25 +453,15 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
     ) -> None:
         if row.acquired_token is None or row.pending_delay_seconds is None:
             return
-        if writer_conn is None:
-            updated = await self._client.mark_pending_with_lease(
-                row.id,
-                row.acquired_token,
-                delay_seconds=row.pending_delay_seconds,
-                attempts_count=row.attempts_count,
-                first_attempt_at=row.first_attempt_at,  # ty: ignore[invalid-argument-type]
-                last_attempt_at=row.last_attempt_at,  # ty: ignore[invalid-argument-type]
-            )
-        else:
-            updated = await self._client.mark_pending_with_lease_with_conn(
-                writer_conn,
-                row.id,
-                row.acquired_token,
-                delay_seconds=row.pending_delay_seconds,
-                attempts_count=row.attempts_count,
-                first_attempt_at=row.first_attempt_at,  # ty: ignore[invalid-argument-type]
-                last_attempt_at=row.last_attempt_at,  # ty: ignore[invalid-argument-type]
-            )
+        updated = await self._client.mark_pending_with_lease(
+            writer_conn,
+            row.id,
+            row.acquired_token,
+            delay_seconds=row.pending_delay_seconds,
+            attempts_count=row.attempts_count,
+            first_attempt_at=row.first_attempt_at,  # ty: ignore[invalid-argument-type]
+            last_attempt_at=row.last_attempt_at,  # ty: ignore[invalid-argument-type]
+        )
         if not updated:
             self._log(
                 log_level=logging.WARNING,

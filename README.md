@@ -51,6 +51,20 @@ The `acquired_token` is critical: a slow handler whose lease expired and was re-
 
 When that happens the broker emits a WARNING log record with structured fields (`extra={"event": "lease_lost", "phase": "terminal" | "retry", "row_id": ..., "queue": ..., "deliveries_count": ...}`). Recurring `event=lease_lost` records mean your `lease_ttl_seconds` is below your handler's P99 — raise it. Log-pipeline aggregators can alert on the `event` field directly without regex.
 
+### Slow handlers — dedicated queue
+
+When a handler's tail latency exceeds the subscriber's `lease_ttl_seconds`, the row's lease expires mid-flight and another fetch reclaims it → duplicate delivery. Don't hike `lease_ttl_seconds` globally — that delays reclaim of *actually* stuck rows everywhere. Instead, segregate slow work onto its own subscriber with a longer TTL:
+
+```python
+@broker.subscriber("slow_q", lease_ttl_seconds=600)   # 10 minutes
+async def heavy_job(msg): ...
+
+@broker.subscriber("fast_q", lease_ttl_seconds=30)
+async def quick_job(msg): ...
+```
+
+Pick `lease_ttl_seconds` strictly greater than that subscriber's P99 handler duration, with margin for clock skew. The tight TTL on the fast queue keeps stuck-row reclaim fast; the tall TTL on the slow queue tolerates outliers without slowing reclaim of genuinely stuck rows elsewhere. Producers route to the appropriate queue at `publish` time.
+
 ## Timers (delayed delivery)
 
 Schedule a publish to fire later by passing `activate_in` (relative) or `activate_at` (absolute, tz-aware) — exactly one. Pass `timer_id` to deduplicate per `(queue, timer_id)`; cancel a not-yet-leased timer with `broker.cancel_timer(...)`.

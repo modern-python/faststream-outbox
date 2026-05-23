@@ -15,13 +15,13 @@ from faststream._internal.configs import BrokerConfig
 if typing.TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
 
-    from faststream_outbox.client import OutboxClient
+    from faststream_outbox.client import AbstractOutboxClient
 
 
 @dataclass(kw_only=True)
 class OutboxBrokerConfig(BrokerConfig):
     engine: "AsyncEngine | None" = None
-    client: "OutboxClient | None" = None
+    client: "AbstractOutboxClient | None" = None
 
     async def connect(self) -> None:
         # Engine and client are wired up by the broker's constructor; nothing to do here.

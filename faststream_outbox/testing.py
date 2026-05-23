@@ -21,7 +21,12 @@ from unittest import mock
 
 from faststream._internal.testing.broker import TestBroker
 
-from faststream_outbox.broker import OutboxBroker
+from faststream_outbox.broker import (
+    OutboxBroker,
+    _compute_next_at_client_side,
+    _validate_activate_args,
+)
+from faststream_outbox.client import AbstractOutboxClient
 from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.message import OutboxInnerMessage
 
@@ -53,7 +58,7 @@ class _FakeRow:
     timer_id: str | None = None
 
 
-class FakeOutboxClient:
+class FakeOutboxClient(AbstractOutboxClient):
     """In-memory ``OutboxClient`` substitute. Same surface, list-of-rows storage."""
 
     def __init__(self) -> None:
@@ -98,19 +103,9 @@ class FakeOutboxClient:
         """No real engine — signals the subscriber loop to use the polling-only path."""
         return None
 
-    async def fetch_with_conn(
-        self,
-        conn: typing.Any,  # noqa: ARG002
-        queues: "Sequence[str]",
-        *,
-        limit: int,
-        lease_ttl_seconds: float,
-    ) -> list[OutboxInnerMessage]:
-        """Mirror :meth:`OutboxClient.fetch_with_conn`; *conn* is ignored by the fake."""
-        return await self.fetch(queues, limit=limit, lease_ttl_seconds=lease_ttl_seconds)
-
     async def fetch(
         self,
+        conn: typing.Any,  # noqa: ARG002
         queues: "Sequence[str]",
         *,
         limit: int,
@@ -139,45 +134,21 @@ class FakeOutboxClient:
             out.append(_to_inner(row))
         return out
 
-    async def delete_with_lease_with_conn(
+    async def delete_with_lease(
         self,
         conn: typing.Any,  # noqa: ARG002
         message_id: int,
         acquired_token: uuid.UUID,
     ) -> bool:
-        """Mirror :meth:`OutboxClient.delete_with_lease_with_conn`; *conn* is ignored by the fake."""
-        return await self.delete_with_lease(message_id, acquired_token)
-
-    async def delete_with_lease(self, message_id: int, acquired_token: uuid.UUID) -> bool:
         for i, row in enumerate(self._rows):
             if row.id == message_id and row.acquired_token == acquired_token:
                 del self._rows[i]
                 return True
         return False
 
-    async def mark_pending_with_lease_with_conn(  # noqa: PLR0913
-        self,
-        conn: typing.Any,  # noqa: ARG002
-        message_id: int,
-        acquired_token: uuid.UUID,
-        *,
-        delay_seconds: float,
-        attempts_count: int,
-        first_attempt_at: _dt.datetime,
-        last_attempt_at: _dt.datetime,
-    ) -> bool:
-        """Mirror :meth:`OutboxClient.mark_pending_with_lease_with_conn`; *conn* is ignored by the fake."""
-        return await self.mark_pending_with_lease(
-            message_id,
-            acquired_token,
-            delay_seconds=delay_seconds,
-            attempts_count=attempts_count,
-            first_attempt_at=first_attempt_at,
-            last_attempt_at=last_attempt_at,
-        )
-
     async def mark_pending_with_lease(  # noqa: PLR0913
         self,
+        conn: typing.Any,  # noqa: ARG002
         message_id: int,
         acquired_token: uuid.UUID,
         *,
@@ -275,20 +246,14 @@ def _build_fake_publish(
     ) -> int | None:
         # session is ignored in test mode — the fake client has no transaction.
         del session
-        if activate_in is not None and activate_at is not None:
-            msg = "broker.publish accepts at most one of activate_in / activate_at"
-            raise ValueError(msg)
+        _validate_activate_args("broker.publish", activate_in, activate_at)
         payload, hdrs = _encode_payload(
             body,
             headers=headers,
             correlation_id=correlation_id,
             serializer=serializer,
         )
-        next_at: _dt.datetime | None = None
-        if activate_in is not None:
-            next_at = _utcnow() + activate_in
-        elif activate_at is not None:
-            next_at = activate_at
+        next_at = _compute_next_at_client_side(activate_in, activate_at)
         row_id = fake_client.feed(
             queue=queue,
             payload=payload,
@@ -322,16 +287,10 @@ def _build_fake_publish_batch(
         activate_at: _dt.datetime | None = None,
     ) -> None:
         del session
-        if activate_in is not None and activate_at is not None:
-            msg = "broker.publish_batch accepts at most one of activate_in / activate_at"
-            raise ValueError(msg)
+        _validate_activate_args("broker.publish_batch", activate_in, activate_at)
         if not bodies:
             return
-        next_at: _dt.datetime | None = None
-        if activate_in is not None:
-            next_at = _utcnow() + activate_in
-        elif activate_at is not None:
-            next_at = activate_at
+        next_at = _compute_next_at_client_side(activate_in, activate_at)
         for body in bodies:
             payload, hdrs = _encode_payload(body, headers=headers, serializer=serializer)
             row_id = fake_client.feed(
