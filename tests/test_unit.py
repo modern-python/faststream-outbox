@@ -26,7 +26,7 @@ from faststream_outbox.client import OutboxClient, _validate_schema_sync
 from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.message import OutboxInnerMessage, OutboxMessage
 from faststream_outbox.parser.parser import OutboxParser
-from faststream_outbox.subscriber.usecase import OutboxSubscriber
+from faststream_outbox.subscriber.usecase import OutboxSubscriber, _compute_backoff
 from faststream_outbox.testing import FakeOutboxClient
 
 
@@ -1453,6 +1453,26 @@ async def test_worker_loop_takes_no_conn_path_when_engine_is_none() -> None:
     assert seen_conns == [None]
 
 
+async def test_fetch_loop_takes_no_conn_path_when_engine_is_none() -> None:
+    """Test-broker path: FakeOutboxClient.engine is None → no engine.connect(), no listen_conn."""
+    fake = FakeOutboxClient()
+    broker, test_broker = _make_broker_for_dispatch(fake)
+    seen_kwargs: list[dict[str, object]] = []
+
+    async with test_broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        sub.running = True
+
+        async def _inner_then_stop(*, fetch_conn: object, listen_conn: object) -> None:
+            seen_kwargs.append({"fetch_conn": fetch_conn, "listen_conn": listen_conn})
+            sub.running = False
+
+        with patch.object(sub, "_fetch_inner", new=_inner_then_stop):
+            await sub._fetch_loop()  # noqa: SLF001
+
+    assert seen_kwargs == [{"fetch_conn": None, "listen_conn": None}]
+
+
 async def test_worker_loop_reconnects_after_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """A raised inner-loop error triggers backoff + a fresh engine.connect() on the next iteration."""
     sleeps: list[float] = []
@@ -1551,3 +1571,25 @@ async def test_outbox_client_mark_pending_with_lease_with_conn_uses_caller_conn(
     fake_conn.execute.assert_awaited_once()
     engine.connect.assert_not_called()
     engine.begin.assert_not_called()
+
+
+# --- _compute_backoff (S1) ---------------------------------------------------
+
+
+def test_compute_backoff_within_jitter_bounds() -> None:
+    # attempt=3, base=1.0 → unjittered value 4.0, ±50% jitter → [2.0, 6.0].
+    for _ in range(100):
+        delay = _compute_backoff(3, ceiling=1000.0)
+        assert 2.0 <= delay <= 6.0
+
+
+def test_compute_backoff_caps_at_ceiling() -> None:
+    # Large attempt + small ceiling → result is always pinned to the ceiling.
+    assert _compute_backoff(20, ceiling=1.0) == 1.0
+
+
+def test_compute_backoff_respects_base_factor() -> None:
+    # base=0.1, attempt=1 → unjittered 0.1 → jittered [0.05, 0.15].
+    for _ in range(100):
+        delay = _compute_backoff(1, ceiling=10.0, base=0.1)
+        assert 0.05 <= delay <= 0.15
