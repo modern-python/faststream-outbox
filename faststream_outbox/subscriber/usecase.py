@@ -71,7 +71,7 @@ if typing.TYPE_CHECKING:
     from faststream.message import StreamMessage
     from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-    from faststream_outbox.client import OutboxClient
+    from faststream_outbox.client import AbstractOutboxClient
     from faststream_outbox.configs import OutboxBrokerConfig
 
 
@@ -120,7 +120,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         self._notify_event: asyncio.Event = asyncio.Event()
 
     @property
-    def _client(self) -> "OutboxClient":
+    def _client(self) -> "AbstractOutboxClient":
         client = self._outer_config.client
         if client is None:
             msg = "OutboxSubscriber is not connected; the broker has no client."
@@ -219,11 +219,11 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                 await self._wait_for_notify_or_timeout(base)
                 continue
             limit = min(free, self._config.fetch_batch_size)
-            # fetch_conn is None only in the test-broker path, where _client is a
-            # FakeOutboxClient that ignores conn; real OutboxClient is reached only
-            # via the engine branch where fetch_conn is a live AsyncConnection.
+            # fetch_conn is None only in the test-broker path against FakeOutboxClient
+            # (which ignores conn); the real OutboxClient raises if conn is None. The
+            # AbstractOutboxClient surface admits None so both implementations type-check.
             rows = await self._client.fetch(
-                fetch_conn,  # ty: ignore[invalid-argument-type]
+                fetch_conn,
                 self._queues,
                 limit=limit,
                 lease_ttl_seconds=self._config.lease_ttl_seconds,
@@ -431,7 +431,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
     ) -> None:
         if row.acquired_token is None:
             return
-        deleted = await self._client.delete_with_lease(writer_conn, row.id, row.acquired_token)  # ty: ignore[invalid-argument-type]
+        deleted = await self._client.delete_with_lease(writer_conn, row.id, row.acquired_token)
         if not deleted:
             self._log(
                 log_level=logging.WARNING,
@@ -454,7 +454,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         if row.acquired_token is None or row.pending_delay_seconds is None:
             return
         updated = await self._client.mark_pending_with_lease(
-            writer_conn,  # ty: ignore[invalid-argument-type]
+            writer_conn,
             row.id,
             row.acquired_token,
             delay_seconds=row.pending_delay_seconds,

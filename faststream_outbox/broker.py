@@ -28,7 +28,7 @@ from sqlalchemy import Float, bindparam, delete, func, insert, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from faststream_outbox.client import OutboxClient, _row_to_message
+from faststream_outbox.client import AbstractOutboxClient, OutboxClient, _row_to_message
 from faststream_outbox.configs import OutboxBrokerConfig
 from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.message import OutboxInnerMessage
@@ -182,7 +182,7 @@ class OutboxBroker(
         super().__init__(config=broker_config, specification=specification, routers=routers)  # ty: ignore[unknown-argument]
 
     @property
-    def client(self) -> OutboxClient:
+    def client(self) -> AbstractOutboxClient:
         client = self.config.broker_config.client
         if client is None:
             msg = "OutboxBroker is not connected; pass an AsyncEngine to the constructor."

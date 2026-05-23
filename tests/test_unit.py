@@ -916,6 +916,42 @@ async def test_client_fetch_empty_queues_returns_empty() -> None:
     assert await client.fetch(AsyncMock(), [], limit=10, lease_ttl_seconds=60.0) == []
 
 
+# --- Liskov-widening guards: real client must reject None conn (Protocol allows it for the fake) ---
+
+
+async def test_client_fetch_raises_typeerror_on_none_conn() -> None:
+    metadata = MetaData()
+    t = make_outbox_table(metadata)
+    client = OutboxClient(AsyncMock(), t)
+    with pytest.raises(TypeError, match=r"OutboxClient\.fetch requires a live AsyncConnection"):
+        await client.fetch(None, ["orders"], limit=1, lease_ttl_seconds=60.0)
+
+
+async def test_client_delete_with_lease_raises_typeerror_on_none_conn() -> None:
+    metadata = MetaData()
+    t = make_outbox_table(metadata)
+    client = OutboxClient(AsyncMock(), t)
+    with pytest.raises(TypeError, match=r"OutboxClient\.delete_with_lease requires a live AsyncConnection"):
+        await client.delete_with_lease(None, 1, uuid.uuid4())
+
+
+async def test_client_mark_pending_with_lease_raises_typeerror_on_none_conn() -> None:
+    metadata = MetaData()
+    t = make_outbox_table(metadata)
+    client = OutboxClient(AsyncMock(), t)
+    now = _dt.datetime.now(tz=_dt.UTC)
+    with pytest.raises(TypeError, match=r"OutboxClient\.mark_pending_with_lease requires a live AsyncConnection"):
+        await client.mark_pending_with_lease(
+            None,
+            1,
+            uuid.uuid4(),
+            delay_seconds=1.0,
+            attempts_count=1,
+            first_attempt_at=now,
+            last_attempt_at=now,
+        )
+
+
 # --- OutboxMessage.reject + assert_state_set logger branch ---
 
 

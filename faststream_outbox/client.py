@@ -15,6 +15,7 @@ on ``acquired_token`` so a slow handler whose lease was reclaimed by a newer fet
 can no longer mutate that row.
 """
 
+import abc
 import datetime as _dt
 import uuid
 from typing import TYPE_CHECKING
@@ -56,7 +57,69 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 
-class OutboxClient:
+class AbstractOutboxClient(abc.ABC):
+    """
+    Outbox client interface.
+
+    Satisfied by both :class:`OutboxClient` (real Postgres) and ``FakeOutboxClient``
+    (in-memory test substitute, defined in ``testing.py``). The subscriber's ``_client``
+    holds either at runtime; declaring this base lets the type checker see one consistent
+    surface instead of duck-typed drift between the two.
+
+    ``conn`` is typed ``AsyncConnection | None`` because the fake legitimately accepts
+    None (no engine; conn is ignored). The real :class:`OutboxClient` narrows that to a
+    non-None requirement by raising ``TypeError`` at the boundary — the None form is
+    only ever reached via the test-broker path against the fake, but the shared static
+    type has to admit it for both implementations to satisfy the same interface.
+    """
+
+    @property
+    @abc.abstractmethod
+    def engine(self) -> "AsyncEngine | None": ...
+
+    @property
+    @abc.abstractmethod
+    def table(self) -> "Table": ...
+
+    @abc.abstractmethod
+    async def fetch(
+        self,
+        conn: "AsyncConnection | None",
+        queues: "Sequence[str]",
+        *,
+        limit: int,
+        lease_ttl_seconds: float,
+    ) -> list[OutboxInnerMessage]: ...
+
+    @abc.abstractmethod
+    async def delete_with_lease(
+        self,
+        conn: "AsyncConnection | None",
+        message_id: int,
+        acquired_token: uuid.UUID,
+    ) -> bool: ...
+
+    @abc.abstractmethod
+    async def mark_pending_with_lease(  # noqa: PLR0913
+        self,
+        conn: "AsyncConnection | None",
+        message_id: int,
+        acquired_token: uuid.UUID,
+        *,
+        delay_seconds: float,
+        attempts_count: int,
+        first_attempt_at: _dt.datetime,
+        last_attempt_at: _dt.datetime,
+    ) -> bool: ...
+
+    @abc.abstractmethod
+    async def validate_schema(self) -> None: ...
+
+    @abc.abstractmethod
+    async def ping(self) -> bool: ...
+
+
+class OutboxClient(AbstractOutboxClient):
     def __init__(self, engine: "AsyncEngine", outbox_table: "Table") -> None:
         self._engine = engine
         self._table = outbox_table
@@ -77,7 +140,7 @@ class OutboxClient:
 
     async def fetch(
         self,
-        conn: "AsyncConnection",
+        conn: "AsyncConnection | None",
         queues: "Sequence[str]",
         *,
         limit: int,
@@ -91,7 +154,15 @@ class OutboxClient:
         carries ``acquired_token`` which the worker loop must echo back on the terminal
         ``DELETE``/``UPDATE``. Opens its own transaction on *conn* via ``async with
         conn.begin():``.
+
+        *conn* is widened to ``AsyncConnection | None`` for :class:`AbstractOutboxClient`
+        compatibility (the fake accepts None). The real client narrows here: passing None
+        raises ``TypeError`` immediately instead of silently AttributeError'ing inside
+        ``conn.begin()``.
         """
+        if conn is None:
+            msg = "OutboxClient.fetch requires a live AsyncConnection (got None)"
+            raise TypeError(msg)
         if not queues:
             return []
         token = uuid.uuid4()
@@ -139,7 +210,7 @@ class OutboxClient:
 
     async def delete_with_lease(
         self,
-        conn: "AsyncConnection",
+        conn: "AsyncConnection | None",
         message_id: int,
         acquired_token: uuid.UUID,
     ) -> bool:
@@ -148,8 +219,12 @@ class OutboxClient:
 
         Opens its own transaction on *conn* via ``async with conn.begin():``. The lease
         guard means a slow handler whose lease was reclaimed by a newer fetch finds
-        ``rowcount == 0`` and is silently dropped.
+        ``rowcount == 0`` and is silently dropped. See :meth:`fetch` for why *conn* is
+        ``AsyncConnection | None`` instead of ``AsyncConnection``.
         """
+        if conn is None:
+            msg = "OutboxClient.delete_with_lease requires a live AsyncConnection (got None)"
+            raise TypeError(msg)
         t = self._table
         stmt = delete(t).where(t.c.id == message_id, t.c.acquired_token == acquired_token)
         async with conn.begin():
@@ -158,7 +233,7 @@ class OutboxClient:
 
     async def mark_pending_with_lease(  # noqa: PLR0913
         self,
-        conn: "AsyncConnection",
+        conn: "AsyncConnection | None",
         message_id: int,
         acquired_token: uuid.UUID,
         *,
@@ -172,8 +247,12 @@ class OutboxClient:
 
         Opens its own transaction on *conn* via ``async with conn.begin():``.
         ``next_attempt_at`` is computed server-side as ``now() + delay_seconds`` so retry
-        timing uses the DB clock.
+        timing uses the DB clock. See :meth:`fetch` for why *conn* is
+        ``AsyncConnection | None`` instead of ``AsyncConnection``.
         """
+        if conn is None:
+            msg = "OutboxClient.mark_pending_with_lease requires a live AsyncConnection (got None)"
+            raise TypeError(msg)
         t = self._table
         next_attempt_at_expr = func.now() + func.make_interval(0, 0, 0, 0, 0, 0, bindparam("delay", type_=Float))
         stmt = (

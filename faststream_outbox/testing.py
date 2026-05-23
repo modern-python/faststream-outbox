@@ -26,6 +26,7 @@ from faststream_outbox.broker import (
     _compute_next_at_client_side,
     _validate_activate_args,
 )
+from faststream_outbox.client import AbstractOutboxClient
 from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.message import OutboxInnerMessage
 
@@ -57,7 +58,7 @@ class _FakeRow:
     timer_id: str | None = None
 
 
-class FakeOutboxClient:
+class FakeOutboxClient(AbstractOutboxClient):
     """In-memory ``OutboxClient`` substitute. Same surface, list-of-rows storage."""
 
     def __init__(self) -> None:
