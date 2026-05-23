@@ -180,6 +180,8 @@ Per-subscriber knobs (passed to `@broker.subscriber("…", …)`):
 - `lease_ttl_seconds` (default `60.0` s) — how long a claim is valid before another fetch may reclaim it. **Must exceed your handler's P99 duration with margin.**
 - `max_deliveries` (default `None` — unbounded) — total claims (including lease-expiry re-claims) after which the row is dropped without invoking the handler. Defends against handlers that consistently wedge.
 
+**Engine pool sizing.** Each subscriber holds `max_workers + 1` long-lived SQLAlchemy connections (one writer per worker + one fetch), plus one raw asyncpg connection for `LISTEN` when available. Size your engine for `Σ subscribers × (max_workers + 1)` or `broker.start()` will block on pool checkout. SQLAlchemy's default `pool_size=5, max_overflow=10` covers a handful of single-worker subscribers; raise it for larger fleets.
+
 ## Acknowledgements
 
 The architecture of this package is heavily informed by Arseniy Popov's [PR #2704](https://github.com/ag2ai/faststream/pull/2704) (`feat: add sqla broker`) on upstream FastStream — the FastStream broker/registrator/subscriber wiring, the `SELECT … FOR UPDATE SKIP LOCKED` fetch-and-claim CTE, the retry strategy hierarchy, and the in-transaction publish contract all originate from there. This package is a Postgres-only reimplementation that diverges in storage model (lease tokens instead of an explicit state column, no archive table), loop structure (two loops instead of four), wake-up mechanism (`LISTEN/NOTIFY`), and adds timer mechanics. Credit for the original design belongs to Arseniy.

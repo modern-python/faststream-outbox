@@ -6,7 +6,7 @@ import uuid
 from unittest import mock
 
 import pytest
-from sqlalchemy import insert, select, text
+from sqlalchemy import event, insert, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from faststream_outbox import (
@@ -717,3 +717,60 @@ async def test_fetch_unprocessed_reads_uncommitted_writes_in_same_session(pg_eng
         rows = await broker.fetch_unprocessed(session=session)
         assert len(rows) == 1
         assert rows[0].queue == "orders"
+
+
+async def test_terminal_writes_reuse_writer_conn_under_load(pg_engine, outbox_table) -> None:
+    """
+    M3 — per-worker cached writer conn drains N rows without N pool checkouts.
+
+    A drain of N rows must trigger O(workers) pool checkouts during the steady-state
+    drain, not one per row (the pre-M3 behavior). With ``max_workers=1`` and one fetch
+    loop, the broker holds exactly two connections during the drain: one fetch conn
+    and one cached writer conn. We count checkouts via SQLAlchemy's ``checkout`` event
+    on ``pg_engine.sync_engine`` — ``AsyncEngine.connect`` itself is read-only and
+    can't be patched directly.
+    """
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    n_rows = 50
+    received: list[int] = []
+
+    @broker.subscriber("orders", min_fetch_interval=0.02, max_fetch_interval=0.1)
+    async def handle(body: dict) -> None:
+        received.append(body["i"])
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    # Seed BEFORE attaching the listener so seed checkouts don't count.
+    async with session_factory() as session, session.begin():
+        for i in range(n_rows):
+            payload, headers = encode_payload({"i": i})
+            await session.execute(insert(outbox_table).values(queue="orders", payload=payload, headers=headers))
+
+    checkouts: list[None] = []
+
+    def _on_checkout(*_args: object) -> None:
+        checkouts.append(None)
+
+    # Attach BEFORE entering the broker so the initial fetch + writer conn checkouts
+    # register and the listener body executes — otherwise M3 works so well there are
+    # zero checkouts during the drain.
+    event.listen(pg_engine.sync_engine, "checkout", _on_checkout)
+    try:
+        async with broker:
+            # Pre-M3: ~50+ checkouts (one per terminal DELETE). Post-M3: writer holds
+            # a single conn across all rows, so total checkouts ~= 1 fetch + 1 writer +
+            # a small constant of health-probe / NOTIFY churn.
+            await _wait_until(lambda: len(received) == n_rows, timeout=15.0)
+            # Brief settle so any in-flight terminal DELETE finishes before shutdown.
+            await asyncio.sleep(0.2)
+    finally:
+        event.remove(pg_engine.sync_engine, "checkout", _on_checkout)
+
+    # Fetch CTE has no secondary sort key (L2), so rows with identical next_attempt_at
+    # claim in non-deterministic order — assert the set, not the sequence.
+    assert sorted(received) == list(range(n_rows))
+    assert await _row_count(pg_engine, outbox_table) == 0
+    # Allow up to 10 to absorb startup churn — the invariant we're asserting is
+    # "O(workers), not O(rows)". Pre-M3 this would be 50+.
+    assert len(checkouts) <= 10, (
+        f"pool checkouts during {n_rows}-row drain: {len(checkouts)}; expected O(workers), not O(rows)"
+    )

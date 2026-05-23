@@ -288,14 +288,60 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         self._notify_event.set()
 
     async def _worker_loop(self) -> None:
+        """
+        Outer loop: own a long-lived writer connection, back off and reconnect on error.
+
+        Mirrors :meth:`_fetch_loop`: open one ``AsyncConnection`` at the loop boundary,
+        reuse it across every terminal write, rebuild it on DB error. Without this each
+        :meth:`_flush_terminal` / :meth:`_flush_retry` would do a pool checkout + BEGIN /
+        COMMIT per row, churning the pool and risking exhaustion under burst.
+
+        When the client has no real engine (test broker, ``client.engine is None``), we
+        skip the persistent-connection path entirely and let the inner loop call the
+        one-shot wrappers on :class:`FakeOutboxClient`.
+        """
+        error_attempt = 0
+        while self.running:
+            client = self._outer_config.client
+            if client is None:  # pragma: no cover  # defensive teardown race
+                return
+            engine = client.engine
+            try:
+                if engine is None:
+                    await self._worker_inner(writer_conn=None)
+                else:
+                    async with engine.connect() as writer_conn:
+                        await self._worker_inner(writer_conn=writer_conn)
+            except Exception as e:  # noqa: BLE001
+                self._log(
+                    log_level=logging.ERROR,
+                    message=f"Outbox worker loop error: {e!r}; reconnecting",
+                    exc_info=e,
+                )
+                error_attempt = min(error_attempt + 1, _BACKOFF_EXP_CAP)
+                delay = min(2.0 ** (error_attempt - 1) * random.uniform(0.5, 1.5), 30.0)  # noqa: S311
+                await anyio.sleep(delay)
+
+    async def _worker_inner(self, *, writer_conn: "AsyncConnection | None") -> None:
+        """
+        Pull rows from the inflight queue and dispatch each, threading *writer_conn* through.
+
+        Returns when ``self.running`` goes False, or raises on any DB error from the
+        terminal write so :meth:`_worker_loop` can rebuild the connection.
+        """
         while self.running:
             row = await self._inflight.get()
             try:
-                await self.dispatch_one(row)
+                await self.dispatch_one(row, writer_conn=writer_conn)
             finally:
                 self._inflight.task_done()
 
-    async def dispatch_one(self, row: OutboxInnerMessage) -> None:
+    async def dispatch_one(
+        self,
+        row: OutboxInnerMessage,
+        *,
+        writer_conn: "AsyncConnection | None" = None,
+    ) -> None:
         """
         Run a single already-leased row through the full consume pipeline.
 
@@ -303,51 +349,112 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         the handler synchronously from ``broker.publish``, matching the FastStream
         test-broker idiom (``TestKafkaBroker`` / ``TestRabbitBroker``). The caller is
         responsible for having acquired the row's lease before invoking this.
+
+        Handler exceptions are logged and swallowed. Terminal-write (flush) exceptions
+        propagate when *writer_conn* is not None so :meth:`_worker_loop` can close &
+        rebuild the cached connection — a poisoned writer connection would otherwise keep
+        failing on every row. When *writer_conn* is None (test broker / one-shot dispatch),
+        flush exceptions are swallowed like the legacy behavior since there's no shared
+        connection to rebuild.
         """
         logger = self._outer_config.logger.logger.logger if self._outer_config.logger else None
+        row.retry_strategy = self._config.retry_strategy
+        if not row.allow_delivery(max_deliveries=self._config.max_deliveries, logger=logger):
+            await self._safe_flush(row, terminal=True, writer_conn=writer_conn)
+            return
+        # AckPolicy middleware catches handler exceptions; _CaptureExceptionMiddleware
+        # stashes exc onto row.last_exception before nack runs, so retry strategies
+        # can branch on exception type. We still wrap to log any escapes (manual-ack
+        # fallback that itself raises, etc.) so the dispatch contract is robust.
         try:
-            row.retry_strategy = self._config.retry_strategy
-            if not row.allow_delivery(max_deliveries=self._config.max_deliveries, logger=logger):
-                await self._flush_terminal(row)
-                return
-            # AckPolicy middleware catches handler exceptions; _CaptureExceptionMiddleware
-            # stashes exc onto row.last_exception before nack runs, so retry strategies
-            # can branch on exception type.
             try:
                 await self.consume(row)
             finally:
                 await row.assert_state_set(logger)
-            await self._flush_result(row)
         except Exception as e:  # noqa: BLE001
             self._log(log_level=logging.ERROR, message=f"Outbox worker error: {e!r}", exc_info=e)
+            return
+        await self._safe_flush(row, terminal=row.to_delete, writer_conn=writer_conn)
 
-    async def _flush_result(self, row: OutboxInnerMessage) -> None:
-        if row.to_delete:
-            await self._flush_terminal(row)
+    async def _safe_flush(
+        self,
+        row: OutboxInnerMessage,
+        *,
+        terminal: bool,
+        writer_conn: "AsyncConnection | None",
+    ) -> None:
+        """
+        Run the terminal/retry write, propagating errors only when ``writer_conn`` is set.
+
+        When ``writer_conn`` is None (test broker / sync dispatch), flush errors are logged
+        and swallowed — there's no shared connection to rebuild and the legacy test-broker
+        contract is "publish never raises from a flush failure". When ``writer_conn`` is
+        set, flush errors propagate so :meth:`_worker_loop` can close the poisoned
+        connection and reopen a fresh one.
+        """
+        if writer_conn is None:
+            try:
+                if terminal:
+                    await self._flush_terminal(row, writer_conn=None)
+                else:
+                    await self._flush_retry(row, writer_conn=None)
+            except Exception as e:  # noqa: BLE001
+                self._log(log_level=logging.ERROR, message=f"Outbox worker error: {e!r}", exc_info=e)
+            return
+        if terminal:
+            await self._flush_terminal(row, writer_conn=writer_conn)
         else:
-            await self._flush_retry(row)
+            await self._flush_retry(row, writer_conn=writer_conn)
 
-    async def _flush_terminal(self, row: OutboxInnerMessage) -> None:
+    async def _flush_terminal(
+        self,
+        row: OutboxInnerMessage,
+        *,
+        writer_conn: "AsyncConnection | None",
+    ) -> None:
         if row.acquired_token is None:
             return
-        deleted = await self._client.delete_with_lease(row.id, row.acquired_token)
+        if writer_conn is None:
+            deleted = await self._client.delete_with_lease(row.id, row.acquired_token)
+        else:
+            deleted = await self._client.delete_with_lease_with_conn(
+                writer_conn,
+                row.id,
+                row.acquired_token,
+            )
         if not deleted:
             self._log(
                 log_level=logging.INFO,
                 message=f"Outbox row {row} lease expired before delete; skipping",
             )
 
-    async def _flush_retry(self, row: OutboxInnerMessage) -> None:
+    async def _flush_retry(
+        self,
+        row: OutboxInnerMessage,
+        *,
+        writer_conn: "AsyncConnection | None",
+    ) -> None:
         if row.acquired_token is None or row.pending_delay_seconds is None:
             return
-        updated = await self._client.mark_pending_with_lease(
-            row.id,
-            row.acquired_token,
-            delay_seconds=row.pending_delay_seconds,
-            attempts_count=row.attempts_count,
-            first_attempt_at=row.first_attempt_at,  # ty: ignore[invalid-argument-type]
-            last_attempt_at=row.last_attempt_at,  # ty: ignore[invalid-argument-type]
-        )
+        if writer_conn is None:
+            updated = await self._client.mark_pending_with_lease(
+                row.id,
+                row.acquired_token,
+                delay_seconds=row.pending_delay_seconds,
+                attempts_count=row.attempts_count,
+                first_attempt_at=row.first_attempt_at,  # ty: ignore[invalid-argument-type]
+                last_attempt_at=row.last_attempt_at,  # ty: ignore[invalid-argument-type]
+            )
+        else:
+            updated = await self._client.mark_pending_with_lease_with_conn(
+                writer_conn,
+                row.id,
+                row.acquired_token,
+                delay_seconds=row.pending_delay_seconds,
+                attempts_count=row.attempts_count,
+                first_attempt_at=row.first_attempt_at,  # ty: ignore[invalid-argument-type]
+                last_attempt_at=row.last_attempt_at,  # ty: ignore[invalid-argument-type]
+            )
         if not updated:
             self._log(
                 log_level=logging.INFO,
