@@ -1,6 +1,7 @@
 import asyncio
 import datetime as _dt
 import json
+import logging
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -147,6 +148,25 @@ def test_encode_payload_merges_user_headers() -> None:
     _, headers = _encode_payload({"x": 1}, headers={"x-tenant": "acme"})
     assert headers["x-tenant"] == "acme"
     assert headers["content-type"] == "application/json"
+
+
+def test_encode_payload_raises_when_user_content_type_conflicts() -> None:
+    """User-supplied content-type that mismatches the encoder is a foot-gun (L1)."""
+    with pytest.raises(ValueError, match="content-type"):
+        _encode_payload({"x": 1}, headers={"content-type": "text/plain"})
+
+
+def test_encode_payload_accepts_user_content_type_when_it_matches() -> None:
+    """Idempotent re-publish with the encoder's own content-type is allowed."""
+    _, headers = _encode_payload({"x": 1}, headers={"content-type": "application/json"})
+    assert headers["content-type"] == "application/json"
+
+
+def test_encode_payload_allows_user_content_type_for_bytes_body() -> None:
+    """Plain bytes have no encoder content-type, so the user's label wins with no conflict."""
+    payload, headers = _encode_payload(b"raw", headers={"content-type": "application/octet-stream"})
+    assert payload == b"raw"
+    assert headers["content-type"] == "application/octet-stream"
 
 
 class _PydanticBody(BaseModel):
@@ -1240,6 +1260,19 @@ def _make_msg_over_max_deliveries(**overrides: object) -> OutboxInnerMessage:
     return _make_msg(**overrides)
 
 
+async def test_fake_client_fetch_ties_break_on_id() -> None:
+    """L2: rows with identical ``next_attempt_at`` are claimed in ``id`` order."""
+    client = FakeOutboxClient()
+    same_time = _dt.datetime(2026, 5, 23, 12, 0, 0, tzinfo=_dt.UTC)
+    id_a = client.feed(queue="orders", payload=b"a", next_attempt_at=same_time)
+    id_b = client.feed(queue="orders", payload=b"b", next_attempt_at=same_time)
+    id_c = client.feed(queue="orders", payload=b"c", next_attempt_at=same_time)
+    assert (id_a, id_b, id_c) == (1, 2, 3)
+
+    fetched = await client.fetch(["orders"], limit=3, lease_ttl_seconds=60.0)
+    assert [r.id for r in fetched] == [1, 2, 3]
+
+
 async def test_fake_client_delete_with_lease_with_conn_delegates() -> None:
     """The fake's ``_with_conn`` shim ignores conn and returns the delegate result."""
     client = FakeOutboxClient()
@@ -1402,6 +1435,53 @@ async def test_dispatch_one_outer_except_swallows_consume_failure() -> None:
         with patch.object(sub, "consume", new=_boom):
             # Must not raise — the outer except logs and returns.
             await sub.dispatch_one(msg, writer_conn=None)
+
+
+async def test_flush_terminal_logs_lease_lost_at_warning_with_structured_fields() -> None:
+    """M7: when delete returns rowcount=0 (lease reclaimed) the broker emits a WARNING with structured fields."""
+    fake = FakeOutboxClient()
+    broker, test_broker = _make_broker_for_dispatch(fake)
+    msg = _make_msg(id=42, queue="orders", deliveries_count=3)
+
+    with patch.object(fake, "delete_with_lease", new=AsyncMock(return_value=False)):
+        async with test_broker:
+            sub = next(iter(broker._subscribers))  # noqa: SLF001
+            with patch.object(sub, "_log") as spy_log:
+                await sub._flush_terminal(msg, writer_conn=None)  # noqa: SLF001
+
+    spy_log.assert_called_once()
+    call = spy_log.call_args
+    assert call.kwargs["log_level"] == logging.WARNING
+    extra = call.kwargs["extra"]
+    assert extra["event"] == "lease_lost"
+    assert extra["phase"] == "terminal"
+    assert extra["row_id"] == 42
+    assert extra["queue"] == "orders"
+    assert extra["deliveries_count"] == 3
+
+
+async def test_flush_retry_logs_lease_lost_at_warning_with_structured_fields() -> None:
+    """M7: when retry UPDATE returns rowcount=0 (lease reclaimed) the broker emits a WARNING with structured fields."""
+    fake = FakeOutboxClient()
+    broker, test_broker = _make_broker_for_dispatch(fake)
+    msg = _make_msg(id=99, queue="orders", deliveries_count=2)
+    msg.pending_delay_seconds = 1.0
+
+    with patch.object(fake, "mark_pending_with_lease", new=AsyncMock(return_value=False)):
+        async with test_broker:
+            sub = next(iter(broker._subscribers))  # noqa: SLF001
+            with patch.object(sub, "_log") as spy_log:
+                await sub._flush_retry(msg, writer_conn=None)  # noqa: SLF001
+
+    spy_log.assert_called_once()
+    call = spy_log.call_args
+    assert call.kwargs["log_level"] == logging.WARNING
+    extra = call.kwargs["extra"]
+    assert extra["event"] == "lease_lost"
+    assert extra["phase"] == "retry"
+    assert extra["row_id"] == 99
+    assert extra["queue"] == "orders"
+    assert extra["deliveries_count"] == 2
 
 
 async def test_flush_retry_propagates_error_with_writer_conn() -> None:

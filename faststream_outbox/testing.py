@@ -130,7 +130,7 @@ class FakeOutboxClient:
                 and r.next_attempt_at <= now
                 and (r.acquired_token is None or (r.acquired_at is not None and r.acquired_at < lease_cutoff))
             ),
-            key=lambda r: r.next_attempt_at,
+            key=lambda r: (r.next_attempt_at, r.id),
         )
         for row in eligible[:limit]:
             row.acquired_at = now

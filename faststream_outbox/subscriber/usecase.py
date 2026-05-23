@@ -424,8 +424,15 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             )
         if not deleted:
             self._log(
-                log_level=logging.INFO,
+                log_level=logging.WARNING,
                 message=f"Outbox row {row} lease expired before delete; skipping",
+                extra={
+                    "event": "lease_lost",
+                    "phase": "terminal",
+                    "row_id": row.id,
+                    "queue": row.queue,
+                    "deliveries_count": row.deliveries_count,
+                },
             )
 
     async def _flush_retry(
@@ -457,8 +464,15 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             )
         if not updated:
             self._log(
-                log_level=logging.INFO,
+                log_level=logging.WARNING,
                 message=f"Outbox row {row} lease expired before retry update; skipping",
+                extra={
+                    "event": "lease_lost",
+                    "phase": "retry",
+                    "row_id": row.id,
+                    "queue": row.queue,
+                    "deliveries_count": row.deliveries_count,
+                },
             )
 
     @typing.override
