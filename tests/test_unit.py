@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import faststream.asgi.factories.asyncapi.try_it_out
 import pytest
+from faststream.exceptions import IncorrectState
 from pydantic import BaseModel
 from sqlalchemy import MetaData
 from sqlalchemy.dialects import postgresql
@@ -856,33 +857,12 @@ def test_outbox_params_storage_caches_logger() -> None:
 # --- configs ---
 
 
-def test_engine_state_raises_when_no_engine() -> None:
-    from faststream.exceptions import IncorrectState  # noqa: PLC0415
-
-    from faststream_outbox.configs import EngineState  # noqa: PLC0415
-
-    state = EngineState()
-    with pytest.raises(IncorrectState):
-        _ = state.engine
-
-
-def test_engine_state_set_engine() -> None:
-    from faststream_outbox.configs import EngineState  # noqa: PLC0415
-
-    state = EngineState()
-    engine = AsyncMock()
-    state.set_engine(engine)
-    assert state.engine is engine
-
-
-def test_outbox_router_config_engine_state_raises() -> None:
-    from faststream.exceptions import IncorrectState  # noqa: PLC0415
-
-    from faststream_outbox.configs import OutboxRouterConfig  # noqa: PLC0415
-
-    cfg = OutboxRouterConfig()
-    with pytest.raises(IncorrectState):
-        _ = cfg.engine_state
+async def test_broker_connect_raises_without_engine() -> None:
+    metadata = MetaData()
+    t = make_outbox_table(metadata)
+    broker = OutboxBroker(outbox_table=t)
+    with pytest.raises(IncorrectState, match="Engine not available"):
+        await broker._connect()  # noqa: SLF001
 
 
 # --- client ---

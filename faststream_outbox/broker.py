@@ -21,6 +21,7 @@ from faststream._internal.di import FastDependsConfig
 from faststream._internal.logger import DefaultLoggerStorage, make_logger_state
 from faststream._internal.logger.logging import get_broker_logger
 from faststream._internal.types import BrokerMiddleware, CustomCallable
+from faststream.exceptions import IncorrectState
 from faststream.specification.schema import BrokerSpec
 from faststream.specification.schema.extra import Tag, TagDict
 from sqlalchemy import Float, bindparam, delete, func, insert, select, text
@@ -28,7 +29,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from faststream_outbox.client import OutboxClient, _row_to_message
-from faststream_outbox.configs import EngineState, OutboxBrokerConfig
+from faststream_outbox.configs import OutboxBrokerConfig
 from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.message import OutboxInnerMessage
 from faststream_outbox.registrator import OutboxRegistrator
@@ -49,18 +50,19 @@ class _CaptureExceptionMiddleware(BaseMiddleware):
     Stash the handler exception on the inner row before AckMiddleware nacks.
 
     FastStream's AcknowledgementMiddleware catches the handler exception in its
-    own ``__aexit__`` and calls ``message.nack()`` directly — the exception never
-    propagates back to the worker loop. Without this middleware, ``OutboxInnerMessage._nack``
-    sees ``last_exception=None`` and retry strategies that branch on exception type
-    can't work. We sit one step closer to the handler in the middleware stack so
-    our ``__aexit__`` runs before AckMiddleware's, capturing ``exc_val`` onto the row.
+    own ``after_processed`` and calls ``message.nack()`` directly — the exception
+    never propagates back to the worker loop. Without this middleware,
+    ``OutboxInnerMessage._nack`` sees ``last_exception=None`` and retry strategies
+    that branch on exception type can't work. We sit one step closer to the handler
+    in the middleware stack so our ``after_processed`` runs before AckMiddleware's,
+    capturing ``exc_val`` onto the row.
     """
 
-    async def __aexit__(
+    async def after_processed(
         self,
-        exc_type: type[BaseException] | None = None,
+        exc_type: type[BaseException] | None = None,  # noqa: ARG002
         exc_val: BaseException | None = None,
-        exc_tb: TracebackType | None = None,
+        exc_tb: TracebackType | None = None,  # noqa: ARG002
     ) -> bool | None:
         if exc_val is not None and isinstance(self.msg, OutboxInnerMessage):
             self.msg.last_exception = exc_val
@@ -68,22 +70,14 @@ class _CaptureExceptionMiddleware(BaseMiddleware):
 
 
 class OutboxParamsStorage(DefaultLoggerStorage):
-    _max_msg_id_ln = -1
-    _max_queue_name = 7
-
     def get_logger(self, *, context: "ContextRepo") -> LoggerProto:
         if logger := self._get_logger_ref():
             return logger
         logger = get_broker_logger(
             name="outbox",
             default_context={"queue": "", "message_id": ""},
-            message_id_ln=self._max_msg_id_ln,
-            fmt=(
-                "%(asctime)s %(levelname)-8s - "
-                f"%(queue)-{self._max_queue_name}s | "
-                f"%(message_id)-{self._max_msg_id_ln}s "
-                "- %(message)s"
-            ),
+            message_id_ln=-1,
+            fmt=("%(asctime)s %(levelname)-8s - %(queue)-7s | %(message_id)--1s - %(message)s"),
             context=context,
             log_level=self.logger_log_level,
         )
@@ -121,11 +115,10 @@ class OutboxBroker(
         tags: Iterable[Tag | TagDict] = (),
     ) -> None:
         self._outbox_table = outbox_table
-        engine_state = EngineState(engine)
         client = OutboxClient(engine, outbox_table) if engine is not None else None
         fd_config = FastDependsConfig(use_fastdepends=apply_types, serializer=serializer)
         broker_config = OutboxBrokerConfig(
-            engine_state=engine_state,
+            engine=engine,
             client=client,
             broker_middlewares=(_CaptureExceptionMiddleware, *middlewares),
             broker_parser=parser,
@@ -161,7 +154,11 @@ class OutboxBroker(
 
     @typing.override
     async def _connect(self) -> "AsyncEngine":
-        return self.config.broker_config.engine_state.engine
+        engine = self.config.broker_config.engine
+        if engine is None:
+            msg = "Engine not available. Pass an AsyncEngine to OutboxBroker(...)."
+            raise IncorrectState(msg)
+        return engine
 
     @typing.override
     async def __aenter__(self) -> typing.Self:
