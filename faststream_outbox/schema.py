@@ -2,9 +2,9 @@
 Outbox table factory.
 
 The package does not own the schema — users attach the returned ``Table`` to their own
-``MetaData`` and write Alembic migrations themselves — but the partial index that the
-fetch query relies on **is** declared on the table, so Alembic autogenerate picks it up
-and users can't forget it.
+``MetaData`` and write Alembic migrations themselves — but the partial indexes that the
+fetch query relies on **are** declared on the table, so Alembic autogenerate picks them
+up and users can't forget them.
 
 A row is "available" iff its lease is unset (``acquired_token IS NULL``) or its lease
 is expired (``acquired_at < now() - lease_ttl_seconds``). The fetch query reclaims
@@ -74,7 +74,7 @@ def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table
     )
     # Partial index that backs the fetch query's hot branch
     # (`WHERE acquired_token IS NULL AND queue = ? AND next_attempt_at <= now()`).
-    # Lease-expired rows fall back to a sequential scan, which is fine — they're rare.
+    # The expired-lease branch is covered by `_lease_idx` below.
     Index(
         f"{table_name}_pending_idx",
         table.c.queue,
