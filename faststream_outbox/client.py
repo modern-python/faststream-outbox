@@ -17,7 +17,6 @@ can no longer mutate that row.
 
 import datetime as _dt
 import uuid
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
@@ -54,13 +53,6 @@ if TYPE_CHECKING:
 
     from sqlalchemy import Connection, Table
     from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
-
-
-@dataclass(frozen=True)
-class FetchResult:
-    """Outcome of a single fetch cycle, used to drive the subscriber's idle backoff."""
-
-    rows: list[OutboxInnerMessage]
 
 
 class OutboxClient:
