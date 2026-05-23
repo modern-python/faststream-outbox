@@ -15,6 +15,7 @@ dependencies = [
 
 [project.optional-dependencies]
 asyncpg = ["asyncpg>=0.29"]
+validate = ["alembic>=1.13"]
 
 [dependency-groups]
 dev = [
@@ -22,6 +23,7 @@ dev = [
     "pytest-asyncio",
     "pytest-cov",
     "asyncpg>=0.29",
+    "alembic>=1.13",
 ]
 lint = [
     "ruff",

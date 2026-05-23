@@ -114,15 +114,23 @@ async with TestOutboxBroker(broker, run_loops=True):
 
 ## Schema validation
 
-Schema validation is opt-in:
+Schema validation is opt-in and delegates to Alembic's autogenerate. **Alembic is an optional dependency** — install it only if you want to call `validate_schema()`. Producers, subscribers, retries, timers, and LISTEN/NOTIFY all work without it.
+
+```bash
+pip install faststream-outbox[validate]
+```
 
 ```python
-await broker.validate_schema()  # raises if user's table drifts from expected columns
+await broker.validate_schema()  # raises if the live table is missing what the broker needs
 ```
+
+The validator builds a canonical `Table` from `make_outbox_table` in a throwaway `MetaData`, runs `alembic.autogenerate.compare_metadata` against the live DB scoped to that table, and raises `RuntimeError` listing any **missing** schema — absent table, missing columns, mismatched column types, flipped nullability, missing partial indexes. Extras (your own audit columns, additional indexes for your joins) are intentionally ignored. Calling `validate_schema()` without alembic installed raises `ImportError` with an install hint; not calling it has no effect.
 
 Call it from a `/health` endpoint or startup hook — not at `broker.start()`, so Alembic can run migrations against the same DB without a startup loop.
 
 ## Retry strategies
+
+A subscriber with no explicit `retry_strategy` retries on handler exceptions with `ExponentialRetry(initial_delay_seconds=1.0, multiplier=2.0, max_delay_seconds=300.0, max_attempts=10, jitter_factor=0.2)`. An outbox is a reliability primitive — silently dropping a row on the first transient error is the wrong default for one. Pass `NoRetry()` explicitly if you really do want "delete on first error":
 
 ```python
 from faststream_outbox import ExponentialRetry, ConstantRetry, LinearRetry, NoRetry
@@ -137,6 +145,9 @@ from faststream_outbox import ExponentialRetry, ConstantRetry, LinearRetry, NoRe
     ),
 )
 async def handle(order_id: int) -> None: ...
+
+@broker.subscriber("audit", retry_strategy=NoRetry())  # opt out of retries
+async def handle_audit(payload: dict) -> None: ...
 ```
 
 Strategies receive the raised `exception` so users may subclass for "retry only on transient errors":

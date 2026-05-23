@@ -257,8 +257,68 @@ async def test_validate_schema_fails_when_columns_missing(pg_engine, outbox_tabl
     async with pg_engine.begin() as conn:
         await conn.exec_driver_sql(drop_sql)
     client = OutboxClient(pg_engine, outbox_table)
-    with pytest.raises(RuntimeError, match="missing columns"):
+    with pytest.raises(RuntimeError, match="missing column 'headers'"):
         await client.validate_schema()
+
+
+async def test_validate_schema_fails_when_timer_id_unique_index_missing(pg_engine, outbox_table) -> None:
+    """
+    Missing partial unique index on (queue, timer_id) must be caught before runtime.
+
+    Without it, ``publish(timer_id=…)`` raises ``InvalidColumnReference`` on first call.
+    """
+    drop_sql = f'DROP INDEX "{outbox_table.name}_timer_id_uq"'
+    async with pg_engine.begin() as conn:
+        await conn.exec_driver_sql(drop_sql)
+    client = OutboxClient(pg_engine, outbox_table)
+    with pytest.raises(RuntimeError, match="missing index"):
+        await client.validate_schema()
+
+
+async def test_validate_schema_fails_when_pending_index_missing(pg_engine, outbox_table) -> None:
+    """Missing the fetch partial index degrades to seq-scan; validator must surface it."""
+    drop_sql = f'DROP INDEX "{outbox_table.name}_pending_idx"'
+    async with pg_engine.begin() as conn:
+        await conn.exec_driver_sql(drop_sql)
+    client = OutboxClient(pg_engine, outbox_table)
+    with pytest.raises(RuntimeError, match="missing index"):
+        await client.validate_schema()
+
+
+async def test_validate_schema_fails_when_column_type_wrong(pg_engine, outbox_table) -> None:
+    """``payload`` typed as ``TEXT`` instead of ``BYTEA`` corrupts inserts; catch it early."""
+    alter_sql = f"ALTER TABLE \"{outbox_table.name}\" ALTER COLUMN payload TYPE TEXT USING encode(payload, 'escape')"
+    async with pg_engine.begin() as conn:
+        await conn.exec_driver_sql(alter_sql)
+    client = OutboxClient(pg_engine, outbox_table)
+    with pytest.raises(RuntimeError, match="type mismatch"):
+        await client.validate_schema()
+
+
+async def test_validate_schema_fails_when_nullability_changed(pg_engine, outbox_table) -> None:
+    """ALTER COLUMN ... DROP NOT NULL must be caught by validate_schema()."""
+    alter_sql = f'ALTER TABLE "{outbox_table.name}" ALTER COLUMN payload DROP NOT NULL'
+    async with pg_engine.begin() as conn:
+        await conn.exec_driver_sql(alter_sql)
+    client = OutboxClient(pg_engine, outbox_table)
+    with pytest.raises(RuntimeError, match="nullability mismatch"):
+        await client.validate_schema()
+
+
+async def test_validate_schema_ignores_user_added_extras(pg_engine, outbox_table) -> None:
+    """
+    Extra columns / indexes the user adds to their outbox table must NOT fail validation.
+
+    Users may add audit columns or their own indexes; the validator's contract is to flag
+    *missing* schema only, not extras.
+    """
+    async with pg_engine.begin() as conn:
+        await conn.exec_driver_sql(f'ALTER TABLE "{outbox_table.name}" ADD COLUMN audit_user_id BIGINT')
+        await conn.exec_driver_sql(
+            f'CREATE INDEX "{outbox_table.name}_audit_idx" ON "{outbox_table.name}" (audit_user_id)'
+        )
+    client = OutboxClient(pg_engine, outbox_table)
+    await client.validate_schema()  # must not raise
 
 
 async def test_publish_inserts_in_caller_transaction(pg_engine, outbox_table) -> None:

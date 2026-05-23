@@ -20,7 +20,7 @@ from faststream_outbox import (
     TestOutboxBroker,
     make_outbox_table,
 )
-from faststream_outbox.client import OutboxClient
+from faststream_outbox.client import OutboxClient, _validate_schema_sync
 from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.message import OutboxInnerMessage, OutboxMessage
 from faststream_outbox.parser.parser import OutboxParser
@@ -676,6 +676,23 @@ async def test_broker_validate_schema_delegates_to_client() -> None:
     broker.config.broker_config.client = AsyncMock()
     await broker.validate_schema()
     broker.config.broker_config.client.validate_schema.assert_awaited_once()  # type: ignore[union-attr]
+
+
+def test_validate_schema_sync_raises_when_alembic_missing() -> None:
+    """Without alembic installed the validator must raise ImportError with the install hint."""
+    metadata = MetaData()
+    t = make_outbox_table(metadata)
+    # Alembic is imported at module load; simulate "not installed" by zeroing the
+    # sentinels the function checks — matches what client.py's except-ImportError does.
+    with (
+        patch.multiple(
+            "faststream_outbox.client",
+            _alembic_compare_metadata=None,
+            _AlembicMigrationContext=None,
+        ),
+        pytest.raises(ImportError, match=r"pip install faststream-outbox\[validate\]"),
+    ):
+        _validate_schema_sync(MagicMock(), t)
 
 
 async def test_broker_ping_done_subscriber_task_is_false() -> None:
