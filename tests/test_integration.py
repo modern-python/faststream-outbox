@@ -2,6 +2,7 @@
 
 import asyncio
 import datetime as _dt
+import json
 import uuid
 from unittest import mock
 
@@ -16,6 +17,7 @@ from faststream_outbox import (
 )
 from faststream_outbox.client import OutboxClient
 from faststream_outbox.envelope import _encode_payload as encode_payload
+from faststream_outbox.testing import FakeOutboxClient
 
 
 pytestmark = pytest.mark.asyncio
@@ -798,4 +800,69 @@ async def test_terminal_writes_reuse_writer_conn_under_load(pg_engine, outbox_ta
     # "O(workers), not O(rows)". Pre-M3 this would be 50+.
     assert len(checkouts) <= 10, (
         f"pool checkouts during {n_rows}-row drain: {len(checkouts)}; expected O(workers), not O(rows)"
+    )
+
+
+async def test_fake_and_real_fetch_agree_on_eligibility_predicate(pg_engine, outbox_table) -> None:
+    """
+    T1 — fake/real predicate parity across the five eligibility states.
+
+    ``OutboxClient.fetch`` (SQL) and ``FakeOutboxClient.fetch`` (Python) compute
+    eligibility independently; without this test, drift between them is silent —
+    unit tests green, production red. The five states exercised: unleased,
+    future-dated, leased-fresh (within TTL), leased-expired (past TTL),
+    queue-mismatch.
+    """
+    lease_ttl = 60.0
+    queues_to_fetch = ["orders"]
+    # Each spec packs label, queue, next_attempt offset (s), and acquired-age (s) or None.
+    specs: list[tuple[str, str, float, float | None]] = [
+        ("unleased", "orders", -1.0, None),
+        ("future", "orders", 60.0, None),
+        ("leased-fresh", "orders", -1.0, 5.0),
+        ("leased-expired", "orders", -1.0, 120.0),
+        ("queue-mismatch", "other", -1.0, None),
+    ]
+    expected_eligible = {"unleased", "leased-expired"}
+
+    # Real side — server-side ``now()`` arithmetic keeps the offsets clock-skew-free.
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with session_factory() as session, session.begin():
+        for label, queue, offset, acq_age in specs:
+            payload, headers = encode_payload({"label": label})
+            values: dict[str, object] = {
+                "queue": queue,
+                "payload": payload,
+                "headers": headers,
+                "next_attempt_at": text(f"now() + interval '{offset} seconds'"),
+            }
+            if acq_age is not None:
+                values["acquired_token"] = uuid.uuid4()
+                values["acquired_at"] = text(f"now() - interval '{acq_age} seconds'")
+            await session.execute(insert(outbox_table).values(**values))
+    real_client = OutboxClient(pg_engine, outbox_table)
+    async with pg_engine.connect() as conn:
+        real_rows = await real_client.fetch(conn, queues_to_fetch, limit=100, lease_ttl_seconds=lease_ttl)
+    real_labels = {json.loads(r.payload)["label"] for r in real_rows}
+
+    # Fake side — separate ID space; correlate by payload label. Offsets (>=1s)
+    # dwarf any plausible Python/DB clock skew, so the comparison is stable.
+    now = _dt.datetime.now(_dt.UTC)
+    fake = FakeOutboxClient()
+    for label, queue, offset, acq_age in specs:
+        payload, headers = encode_payload({"label": label})
+        fake.feed(
+            queue=queue,
+            payload=payload,
+            headers=headers,
+            next_attempt_at=now + _dt.timedelta(seconds=offset),
+        )
+        if acq_age is not None:
+            fake.rows[-1].acquired_token = uuid.uuid4()
+            fake.rows[-1].acquired_at = now - _dt.timedelta(seconds=acq_age)
+    fake_rows = await fake.fetch(None, queues_to_fetch, limit=100, lease_ttl_seconds=lease_ttl)
+    fake_labels = {json.loads(r.payload)["label"] for r in fake_rows}
+
+    assert real_labels == fake_labels == expected_eligible, (
+        f"predicate drift — real={real_labels} fake={fake_labels} expected={expected_eligible}"
     )
