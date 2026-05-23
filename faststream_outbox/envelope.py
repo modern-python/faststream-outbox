@@ -29,7 +29,14 @@ def _encode_payload(
     """
     payload, content_type = encode_message(body, serializer=serializer)
     out_headers: dict[str, str] = dict(headers or {})
-    if content_type and "content-type" not in out_headers:
+    if "content-type" in out_headers and content_type and out_headers["content-type"] != content_type:
+        msg = (
+            f"headers['content-type']={out_headers['content-type']!r} conflicts with the "
+            f"encoder's output ({content_type!r}). Drop content-type from headers, or pass "
+            "body as bytes if you need to label the payload yourself."
+        )
+        raise ValueError(msg)
+    if content_type:
         out_headers["content-type"] = content_type
     out_headers.setdefault("correlation_id", correlation_id or gen_cor_id())
     return payload, out_headers

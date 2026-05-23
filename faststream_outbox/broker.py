@@ -333,12 +333,25 @@ class OutboxBroker(
         session: AsyncSession,
     ) -> bool:
         """
-        Delete a not-yet-leased timer row. Returns True if a row was deleted.
+        Delete a not-yet-leased timer row. Idempotent at the ``(queue, timer_id)`` level.
 
-        Same transactional contract as :meth:`publish` — runs on the caller's session
-        and commits with their transaction. The ``acquired_token IS NULL`` guard
-        prevents canceling a row whose handler is already in flight: that returns
-        False and the delivery completes normally.
+        Same transactional contract as :meth:`publish` — runs on the caller's session and
+        commits with their transaction.
+
+        Returns ``True`` if *this call* deleted the row. ``False`` means the row is no
+        longer cancelable by you, which covers three cases:
+
+        1. The row's handler is already in flight (``acquired_token IS NOT NULL``). The
+           ``acquired_token IS NULL`` guard prevents this call from clobbering the
+           in-flight lease; the delivery completes normally.
+        2. Another caller already canceled the same ``(queue, timer_id)`` in a concurrent
+           transaction.
+        3. No row was ever inserted with that ``(queue, timer_id)`` — e.g. the timer was
+           never scheduled, or the original ``publish(..., timer_id=...)`` hit the
+           ``ON CONFLICT DO NOTHING`` path and returned ``None``.
+
+        Treat ``False`` as "no cancellation needed from your transaction", not as
+        "cancellation failed".
         """
         if not isinstance(session, AsyncSession):
             msg = "broker.cancel_timer requires an sqlalchemy.ext.asyncio.AsyncSession"

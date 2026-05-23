@@ -113,7 +113,7 @@ class OutboxClient:
                 or_(*(t.c.queue == q for q in queues)),
                 or_(t.c.acquired_token.is_(None), t.c.acquired_at < lease_cutoff),
             )
-            .order_by(t.c.next_attempt_at)
+            .order_by(t.c.next_attempt_at, t.c.id)
             .limit(limit)
             .with_for_update(skip_locked=True)
             .cte("ready")

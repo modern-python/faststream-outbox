@@ -49,6 +49,8 @@ The `acquired_token` is critical: a slow handler whose lease expired and was re-
 
 `lease_ttl_seconds` (default `60.0`) **must exceed your handler's P99 duration with margin** — otherwise healthy in-flight handlers race their own lease expiry and the row gets re-claimed by another worker, triggering a duplicate delivery.
 
+When that happens the broker emits a WARNING log record with structured fields (`extra={"event": "lease_lost", "phase": "terminal" | "retry", "row_id": ..., "queue": ..., "deliveries_count": ...}`). Recurring `event=lease_lost` records mean your `lease_ttl_seconds` is below your handler's P99 — raise it. Log-pipeline aggregators can alert on the `event` field directly without regex.
+
 ## Timers (delayed delivery)
 
 Schedule a publish to fire later by passing `activate_in` (relative) or `activate_at` (absolute, tz-aware) — exactly one. Pass `timer_id` to deduplicate per `(queue, timer_id)`; cancel a not-yet-leased timer with `broker.cancel_timer(...)`.
@@ -181,6 +183,8 @@ Per-subscriber knobs (passed to `@broker.subscriber("…", …)`):
 - `max_deliveries` (default `None` — unbounded) — total claims (including lease-expiry re-claims) after which the row is dropped without invoking the handler. Defends against handlers that consistently wedge.
 
 **Engine pool sizing.** Each subscriber holds `max_workers + 1` long-lived SQLAlchemy connections (one writer per worker + one fetch), plus one raw asyncpg connection for `LISTEN` when available. Size your engine for `Σ subscribers × (max_workers + 1)` or `broker.start()` will block on pool checkout. SQLAlchemy's default `pool_size=5, max_overflow=10` covers a handful of single-worker subscribers; raise it for larger fleets.
+
+That formula is **per process**. Each replica opens its own pool, so your Postgres `max_connections` needs to cover `replicas × Σ subscribers × (max_workers + 1)` — otherwise additional replicas (or rolling deployments) will be refused at startup with `FATAL: too many connections`.
 
 ## Acknowledgements
 
