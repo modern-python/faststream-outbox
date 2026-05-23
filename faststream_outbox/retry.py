@@ -95,8 +95,9 @@ class ExponentialRetry(_RetryStrategyTemplate):
 
     def _delay_seconds(self, *, attempts_count: int) -> float:
         delay = self.initial_delay_seconds * (self.multiplier ** max(0, attempts_count - 1))
+        # Jitter before clamp so max_delay_seconds is the true ceiling.
+        if self.jitter_factor:
+            delay *= 1.0 + self._random.uniform(-self.jitter_factor / 2, self.jitter_factor / 2)
         if self.max_delay_seconds is not None:
             delay = min(delay, self.max_delay_seconds)
-        if self.jitter_factor:
-            delay += self._random.uniform(0.0, delay * self.jitter_factor)
         return delay

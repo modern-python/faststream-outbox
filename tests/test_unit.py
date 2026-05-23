@@ -97,6 +97,28 @@ def test_make_outbox_table_attaches_to_metadata() -> None:
     assert metadata.tables["outbox"] is t
 
 
+def test_make_outbox_table_accepts_max_length_name() -> None:
+    # 56 ASCII bytes + "outbox_" (7) = 63 — exactly the Postgres limit.
+    metadata = MetaData()
+    name = "a" * 56
+    t = make_outbox_table(metadata, table_name=name)
+    assert t.name == name
+
+
+def test_make_outbox_table_rejects_oversize_name() -> None:
+    metadata = MetaData()
+    with pytest.raises(ValueError, match="63 bytes"):
+        make_outbox_table(metadata, table_name="a" * 57)
+
+
+def test_make_outbox_table_rejects_oversize_multibyte_name() -> None:
+    # 30x "é" = 60 UTF-8 bytes (each "é" is 2 bytes), char count is 30 — well under
+    # any naive char-based check, but channel byte length is 7 + 60 = 67 > 63.
+    metadata = MetaData()
+    with pytest.raises(ValueError, match="63 bytes"):
+        make_outbox_table(metadata, table_name="é" * 30)
+
+
 # --- _encode_payload ---
 
 
@@ -203,11 +225,27 @@ def test_exponential_retry_caps_at_max_delay() -> None:
 
 
 def test_exponential_retry_with_jitter_within_bounds() -> None:
+    # Symmetric jitter ±jitter_factor/2 of the base delay.
     first, last = _make_times()
     s = ExponentialRetry(initial_delay_seconds=10, multiplier=1.0, jitter_factor=0.5)
     delay = s.get_next_attempt_delay(first_attempt_at=first, last_attempt_at=last, attempts_count=1)
     assert delay is not None
-    assert 10.0 <= delay <= 15.0
+    assert 7.5 <= delay <= 12.5
+
+
+def test_exponential_retry_jitter_respects_max_delay() -> None:
+    # Jitter must be applied before the clamp — otherwise max_delay_seconds is leaky.
+    first, last = _make_times()
+    s = ExponentialRetry(
+        initial_delay_seconds=100,
+        multiplier=1.0,
+        max_delay_seconds=10.0,
+        jitter_factor=0.5,
+    )
+    for _ in range(200):
+        delay = s.get_next_attempt_delay(first_attempt_at=first, last_attempt_at=last, attempts_count=1)
+        assert delay is not None
+        assert delay <= 10.0
 
 
 # --- OutboxInnerMessage state machine ---
@@ -479,6 +517,36 @@ async def test_broker_publish_with_activate_at_skips_notify() -> None:
     assert params["next_attempt_at"] == fire
 
 
+async def test_broker_publish_emits_notify_when_activate_at_is_past() -> None:
+    # Past activate_at means the row is immediately eligible — NOTIFY must fire so
+    # listeners wake without waiting for the next poll tick.
+    broker = _make_broker()
+    session = _make_session_mock()
+    past = _dt.datetime.now(tz=_dt.UTC) - _dt.timedelta(seconds=5)
+    await broker.publish(b"x", queue="orders", session=session, activate_at=past)
+    assert session.execute.await_count == 2
+    notify_stmt, notify_params = session.execute.await_args_list[1].args
+    assert "pg_notify" in str(notify_stmt)
+    assert notify_params["payload"] == "orders"
+
+
+async def test_broker_publish_emits_notify_when_activate_in_is_zero() -> None:
+    broker = _make_broker()
+    session = _make_session_mock()
+    await broker.publish(b"x", queue="orders", session=session, activate_in=_dt.timedelta(0))
+    assert session.execute.await_count == 2
+    notify_stmt, _params = session.execute.await_args_list[1].args
+    assert "pg_notify" in str(notify_stmt)
+
+
+async def test_broker_publish_rejects_naive_activate_at() -> None:
+    broker = _make_broker()
+    session = _make_session_mock()
+    naive = _dt.datetime(2026, 5, 23, 12, 0, 0)  # noqa: DTZ001
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await broker.publish(b"x", queue="orders", session=session, activate_at=naive)
+
+
 async def test_broker_publish_with_timer_id_uses_on_conflict() -> None:
     broker = _make_broker()
     session = _make_session_mock()
@@ -540,6 +608,26 @@ async def test_broker_publish_batch_with_activate_at_skips_notify() -> None:
     assert session.execute.await_count == 1
     rows = session.execute.await_args_list[0].args[1]
     assert all(r["next_attempt_at"] == fire for r in rows)
+
+
+async def test_broker_publish_batch_emits_notify_when_activate_at_is_past() -> None:
+    broker = _make_broker()
+    session = AsyncMock(spec=AsyncSession)
+    past = _dt.datetime.now(tz=_dt.UTC) - _dt.timedelta(seconds=5)
+    await broker.publish_batch(b"a", b"b", queue="orders", session=session, activate_at=past)
+    # INSERT + NOTIFY: past activate_at is immediately eligible.
+    assert session.execute.await_count == 2
+    notify_stmt, notify_params = session.execute.await_args_list[1].args
+    assert "pg_notify" in str(notify_stmt)
+    assert notify_params["payload"] == "orders"
+
+
+async def test_broker_publish_batch_rejects_naive_activate_at() -> None:
+    broker = _make_broker()
+    session = AsyncMock(spec=AsyncSession)
+    naive = _dt.datetime(2026, 5, 23, 12, 0, 0)  # noqa: DTZ001
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await broker.publish_batch(b"a", queue="orders", session=session, activate_at=naive)
 
 
 async def test_broker_publish_batch_does_not_accept_timer_id() -> None:
@@ -614,6 +702,23 @@ async def test_broker_fetch_unprocessed_filters_by_queue() -> None:
     assert "WHERE outbox.queue =" in sql
     params = stmt.compile().params
     assert params["queue_1"] == "orders"
+
+
+async def test_broker_fetch_unprocessed_applies_default_limit() -> None:
+    # Guardrail against accidental SELECT * with no LIMIT against a backlogged table.
+    broker = _make_broker()
+    session = _fetch_unprocessed_session_mock()
+    await broker.fetch_unprocessed(session=session)
+    stmt = session.execute.await_args_list[0].args[0]
+    assert stmt.compile().params["param_1"] == 1000
+
+
+async def test_broker_fetch_unprocessed_respects_explicit_limit() -> None:
+    broker = _make_broker()
+    session = _fetch_unprocessed_session_mock()
+    await broker.fetch_unprocessed(session=session, limit=5)
+    stmt = session.execute.await_args_list[0].args[0]
+    assert stmt.compile().params["param_1"] == 5
 
 
 async def test_broker_cancel_timer_returns_false_when_nothing_deleted() -> None:

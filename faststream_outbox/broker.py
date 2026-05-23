@@ -224,6 +224,9 @@ class OutboxBroker(
         if activate_in is not None and activate_at is not None:
             msg = "broker.publish accepts at most one of activate_in / activate_at"
             raise ValueError(msg)
+        if activate_at is not None and activate_at.tzinfo is None:
+            msg = "broker.publish requires activate_at to be timezone-aware"
+            raise ValueError(msg)
         serializer = self.config.broker_config.fd_config._serializer  # noqa: SLF001
         payload, hdrs = _encode_payload(
             body,
@@ -243,7 +246,12 @@ class OutboxBroker(
             values["next_attempt_at"] = activate_at
         if timer_id is not None:
             values["timer_id"] = timer_id
-        is_future = activate_in is not None or activate_at is not None
+        # Skip NOTIFY only when the row is genuinely future-dated. A past activate_at
+        # (e.g. a recovered idempotency token) is immediately eligible — fire NOTIFY.
+        now = _dt.datetime.now(tz=_dt.UTC)
+        is_future = (activate_in is not None and activate_in > _dt.timedelta(0)) or (
+            activate_at is not None and activate_at > now
+        )
 
         if timer_id is not None:
             stmt = (
@@ -289,14 +297,18 @@ class OutboxBroker(
         if activate_in is not None and activate_at is not None:
             msg = "broker.publish_batch accepts at most one of activate_in / activate_at"
             raise ValueError(msg)
+        if activate_at is not None and activate_at.tzinfo is None:
+            msg = "broker.publish_batch requires activate_at to be timezone-aware"
+            raise ValueError(msg)
         if not bodies:
             return
         # Client-side time for batch: executemany doesn't compose with column-level
         # SQL expressions easily, and a few-ms drift versus the DB is harmless for
         # user-supplied scheduling. (Retries still use server time via mark_pending_with_lease.)
+        now = _dt.datetime.now(tz=_dt.UTC)
         next_at: _dt.datetime | None = None
         if activate_in is not None:
-            next_at = _dt.datetime.now(tz=_dt.UTC) + activate_in
+            next_at = now + activate_in
         elif activate_at is not None:
             next_at = activate_at
         serializer = self.config.broker_config.fd_config._serializer  # noqa: SLF001
@@ -308,7 +320,9 @@ class OutboxBroker(
                 row["next_attempt_at"] = next_at
             rows.append(row)
         await session.execute(insert(self._outbox_table), rows)
-        if next_at is None:
+        # Skip NOTIFY only when the row is genuinely future-dated; past times are
+        # immediately eligible. (See is_future in publish for the matching rule.)
+        if next_at is None or next_at <= now:
             await self._notify(session, queue)
 
     async def cancel_timer(
@@ -343,21 +357,24 @@ class OutboxBroker(
         *,
         session: AsyncSession,
         queue: str | None = None,
+        limit: int = 1000,
     ) -> list[OutboxInnerMessage]:
         """
         Return outbox rows currently in the table — pending, in-flight, or future-dated.
 
         Intended for test assertions: a successful delivery deletes the row, so anything
         still in the table is "unprocessed". Pass *queue* to filter to a single queue;
-        omit it to return rows across all queues. Runs on the caller's session (same
-        transactional contract as :meth:`publish`); does not acquire a lease and does
-        not mutate row state, so it is safe to call alongside running subscribers.
+        omit it to return rows across all queues. *limit* caps the result set
+        (default 1000) so an accidental call against a backlogged production table
+        does not OOM the process. Runs on the caller's session (same transactional
+        contract as :meth:`publish`); does not acquire a lease and does not mutate
+        row state, so it is safe to call alongside running subscribers.
         """
         if not isinstance(session, AsyncSession):
             msg = "broker.fetch_unprocessed requires an sqlalchemy.ext.asyncio.AsyncSession"
             raise TypeError(msg)
         t = self._outbox_table
-        stmt = select(*t.c).order_by(t.c.id)
+        stmt = select(*t.c).order_by(t.c.id).limit(limit)
         if queue is not None:
             stmt = stmt.where(t.c.queue == queue)
         result = await session.execute(stmt)
