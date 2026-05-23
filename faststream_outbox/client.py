@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import (
     Float,
     MetaData,
+    and_,
     bindparam,
     delete,
     func,
@@ -103,7 +104,17 @@ class OutboxClient:
             .where(
                 t.c.next_attempt_at <= func.now(),
                 or_(*(t.c.queue == q for q in queues)),
-                or_(t.c.acquired_token.is_(None), t.c.acquired_at < lease_cutoff),
+                # The OR is split into two index-implying disjuncts so Postgres'
+                # partial-index inference picks up both `_pending_idx` (Branch A,
+                # `acquired_token IS NULL`) and `_lease_idx` (Branch B,
+                # `acquired_token IS NOT NULL AND acquired_at < lease_cutoff`) and
+                # combines them via BitmapOr. The naive form `acquired_at < lease_cutoff`
+                # alone does not imply `acquired_token IS NOT NULL`, so the planner
+                # cannot prove `_lease_idx` applies and falls back to a seq-scan.
+                or_(
+                    t.c.acquired_token.is_(None),
+                    and_(t.c.acquired_token.is_not(None), t.c.acquired_at < lease_cutoff),
+                ),
             )
             .order_by(t.c.next_attempt_at, t.c.id)
             .limit(limit)

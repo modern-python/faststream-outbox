@@ -2,9 +2,9 @@
 Outbox table factory.
 
 The package does not own the schema — users attach the returned ``Table`` to their own
-``MetaData`` and write Alembic migrations themselves — but the partial index that the
-fetch query relies on **is** declared on the table, so Alembic autogenerate picks it up
-and users can't forget it.
+``MetaData`` and write Alembic migrations themselves — but the partial indexes that the
+fetch query relies on **are** declared on the table, so Alembic autogenerate picks them
+up and users can't forget them.
 
 A row is "available" iff its lease is unset (``acquired_token IS NULL``) or its lease
 is expired (``acquired_at < now() - lease_ttl_seconds``). The fetch query reclaims
@@ -74,7 +74,7 @@ def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table
     )
     # Partial index that backs the fetch query's hot branch
     # (`WHERE acquired_token IS NULL AND queue = ? AND next_attempt_at <= now()`).
-    # Lease-expired rows fall back to a sequential scan, which is fine — they're rare.
+    # The expired-lease branch is covered by `_lease_idx` below.
     Index(
         f"{table_name}_pending_idx",
         table.c.queue,
@@ -90,5 +90,18 @@ def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table
         table.c.timer_id,
         unique=True,
         postgresql_where=table.c.timer_id.is_not(None),
+    )
+    # Partial index that backs the fetch query's expired-lease branch
+    # (`WHERE acquired_token IS NOT NULL AND acquired_at < lease_cutoff`). Without it,
+    # the OR's second arm forces a seq-scan of the whole table on every fetch — invisible
+    # under healthy steady-state (Branch A dominates) but the tail grows linearly with
+    # table size when handlers wedge or `lease_ttl_seconds < P99`. Trade-off: every fetch
+    # UPDATE rewrites (acquired_token, acquired_at), so this index pays write amplification
+    # proportional to the claim rate.
+    Index(
+        f"{table_name}_lease_idx",
+        table.c.queue,
+        table.c.acquired_at,
+        postgresql_where=table.c.acquired_token.is_not(None),
     )
     return table

@@ -179,7 +179,7 @@ Per-subscriber knobs (passed to `@broker.subscriber("…", …)`):
 - `max_workers` (default `1`) — concurrent handlers per subscriber.
 - `fetch_batch_size` (default `10`) — rows claimed per fetch cycle.
 - `min_fetch_interval` / `max_fetch_interval` (default `1.0` / `10.0` s) — base + ceiling for the adaptive idle backoff with jitter.
-- `lease_ttl_seconds` (default `60.0` s) — how long a claim is valid before another fetch may reclaim it. **Must exceed your handler's P99 duration with margin.**
+- `lease_ttl_seconds` (default `60.0` s) — how long a claim is valid before another fetch may reclaim it. **Must exceed your handler's P99 duration with margin.** Expired-lease reclaim is covered by a dedicated partial index (`<table>_lease_idx`), so sustained lease loss degrades fetch latency by index-update cost on each claim, not by a seq-scan tail proportional to table size.
 - `max_deliveries` (default `None` — unbounded) — total claims (including lease-expiry re-claims) after which the row is dropped without invoking the handler. Defends against handlers that consistently wedge.
 
 **Engine pool sizing.** Each subscriber holds `max_workers + 1` long-lived SQLAlchemy connections (one writer per worker + one fetch), plus one raw asyncpg connection for `LISTEN` when available. Size your engine for `Σ subscribers × (max_workers + 1)` or `broker.start()` will block on pool checkout. SQLAlchemy's default `pool_size=5, max_overflow=10` covers a handful of single-worker subscribers; raise it for larger fleets.

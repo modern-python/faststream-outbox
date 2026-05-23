@@ -285,6 +285,16 @@ async def test_validate_schema_fails_when_pending_index_missing(pg_engine, outbo
         await client.validate_schema()
 
 
+async def test_validate_schema_fails_when_lease_index_missing(pg_engine, outbox_table) -> None:
+    """Missing the expired-lease partial index sends the fetch CTE back to seq-scan; flag it."""
+    drop_sql = f'DROP INDEX "{outbox_table.name}_lease_idx"'
+    async with pg_engine.begin() as conn:
+        await conn.exec_driver_sql(drop_sql)
+    client = OutboxClient(pg_engine, outbox_table)
+    with pytest.raises(RuntimeError, match="missing index"):
+        await client.validate_schema()
+
+
 async def test_validate_schema_fails_when_column_type_wrong(pg_engine, outbox_table) -> None:
     """``payload`` typed as ``TEXT`` instead of ``BYTEA`` corrupts inserts; catch it early."""
     alter_sql = f"ALTER TABLE \"{outbox_table.name}\" ALTER COLUMN payload TYPE TEXT USING encode(payload, 'escape')"
