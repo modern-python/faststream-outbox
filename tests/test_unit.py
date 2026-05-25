@@ -1068,11 +1068,12 @@ async def test_fake_client_mark_pending_miss() -> None:
     assert updated is False
 
 
-async def test_fake_client_validate_schema_and_ping() -> None:
-    from faststream_outbox.testing import FakeOutboxClient  # noqa: PLC0415
-
+async def test_fake_client_validate_schema_raises_and_ping_passes() -> None:
     client = FakeOutboxClient()
-    await client.validate_schema()  # noop
+    # validate_schema on the fake must raise loudly — a silent pass would let users
+    # ship a broken DB schema while their TestOutboxBroker-backed tests stay green.
+    with pytest.raises(NotImplementedError, match="validate_schema is unavailable"):
+        await client.validate_schema()
     assert await client.ping() is True
 
 
