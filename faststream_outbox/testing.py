@@ -177,7 +177,17 @@ class FakeOutboxClient(AbstractOutboxClient):
         return False
 
     async def validate_schema(self) -> None:
-        return
+        # Silently passing here would give tests false confidence — a user calling
+        # ``broker.validate_schema()`` against ``TestOutboxBroker`` would see a green
+        # test regardless of whether the real DB schema matches the canonical one.
+        # Raise loudly so the operator routes schema-validation tests through a real
+        # ``OutboxClient`` against the same DSN their migrations ran against.
+        msg = (
+            "validate_schema is unavailable on TestOutboxBroker / FakeOutboxClient "
+            "(no real DB connection). Use OutboxClient(real_engine, table) in tests "
+            "that need to verify the live schema."
+        )
+        raise NotImplementedError(msg)
 
     async def ping(self) -> bool:
         return True

@@ -7,7 +7,7 @@ import uuid
 from unittest import mock
 
 import pytest
-from sqlalchemy import event, insert, select, text
+from sqlalchemy import MetaData, event, insert, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from faststream_outbox import (
@@ -45,8 +45,6 @@ async def test_validate_schema_passes_for_correct_table(pg_engine, outbox_table)
 
 
 async def test_validate_schema_fails_for_missing_table(pg_engine) -> None:
-    from sqlalchemy import MetaData  # noqa: PLC0415
-
     metadata = MetaData()
     table = make_outbox_table(metadata, table_name="does_not_exist_xyz")
     client = OutboxClient(pg_engine, table)
