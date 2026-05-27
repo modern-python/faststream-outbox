@@ -71,18 +71,28 @@ class NoRetry(RetryStrategyProto):
 @dataclass(kw_only=True)
 class ConstantRetry(_RetryStrategyTemplate):
     delay_seconds: float
+    jitter_factor: float = 0.0
+    _random: random.Random = field(default_factory=random.Random)
 
     def _delay_seconds(self, *, attempts_count: int) -> float:  # noqa: ARG002
-        return self.delay_seconds
+        delay = self.delay_seconds
+        if self.jitter_factor:
+            delay *= 1.0 + self._random.uniform(-self.jitter_factor / 2, self.jitter_factor / 2)
+        return delay
 
 
 @dataclass(kw_only=True)
 class LinearRetry(_RetryStrategyTemplate):
     initial_delay_seconds: float
     step_seconds: float
+    jitter_factor: float = 0.0
+    _random: random.Random = field(default_factory=random.Random)
 
     def _delay_seconds(self, *, attempts_count: int) -> float:
-        return self.initial_delay_seconds + self.step_seconds * max(0, attempts_count - 1)
+        delay = self.initial_delay_seconds + self.step_seconds * max(0, attempts_count - 1)
+        if self.jitter_factor:
+            delay *= 1.0 + self._random.uniform(-self.jitter_factor / 2, self.jitter_factor / 2)
+        return delay
 
 
 @dataclass(kw_only=True)

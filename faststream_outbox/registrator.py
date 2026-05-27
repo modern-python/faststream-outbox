@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, override
 
 from faststream._internal.broker.registrator import Registrator
 from faststream._internal.types import CustomCallable, SubscriberMiddleware
+from faststream.middlewares import AckPolicy
 
 from faststream_outbox.message import OutboxInnerMessage
 from faststream_outbox.retry import ExponentialRetry
@@ -48,6 +49,7 @@ class OutboxRegistrator(Registrator[OutboxInnerMessage, "OutboxBrokerConfig"]): 
         max_fetch_interval: float = 10.0,
         lease_ttl_seconds: float = 60.0,
         max_deliveries: int | None = None,
+        ack_policy: AckPolicy | None = None,
         dependencies: Iterable["Dependant"] = (),
         parser: CustomCallable | None = None,
         decoder: CustomCallable | None = None,
@@ -70,6 +72,7 @@ class OutboxRegistrator(Registrator[OutboxInnerMessage, "OutboxBrokerConfig"]): 
             max_fetch_interval=max_fetch_interval,
             lease_ttl_seconds=lease_ttl_seconds,
             max_deliveries=max_deliveries,
+            ack_policy=ack_policy,
             config=self.config,  # ty: ignore[invalid-argument-type]
             title_=title_,
             description_=description_,

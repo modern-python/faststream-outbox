@@ -1,9 +1,11 @@
 import asyncio
 import datetime as _dt
 import uuid
+import warnings as _warnings
 from collections.abc import Callable
 
 import pytest
+from faststream.middlewares import AckPolicy
 from sqlalchemy import MetaData
 
 from faststream_outbox import (
@@ -15,7 +17,9 @@ from faststream_outbox import (
     TestOutboxBroker,
     make_outbox_table,
 )
+from faststream_outbox.configs import OutboxBrokerConfig
 from faststream_outbox.envelope import _encode_payload as encode_payload
+from faststream_outbox.subscriber.config import OutboxSubscriberConfig
 from faststream_outbox.testing import FakeOutboxClient, _FakeRow
 
 
@@ -861,3 +865,70 @@ async def test_fake_client_cancel_timer_skips_leased_row() -> None:
     fake.rows[0].acquired_at = _dt.datetime.now(tz=_dt.UTC)
     assert await fake.cancel_timer(queue="q", timer_id="email-1") is False
     assert len(fake.rows) == 1
+
+
+# --- AckPolicy plumbing (A) ----------------------------------------------------------
+
+
+async def test_fake_broker_reject_on_error_deletes_row_on_first_failure() -> None:
+    """REJECT_ON_ERROR ignores retry strategies and deletes on the first handler error."""
+    broker = _make_broker()
+    attempts: list[str] = []
+
+    with _warnings.catch_warnings():
+        # REJECT_ON_ERROR + the default exponential retry triggers the misconfig warning;
+        # this test asserts only the runtime semantics. Coverage for the warning itself
+        # lives in tests/test_unit.py::test_subscriber_warns_on_reject_with_retry_strategy.
+        _warnings.simplefilter("ignore", UserWarning)
+
+        @broker.subscriber("orders", ack_policy=AckPolicy.REJECT_ON_ERROR)
+        async def handle(body: str) -> None:
+            attempts.append(body)
+            msg = "boom"
+            raise RuntimeError(msg)
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish("x", queue="orders")  # ty: ignore[missing-argument]
+
+    # Handler ran once, then row was deleted — no retry despite default ExponentialRetry.
+    assert attempts == ["x"]
+    assert test_broker.fake_client.rows == []
+
+
+async def test_fake_broker_nack_on_error_default_keeps_row_for_retry() -> None:
+    """Explicit NACK_ON_ERROR matches the default behavior — row kept for retry."""
+    broker = _make_broker()
+
+    @broker.subscriber("orders", ack_policy=AckPolicy.NACK_ON_ERROR)
+    async def handle(body: str) -> None:
+        del body
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish("x", queue="orders")  # ty: ignore[missing-argument]
+
+    # Row rescheduled, not deleted — same as the no-ack_policy default.
+    assert len(test_broker.fake_client.rows) == 1
+    row = test_broker.fake_client.rows[0]
+    assert row.attempts_count == 1
+    assert row.next_attempt_at > _dt.datetime.now(tz=_dt.UTC)
+
+
+async def test_subscriber_config_ack_policy_returns_explicit_value() -> None:
+    """The non-EMPTY branch of OutboxSubscriberConfig.ack_policy is now reachable."""
+    cfg = OutboxSubscriberConfig(
+        _outer_config=OutboxBrokerConfig(),
+        _ack_policy=AckPolicy.REJECT_ON_ERROR,
+        queues=["q"],
+        max_workers=1,
+        retry_strategy=None,
+        fetch_batch_size=10,
+        min_fetch_interval=1.0,
+        max_fetch_interval=10.0,
+        lease_ttl_seconds=60.0,
+        max_deliveries=None,
+    )
+    assert cfg.ack_policy is AckPolicy.REJECT_ON_ERROR
