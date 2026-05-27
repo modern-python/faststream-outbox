@@ -27,7 +27,7 @@ class OutboxSubscriberConfig(SubscriberUsecaseConfig):
     def ack_policy(self) -> AckPolicy:
         if self._ack_policy is EMPTY:
             return AckPolicy.NACK_ON_ERROR
-        return self._ack_policy  # pragma: no cover
+        return self._ack_policy
 
 
 @dataclass(kw_only=True)

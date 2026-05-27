@@ -3,11 +3,13 @@ import datetime as _dt
 import json
 import logging
 import uuid
+import warnings
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import faststream.asgi.factories.asyncapi.try_it_out
 import pytest
 from faststream.exceptions import IncorrectState
+from faststream.middlewares import AckPolicy
 from pydantic import BaseModel
 from sqlalchemy import MetaData
 from sqlalchemy.dialects import postgresql
@@ -1658,3 +1660,132 @@ def test_compute_backoff_respects_base_factor() -> None:
     for _ in range(100):
         delay = _compute_backoff(1, ceiling=10.0, base=0.1)
         assert 0.05 <= delay <= 0.15
+
+
+# --- ConstantRetry / LinearRetry jitter (G) ----------------------------------
+
+
+def test_constant_retry_with_jitter_within_bounds() -> None:
+    # Symmetric jitter ±jitter_factor/2 of the base delay (10).
+    first, last = _make_times()
+    s = ConstantRetry(delay_seconds=10.0, jitter_factor=0.4)
+    saw_variation = False
+    last_delay: float | None = None
+    for _ in range(100):
+        delay = s.get_next_attempt_delay(first_attempt_at=first, last_attempt_at=last, attempts_count=1)
+        assert delay is not None
+        assert 8.0 <= delay <= 12.0
+        if last_delay is not None and delay != last_delay:
+            saw_variation = True
+        last_delay = delay
+    assert saw_variation, "jitter should produce variation across calls"
+
+
+def test_constant_retry_without_jitter_is_deterministic() -> None:
+    # Default jitter_factor=0.0 must preserve the pre-existing exact-delay behavior.
+    first, last = _make_times()
+    s = ConstantRetry(delay_seconds=7.5)
+    for _ in range(10):
+        delay = s.get_next_attempt_delay(first_attempt_at=first, last_attempt_at=last, attempts_count=1)
+        assert delay == 7.5
+
+
+def test_linear_retry_with_jitter_within_bounds() -> None:
+    # attempts_count=3 → base = 1 + 2*(3-1) = 5; jitter_factor=0.5 → [3.75, 6.25].
+    first, last = _make_times()
+    s = LinearRetry(initial_delay_seconds=1.0, step_seconds=2.0, jitter_factor=0.5)
+    for _ in range(100):
+        delay = s.get_next_attempt_delay(first_attempt_at=first, last_attempt_at=last, attempts_count=3)
+        assert delay is not None
+        assert 3.75 <= delay <= 6.25
+
+
+def test_linear_retry_without_jitter_is_deterministic() -> None:
+    first, last = _make_times()
+    s = LinearRetry(initial_delay_seconds=1.0, step_seconds=2.0)
+    delay = s.get_next_attempt_delay(first_attempt_at=first, last_attempt_at=last, attempts_count=3)
+    assert delay == 5.0
+
+
+# --- subscriber misconfiguration (C) -----------------------------------------
+
+
+def _register_subscriber(broker: OutboxBroker, **subscriber_kwargs: object) -> None:
+    """
+    Trigger registration-time misconfig validation; no handler needed.
+
+    ``_validate_subscriber_config`` runs inside ``create_subscriber``, before
+    ``add_call``, so the warning/error fires from the ``broker.subscriber(...)``
+    call itself — no ``@`` decorator necessary.
+    """
+    broker.subscriber("orders", **subscriber_kwargs)  # ty: ignore[invalid-argument-type]
+
+
+def test_subscriber_rejects_zero_max_workers() -> None:
+    broker = _make_broker()
+    with pytest.raises(ValueError, match="max_workers must be >= 1"):
+        _register_subscriber(broker, max_workers=0)
+
+
+def test_subscriber_rejects_zero_fetch_batch_size() -> None:
+    broker = _make_broker()
+    with pytest.raises(ValueError, match="fetch_batch_size must be >= 1"):
+        _register_subscriber(broker, fetch_batch_size=0)
+
+
+def test_subscriber_rejects_min_above_max_fetch_interval() -> None:
+    broker = _make_broker()
+    with pytest.raises(ValueError, match=r"min_fetch_interval .* must be <= max_fetch_interval"):
+        _register_subscriber(broker, min_fetch_interval=10.0, max_fetch_interval=1.0)
+
+
+def test_subscriber_rejects_ack_first() -> None:
+    # ACK_FIRST has no legitimate outbox use — deletes before the handler runs, so a
+    # handler crash silently drops the row. Better to refuse than warn-and-ship.
+    broker = _make_broker()
+    with pytest.raises(ValueError, match="ACK_FIRST is not supported"):
+        _register_subscriber(broker, ack_policy=AckPolicy.ACK_FIRST)
+
+
+def test_subscriber_warns_on_reject_with_retry_strategy() -> None:
+    broker = _make_broker()
+    with pytest.warns(UserWarning, match="REJECT_ON_ERROR rejects on the first handler error"):
+        _register_subscriber(
+            broker, ack_policy=AckPolicy.REJECT_ON_ERROR, retry_strategy=ConstantRetry(delay_seconds=1)
+        )
+
+
+def test_subscriber_warns_on_nack_with_no_retry() -> None:
+    broker = _make_broker()
+    with pytest.warns(UserWarning, match="NACK_ON_ERROR with retry_strategy=NoRetry"):
+        _register_subscriber(broker, ack_policy=AckPolicy.NACK_ON_ERROR, retry_strategy=NoRetry())
+
+
+def test_subscriber_warns_on_max_deliveries_with_no_retry() -> None:
+    broker = _make_broker()
+    with pytest.warns(UserWarning, match="max_deliveries is set but no retry_strategy"):
+        _register_subscriber(broker, max_deliveries=5, retry_strategy=NoRetry())
+
+
+def test_subscriber_warns_on_lease_ttl_below_max_fetch_interval() -> None:
+    broker = _make_broker()
+    with pytest.warns(UserWarning, match=r"lease_ttl_seconds .* <= max_fetch_interval"):
+        _register_subscriber(broker, lease_ttl_seconds=5.0, max_fetch_interval=10.0)
+
+
+def test_subscriber_no_warning_on_default_config() -> None:
+    """The default subscriber config (no ack_policy, default retry, no max_deliveries) must be silent."""
+    broker = _make_broker()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        # Defaults: max_workers=1, lease_ttl_seconds=60, max_fetch_interval=10 → no warning.
+        _register_subscriber(broker)
+
+
+def test_subscriber_reject_on_error_with_no_retry_is_silent() -> None:
+    broker = _make_broker()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        # REJECT_ON_ERROR + NoRetry: the same effective behavior. We only warn about
+        # REJECT + an *active* retry strategy, not REJECT + NoRetry.
+        _register_subscriber(broker, ack_policy=AckPolicy.REJECT_ON_ERROR, retry_strategy=NoRetry())
