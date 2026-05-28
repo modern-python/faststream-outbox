@@ -42,6 +42,19 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: outbox
+          POSTGRES_PASSWORD: outbox
+          POSTGRES_DB: outbox
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U outbox"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
@@ -56,3 +69,4 @@ jobs:
           PYTHONDONTWRITEBYTECODE: 1
           PYTHONUNBUFFERED: 1
           REDIS_URL: redis://127.0.0.1:6379/0
+          POSTGRES_DSN: postgresql+asyncpg://outbox:outbox@127.0.0.1:5432/outbox
