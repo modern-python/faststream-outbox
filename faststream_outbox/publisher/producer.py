@@ -9,6 +9,8 @@ producer never opens its own session — every command carries the caller's
 """
 
 import datetime as _dt
+import logging
+import time
 import typing
 
 from faststream._internal.endpoint.utils import ParserComposition
@@ -16,11 +18,17 @@ from sqlalchemy import Float, Table, bindparam, func, insert, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from faststream_outbox.envelope import _encode_payload
+from faststream_outbox.metrics import MetricsRecorder, _noop_recorder
 from faststream_outbox.parser.parser import OutboxParser
 from faststream_outbox.response import OutboxPublishCommand
 
 
+_logger = logging.getLogger(__name__)
+
+
 if typing.TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from fast_depends.library.serializer import SerializerProto
     from faststream._internal.types import AsyncCallable, CustomCallable
 
@@ -37,6 +45,7 @@ class OutboxProducer:
         table: Table,
         parser: typing.Optional["CustomCallable"],
         decoder: typing.Optional["CustomCallable"],
+        metrics_recorder: MetricsRecorder = _noop_recorder,
     ) -> None:
         self._table = table
         self._channel = f"outbox_{table.name}"
@@ -44,6 +53,13 @@ class OutboxProducer:
         default = OutboxParser()
         self._parser = ParserComposition(parser, default.parse_message)
         self._decoder = ParserComposition(decoder, default.decode_message)
+        self._metrics_recorder = metrics_recorder
+
+    def _emit_metric(self, event: str, tags: "Mapping[str, typing.Any]") -> None:
+        try:
+            self._metrics_recorder(event, tags)
+        except Exception:  # noqa: BLE001
+            _logger.log(logging.DEBUG, "metrics recorder raised", exc_info=True)
 
     def connect(
         self,
@@ -63,6 +79,42 @@ class OutboxProducer:
             correlation_id=cmd.correlation_id,
             serializer=self.serializer,
         )
+        start_perf = time.perf_counter()
+        size_bytes = len(payload)
+        try:
+            row_id = await self._do_publish(cmd, payload, hdrs)
+        except Exception as exc:
+            self._emit_metric(
+                "published",
+                {
+                    "queue": cmd.queue,
+                    "status": "error",
+                    "count": 0,
+                    "size_bytes": size_bytes,
+                    "duration_seconds": time.perf_counter() - start_perf,
+                    "exception_type": type(exc).__name__,
+                },
+            )
+            raise
+        self._emit_metric(
+            "published",
+            {
+                "queue": cmd.queue,
+                "status": "success",
+                # row_id is None on timer_id conflict (no row landed); count reflects what was inserted.
+                "count": 0 if row_id is None else 1,
+                "size_bytes": size_bytes,
+                "duration_seconds": time.perf_counter() - start_perf,
+            },
+        )
+        return row_id
+
+    async def _do_publish(
+        self,
+        cmd: OutboxPublishCommand,
+        payload: bytes,
+        hdrs: dict[str, str] | None,
+    ) -> int | None:
         t = self._table
         values: dict[str, typing.Any] = {"queue": cmd.queue, "payload": payload, "headers": hdrs}
         # Server-side compute keeps timing immune to worker/DB clock skew (mirrors
@@ -116,16 +168,43 @@ class OutboxProducer:
         else:
             next_at = cmd.activate_at
         rows: list[dict[str, typing.Any]] = []
+        total_size = 0
         for body in bodies:
             payload, hdrs = _encode_payload(body, headers=cmd.headers, serializer=self.serializer)
+            total_size += len(payload)
             row: dict[str, typing.Any] = {"queue": cmd.queue, "payload": payload, "headers": hdrs}
             if next_at is not None:
                 row["next_attempt_at"] = next_at
             rows.append(row)
-        await cmd.session.execute(insert(self._table), rows)
-        # Skip NOTIFY only when genuinely future-dated; past times are eligible.
-        if next_at is None or next_at <= now:
-            await self._notify(cmd.session, cmd.queue)
+        start_perf = time.perf_counter()
+        try:
+            await cmd.session.execute(insert(self._table), rows)
+            # Skip NOTIFY only when genuinely future-dated; past times are eligible.
+            if next_at is None or next_at <= now:
+                await self._notify(cmd.session, cmd.queue)
+        except Exception as exc:
+            self._emit_metric(
+                "published",
+                {
+                    "queue": cmd.queue,
+                    "status": "error",
+                    "count": 0,
+                    "size_bytes": total_size,
+                    "duration_seconds": time.perf_counter() - start_perf,
+                    "exception_type": type(exc).__name__,
+                },
+            )
+            raise
+        self._emit_metric(
+            "published",
+            {
+                "queue": cmd.queue,
+                "status": "success",
+                "count": len(rows),
+                "size_bytes": total_size,
+                "duration_seconds": time.perf_counter() - start_perf,
+            },
+        )
 
     async def request(self, cmd: OutboxPublishCommand) -> typing.NoReturn:
         msg = "OutboxBroker does not support request-reply"

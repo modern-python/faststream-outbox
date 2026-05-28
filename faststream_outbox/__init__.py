@@ -7,6 +7,7 @@ from faststream._internal.testing.broker import TestBroker
 
 from faststream_outbox.broker import OutboxBroker
 from faststream_outbox.message import OutboxMessage
+from faststream_outbox.metrics import MetricsRecorder
 from faststream_outbox.publisher.usecase import OutboxPublisher
 from faststream_outbox.response import OutboxResponse
 from faststream_outbox.retry import (
@@ -25,6 +26,7 @@ __all__ = [
     "ConstantRetry",
     "ExponentialRetry",
     "LinearRetry",
+    "MetricsRecorder",
     "NoRetry",
     "OutboxBroker",
     "OutboxMessage",
@@ -44,5 +46,8 @@ try:
         return {**original_get_broker_registry(), OutboxBroker: TestOutboxBroker}  # ty: ignore[invalid-return-type]
 
     faststream.asgi.factories.asyncapi.try_it_out._get_broker_registry = get_broker_registry  # noqa: SLF001
-except Exception:  # noqa: BLE001, S110  # pragma: no cover
+except (AttributeError, ImportError):  # pragma: no cover
+    # FastStream's private ASGI try-it-out registry is best-effort wiring;
+    # tolerate breakage if upstream renames/moves the symbol but surface other
+    # errors (config, type) loudly so we notice them in CI.
     pass

@@ -260,6 +260,9 @@ async def test_end_to_end_failing_handler_with_retry(pg_engine, outbox_table) ->
         while asyncio.get_event_loop().time() < deadline:
             if await _check_deleted():
                 return
+            # pragma: empirically unreachable — the worker DELETE lands within
+            # the first poll on current CI. The branch exists as a safety valve
+            # for slower hardware, not a tested path.
             await asyncio.sleep(0.1)  # pragma: no cover
         msg = "row not deleted within timeout"  # pragma: no cover
         raise AssertionError(msg)  # pragma: no cover
@@ -996,3 +999,63 @@ async def test_publisher_with_activate_in_delays_delivery(pg_engine, outbox_tabl
     elapsed = asyncio.get_event_loop().time() - start
     assert received == [{"x": 1}]
     assert elapsed >= delay_seconds, f"delivery fired in {elapsed:.2f}s, expected >= {delay_seconds}s"
+
+
+async def test_end_to_end_metrics_recorder_fires_for_dispatch_and_publish(pg_engine, outbox_table) -> None:
+    """Recorder receives ``published``, ``dispatched``, ``acked``, and ``fetched`` events end-to-end."""
+    events: list[tuple[str, dict]] = []
+
+    def recorder(event: str, tags) -> None:
+        events.append((event, dict(tags)))
+
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table, metrics_recorder=recorder)
+
+    @broker.subscriber("orders", min_fetch_interval=0.05, max_fetch_interval=0.5)
+    async def handle(body: dict) -> None:
+        del body
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with broker:
+        async with session_factory() as session, session.begin():
+            for i in range(5):
+                await broker.publish({"i": i}, queue="orders", session=session)
+        await _wait_until(lambda: sum(1 for e, _ in events if e == "acked") >= 5, timeout=10.0)
+
+    names = [e for e, _ in events]
+    assert names.count("published") >= 5
+    assert names.count("dispatched") >= 5
+    assert names.count("acked") >= 5
+    assert "fetched" in names  # at least one fetch tick fired
+
+
+async def test_end_to_end_metrics_recorder_retry_then_terminal(pg_engine, outbox_table) -> None:
+    """Handler raises until max_attempts; recorder sees nacked_retried then nacked_terminal."""
+    events: list[tuple[str, dict]] = []
+
+    def recorder(event: str, tags) -> None:
+        events.append((event, dict(tags)))
+
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table, metrics_recorder=recorder)
+
+    @broker.subscriber(
+        "orders",
+        min_fetch_interval=0.05,
+        max_fetch_interval=0.2,
+        retry_strategy=ConstantRetry(delay_seconds=0.05, max_attempts=2),
+    )
+    async def handle(body: dict) -> None:
+        del body
+        msg = "always fails"
+        raise RuntimeError(msg)
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with broker:
+        async with session_factory() as session, session.begin():
+            await broker.publish({"x": 1}, queue="orders", session=session)
+        await _wait_until(lambda: any(e == "nacked_terminal" for e, _ in events), timeout=10.0)
+
+    retried = [t for e, t in events if e == "nacked_retried"]
+    terminals = [t for e, t in events if e == "nacked_terminal"]
+    assert len(retried) >= 1
+    assert any(t["reason"] == "retry_terminal" for t in terminals)
+    assert all(t["exception_type"] == "RuntimeError" for t in retried)

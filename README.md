@@ -281,6 +281,147 @@ class TransientOnly(ExponentialRetry):
         return super().get_next_attempt_at(exception=exception, **kw)
 ```
 
+## Metrics
+
+The broker emits structured events at well-defined instrumentation points via a single callable seam. Plug in either a one-line lambda or one of the bundled adapters for Prometheus / OpenTelemetry.
+
+### Bare seam
+
+```python
+from faststream_outbox import MetricsRecorder, OutboxBroker
+
+def recorder(event: str, tags: dict) -> None:
+    # event ∈ {fetched, dispatched, acked, nacked_retried, nacked_terminal, lease_lost, published}
+    # tags always include "queue"; subscriber-side events also include "subscriber"
+    print(event, tags)
+
+broker = OutboxBroker(engine, outbox_table=outbox_table, metrics_recorder=recorder)
+```
+
+The recorder is called from the event loop and **must not block**. Synchronous `prometheus_client.Counter.inc()` is fine (microseconds); a blocking HTTP / StatsD call is not. The library does not wrap recorders in `asyncio.to_thread` — that would destroy ordering and explode the task graph.
+
+### Prometheus (drop-in compatible with FastStream's `PrometheusMiddleware`)
+
+```bash
+pip install faststream-outbox[prometheus]
+```
+
+```python
+from fastapi import FastAPI
+from prometheus_client import REGISTRY, make_asgi_app
+from faststream_outbox import OutboxBroker
+from faststream_outbox.metrics.prometheus import PrometheusRecorder
+
+recorder = PrometheusRecorder(app_name="checkout", registry=REGISTRY)
+broker = OutboxBroker(engine, outbox_table=outbox_table, metrics_recorder=recorder)
+
+app = FastAPI()
+app.mount("/metrics", make_asgi_app(registry=REGISTRY))
+```
+
+Metric names, label set (`app_name, broker, handler, *custom_labels`), status enum (`acked, nacked, error`), histogram buckets, and constructor args (`registry, app_name=EMPTY, metrics_prefix, received_messages_size_buckets, custom_labels`) all mirror `faststream.prometheus.PrometheusMiddleware`. The `broker` label is always `"outbox"`; existing FastStream Grafana dashboards keep working — add `broker="outbox"` to the PromQL filter.
+
+```promql
+# Handler throughput (acked / sec)
+rate(faststream_received_processed_messages_total{broker="outbox",status="acked"}[1m])
+
+# Handler error rate
+rate(faststream_received_processed_messages_total{broker="outbox",status!="acked"}[5m])
+  /
+rate(faststream_received_processed_messages_total{broker="outbox"}[5m])
+
+# P99 handler latency
+histogram_quantile(0.99,
+  rate(faststream_received_processed_messages_duration_seconds_bucket{broker="outbox"}[5m]))
+
+# In-flight gauge
+faststream_received_messages_in_process{broker="outbox"}
+
+# Operator playbook: lease_ttl_seconds is too low for this handler's P99
+rate(faststream_outbox_lease_lost_total[5m]) > 0
+
+# Publish throughput per queue (publish-side tags by `destination`, not `handler`)
+rate(faststream_published_messages_total{broker="outbox",status="success"}[1m])
+
+# P99 publish (INSERT) latency per queue
+histogram_quantile(0.99,
+  rate(faststream_published_messages_duration_seconds_bucket{broker="outbox"}[5m]))
+```
+
+### OpenTelemetry (drop-in compatible with FastStream's `TelemetryMiddleware`, meter only)
+
+```bash
+pip install faststream-outbox[opentelemetry]
+```
+
+```python
+from opentelemetry import metrics
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.exporter.prometheus import PrometheusMetricReader
+from prometheus_client import start_http_server
+
+reader = PrometheusMetricReader()
+metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
+start_http_server(9000)
+
+from faststream_outbox import OutboxBroker
+from faststream_outbox.metrics.opentelemetry import OpenTelemetryRecorder
+
+broker = OutboxBroker(
+    engine,
+    outbox_table=outbox_table,
+    metrics_recorder=OpenTelemetryRecorder(),
+)
+```
+
+Instrument names (`messaging.process.duration`, `messaging.publish.duration`, `messaging.process.messages` when `include_messages_counters=True`), units, and constructor args (`meter_provider`, `meter`, `include_messages_counters`) match `faststream.opentelemetry.TelemetryMiddleware`. The `messaging.system="outbox"` attribute disambiguates outbox traffic from Kafka/Rabbit data on the same instruments. Tracing (spans) is **not** modelled by this adapter — the callable seam can't bracket a span lifecycle. **For spans, use the native middleware integration below.**
+
+### Native middleware integration (spans + middleware-bus parity)
+
+For OTel spans wrapping `consume_scope` / `publish_scope` and the exact upstream label/instrument schema, register the native middleware subclasses via `broker_middlewares=[...]` — same registration pattern as `KafkaPrometheusMiddleware` / `RabbitTelemetryMiddleware`:
+
+```python
+from prometheus_client import REGISTRY
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.metrics import MeterProvider
+
+from faststream_outbox import OutboxBroker
+from faststream_outbox.prometheus import OutboxPrometheusMiddleware
+from faststream_outbox.opentelemetry import OutboxTelemetryMiddleware
+
+broker = OutboxBroker(
+    engine,
+    outbox_table=outbox_table,
+    middlewares=[
+        OutboxPrometheusMiddleware(registry=REGISTRY),
+        OutboxTelemetryMiddleware(
+            tracer_provider=TracerProvider(),
+            meter_provider=MeterProvider(),
+        ),
+    ],
+)
+```
+
+#### Layering: middleware seam vs. recorder seam
+
+Both can be registered together — each fires for events the other physically cannot observe.
+
+| Concern | Middleware seam | Recorder seam |
+|---|---|---|
+| Handler duration / status / size | ✅ via `consume_scope` | ✅ via `acked` / `nacked_*` events |
+| Publish duration / status / exception | ✅ via `publish_scope` | ✅ via `published` event |
+| Span tracing (consume + publish) | ✅ | ❌ (callable can't bracket spans) |
+| `fetched` ticks (including empty) | ❌ (no `StreamMessage` at fetch time) | ✅ |
+| `lease_lost` after `consume_scope` exits | ❌ | ✅ |
+| `nacked_terminal(reason="max_deliveries")` before consume opens | ❌ | ✅ |
+| Empty-fetch idle counter | ❌ | ✅ |
+
+The recommended setup for full observability is **both seams together**: middleware for bus-scope metrics + tracing, recorder for outbox-internal events.
+
+#### Test broker note
+
+`TestOutboxBroker` patches `broker.publish` directly, bypassing `_basic_publish` — so middleware-registered **publish-scope** metrics do not fire in test mode. Middleware **consume-scope** metrics still fire (because `dispatch_one` calls `self.consume()` which walks the middleware stack normally). The recorder-seam `published` event provides synthetic publish-side coverage in test mode via `FakeOutboxProducer`. Mirrors `TestKafkaBroker` / `TestRabbitBroker` — same posture for the same reason.
+
 ## Failure modes
 
 - **Handlers must be idempotent.** Crash between commit-of-handler-side-effects and the broker's `DELETE` re-delivers the message.

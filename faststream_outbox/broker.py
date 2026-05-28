@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from faststream_outbox.client import AbstractOutboxClient, OutboxClient, _row_to_message
 from faststream_outbox.configs import OutboxBrokerConfig
 from faststream_outbox.message import OutboxInnerMessage
+from faststream_outbox.metrics import MetricsRecorder, _noop_recorder
 from faststream_outbox.publisher.producer import OutboxProducer
 from faststream_outbox.registrator import OutboxRegistrator
 from faststream_outbox.response import OutboxPublishCommand
@@ -128,6 +129,8 @@ class OutboxBroker(
         middlewares: Sequence[type[BaseMiddleware] | BrokerMiddleware[OutboxInnerMessage]] = (),
         graceful_timeout: float | None = 15.0,
         routers: Sequence[Registrator[OutboxInnerMessage]] = (),
+        # Metrics
+        metrics_recorder: MetricsRecorder | None = None,
         # Logging
         logger: LoggerProto | None = EMPTY,
         log_level: int = logging.INFO,
@@ -141,10 +144,17 @@ class OutboxBroker(
         self._outbox_table = outbox_table
         client = OutboxClient(engine, outbox_table) if engine is not None else None
         fd_config = FastDependsConfig(use_fastdepends=apply_types, serializer=serializer)
-        producer = OutboxProducer(table=outbox_table, parser=parser, decoder=decoder)
+        recorder: MetricsRecorder = metrics_recorder or _noop_recorder
+        producer = OutboxProducer(
+            table=outbox_table,
+            parser=parser,
+            decoder=decoder,
+            metrics_recorder=recorder,
+        )
         broker_config = OutboxBrokerConfig(
             engine=engine,
             client=client,
+            metrics_recorder=recorder,
             broker_middlewares=(_CaptureExceptionMiddleware, *middlewares),
             broker_parser=parser,
             broker_decoder=decoder,

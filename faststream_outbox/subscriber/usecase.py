@@ -137,6 +137,21 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
     def _queues(self) -> list[str]:
         return self._config.queues
 
+    def _base_tags(self, queue: str) -> dict[str, typing.Any]:
+        # ``self.specification.call_name`` is the subscriber's handler name (the
+        # decorated function's ``__name__``); we expose it as the ``subscriber``
+        # tag so adapters can map it to FastStream's ``handler`` label.
+        return {"queue": queue, "subscriber": self.specification.call_name}
+
+    def _emit_metric(self, event: str, tags: Mapping[str, typing.Any]) -> None:
+        try:
+            self._outer_config.metrics_recorder(event, tags)
+        except Exception:  # noqa: BLE001
+            self._log(
+                log_level=logging.DEBUG,
+                message="metrics recorder raised",
+            )
+
     @typing.override
     async def start(self) -> None:
         await super().start()
@@ -233,6 +248,15 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                 self._queues,
                 limit=limit,
                 lease_ttl_seconds=self._config.lease_ttl_seconds,
+            )
+            # Emit a fetched event per tick (count=0 on idle), tagged by the first
+            # configured queue. Subscribers may listen to multiple queues; for the
+            # tag we surface the primary one rather than fan out a tag-per-queue
+            # batch — adapters that want a per-queue breakdown can use the
+            # ``queue`` tag from row-level events instead.
+            self._emit_metric(
+                "fetched",
+                {**self._base_tags(self._queues[0] if self._queues else ""), "count": len(rows)},
             )
             if rows:
                 idle_count = 0
@@ -387,13 +411,23 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         """
         logger = self._outer_config.logger.logger.logger if self._outer_config.logger else None
         row.retry_strategy = self._config.retry_strategy
+        base = self._base_tags(row.queue)
         if not row.allow_delivery(max_deliveries=self._config.max_deliveries, logger=logger):
+            self._emit_metric(
+                "nacked_terminal",
+                {**base, "deliveries_count": row.deliveries_count, "reason": "max_deliveries"},
+            )
             await self._safe_flush(row, terminal=True, writer_conn=writer_conn)
             return
         # AckPolicy middleware catches handler exceptions; _CaptureExceptionMiddleware
         # stashes exc onto row.last_exception before nack runs, so retry strategies
         # can branch on exception type. We still wrap to log any escapes (manual-ack
         # fallback that itself raises, etc.) so the dispatch contract is robust.
+        self._emit_metric(
+            "dispatched",
+            {**base, "deliveries_count": row.deliveries_count, "size_bytes": len(row.payload)},
+        )
+        start_perf = time.perf_counter()
         try:
             try:
                 await self.consume(row)
@@ -402,6 +436,28 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         except Exception as e:  # noqa: BLE001
             self._log(log_level=logging.ERROR, message=f"Outbox worker error: {e!r}", exc_info=e)
             return
+        duration_seconds = time.perf_counter() - start_perf
+        common = {**base, "deliveries_count": row.deliveries_count, "duration_seconds": duration_seconds}
+        if row.last_exception is None:
+            self._emit_metric("acked", common)
+        elif row.pending_delay_seconds is not None:
+            self._emit_metric(
+                "nacked_retried",
+                {
+                    **common,
+                    "next_delay_seconds": row.pending_delay_seconds,
+                    "exception_type": type(row.last_exception).__name__,
+                },
+            )
+        elif row.to_delete:
+            self._emit_metric(
+                "nacked_terminal",
+                {
+                    **common,
+                    "reason": "retry_terminal",
+                    "exception_type": type(row.last_exception).__name__,
+                },
+            )
         await self._safe_flush(row, terminal=row.to_delete, writer_conn=writer_conn)
 
     async def _safe_flush(
@@ -450,6 +506,15 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                     "deliveries_count": row.deliveries_count,
                 },
             )
+            self._emit_metric(
+                "lease_lost",
+                {
+                    **self._base_tags(row.queue),
+                    "phase": "terminal",
+                    "row_id": row.id,
+                    "deliveries_count": row.deliveries_count,
+                },
+            )
 
     async def _flush_retry(
         self,
@@ -477,6 +542,15 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                     "phase": "retry",
                     "row_id": row.id,
                     "queue": row.queue,
+                    "deliveries_count": row.deliveries_count,
+                },
+            )
+            self._emit_metric(
+                "lease_lost",
+                {
+                    **self._base_tags(row.queue),
+                    "phase": "retry",
+                    "row_id": row.id,
                     "deliveries_count": row.deliveries_count,
                 },
             )

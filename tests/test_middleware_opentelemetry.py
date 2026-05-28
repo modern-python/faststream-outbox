@@ -1,0 +1,205 @@
+"""
+Tests for the native ``OutboxTelemetryMiddleware`` subclass + its provider.
+
+End-to-end consume-scope tests drive through ``TestOutboxBroker``. Provider
+unit tests exercise attribute mapping directly. We use OTel SDK's
+``InMemoryMetricReader`` for assertions on meter data — same pattern as
+``tests/test_metrics_opentelemetry.py``.
+"""
+
+import datetime as _dt
+import typing
+import uuid
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+
+pytest.importorskip("opentelemetry")
+from faststream.message import StreamMessage
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+from opentelemetry.sdk.trace import TracerProvider
+from sqlalchemy import MetaData
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from faststream_outbox import OutboxBroker, TestOutboxBroker, make_outbox_table
+from faststream_outbox.message import OutboxInnerMessage
+from faststream_outbox.opentelemetry import (
+    OutboxTelemetryMiddleware,
+    OutboxTelemetrySettingsProvider,
+)
+from faststream_outbox.response import OutboxPublishCommand
+
+
+def _make_broker(
+    reader: InMemoryMetricReader,
+    *,
+    include_messages_counters: bool = True,
+) -> OutboxBroker:
+    metadata = MetaData()
+    table = make_outbox_table(metadata)
+    meter_provider = MeterProvider(metric_readers=[reader])
+    return OutboxBroker(
+        outbox_table=table,
+        middlewares=[  # ty: ignore[invalid-argument-type]
+            OutboxTelemetryMiddleware(
+                meter_provider=meter_provider,
+                tracer_provider=TracerProvider(),
+                include_messages_counters=include_messages_counters,
+            )
+        ],
+    )
+
+
+def _session_mock() -> AsyncMock:
+    s = AsyncMock(spec=AsyncSession)
+    s.execute.return_value = MagicMock()
+    s.execute.return_value.scalar.return_value = 42
+    return s
+
+
+def _make_inner_message(*, payload: bytes = b"hello", queue: str = "orders") -> OutboxInnerMessage:
+    now = _dt.datetime.now(tz=_dt.UTC)
+    return OutboxInnerMessage(
+        id=7,
+        queue=queue,
+        payload=payload,
+        headers=None,
+        attempts_count=0,
+        deliveries_count=1,
+        created_at=now,
+        next_attempt_at=now,
+        first_attempt_at=None,
+        last_attempt_at=None,
+        acquired_at=now,
+        acquired_token=uuid.uuid4(),
+    )
+
+
+def _instruments(reader: InMemoryMetricReader) -> dict[str, typing.Any]:
+    data = reader.get_metrics_data()
+    assert data is not None
+    return {m.name: m.data for rm in data.resource_metrics for sm in rm.scope_metrics for m in sm.metrics}
+
+
+# ----- end-to-end consume-scope (via TestOutboxBroker) -----
+
+
+async def test_outbox_telemetry_middleware_records_process_duration_histogram() -> None:
+    reader = InMemoryMetricReader()
+    broker = _make_broker(reader)
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> None:
+        pass
+
+    async with TestOutboxBroker(broker):
+        await broker.publish({"x": 1}, queue="orders", session=_session_mock())
+
+    instruments = _instruments(reader)
+    assert "messaging.process.duration" in instruments
+    points = instruments["messaging.process.duration"].data_points
+    assert any(p.count >= 1 for p in points)
+    # Confirm the messaging.system attribute is the canonical short name.
+    attrs = dict(points[0].attributes)
+    assert attrs["messaging.system"] == "outbox"
+    assert attrs["messaging.destination_publish.name"] == "orders"
+
+
+async def test_outbox_telemetry_middleware_messages_counter_increments_when_enabled() -> None:
+    reader = InMemoryMetricReader()
+    broker = _make_broker(reader, include_messages_counters=True)
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> None:
+        pass
+
+    async with TestOutboxBroker(broker):
+        await broker.publish({"x": 1}, queue="orders", session=_session_mock())
+
+    instruments = _instruments(reader)
+    assert "messaging.process.messages" in instruments
+    points = instruments["messaging.process.messages"].data_points
+    assert sum(p.value for p in points) >= 1
+
+
+async def test_outbox_telemetry_middleware_messages_counter_absent_when_disabled() -> None:
+    reader = InMemoryMetricReader()
+    broker = _make_broker(reader, include_messages_counters=False)
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> None:
+        pass
+
+    async with TestOutboxBroker(broker):
+        await broker.publish({"x": 1}, queue="orders", session=_session_mock())
+
+    instruments = _instruments(reader)
+    assert "messaging.process.messages" not in instruments
+
+
+# ----- provider unit tests -----
+
+
+def test_outbox_telemetry_settings_provider_messaging_system() -> None:
+    provider = OutboxTelemetrySettingsProvider()
+    assert provider.messaging_system == "outbox"
+
+
+def test_outbox_telemetry_provider_consume_attrs_from_inner_message() -> None:
+    provider = OutboxTelemetrySettingsProvider()
+    inner = _make_inner_message(payload=b"hello world", queue="orders")
+    msg: StreamMessage[OutboxInnerMessage] = StreamMessage(inner, inner.payload, correlation_id="c-1")
+    attrs = provider.get_consume_attrs_from_message(msg)
+    assert attrs["messaging.system"] == "outbox"
+    assert attrs["messaging.message.id"] == "7"
+    assert attrs["messaging.message.conversation_id"] == "c-1"
+    assert attrs["messaging.message.payload_size_bytes"] == len(b"hello world")
+    assert attrs["messaging.destination_publish.name"] == "orders"
+
+
+def test_outbox_telemetry_provider_consume_destination_name() -> None:
+    provider = OutboxTelemetrySettingsProvider()
+    inner = _make_inner_message(queue="my-queue")
+    msg: StreamMessage[OutboxInnerMessage] = StreamMessage(inner, inner.payload)
+    assert provider.get_consume_destination_name(msg) == "my-queue"
+
+
+def test_outbox_telemetry_provider_publish_attrs_from_cmd_single() -> None:
+    provider = OutboxTelemetrySettingsProvider()
+    cmd = OutboxPublishCommand(
+        {"x": 1},
+        queue="orders",
+        session=AsyncMock(spec=AsyncSession),
+        correlation_id="corr-1",
+    )
+    attrs = provider.get_publish_attrs_from_cmd(cmd)
+    assert attrs["messaging.system"] == "outbox"
+    assert attrs["messaging.destination.name"] == "orders"
+    assert attrs["messaging.message.conversation_id"] == "corr-1"
+    # batch count should be absent for a single publish
+    assert "messaging.batch.message_count" not in attrs
+
+
+def test_outbox_telemetry_provider_publish_attrs_from_cmd_batch() -> None:
+    provider = OutboxTelemetrySettingsProvider()
+    cmd = OutboxPublishCommand(
+        {"x": 1},
+        {"y": 2},
+        {"z": 3},
+        queue="orders",
+        session=AsyncMock(spec=AsyncSession),
+    )
+    attrs = provider.get_publish_attrs_from_cmd(cmd)
+    assert attrs["messaging.batch.message_count"] == 3
+
+
+def test_outbox_telemetry_provider_publish_destination_name() -> None:
+    provider = OutboxTelemetrySettingsProvider()
+    cmd = OutboxPublishCommand(
+        {"x": 1},
+        queue="dst-q",
+        session=AsyncMock(spec=AsyncSession),
+    )
+    assert provider.get_publish_destination_name(cmd) == "dst-q"
