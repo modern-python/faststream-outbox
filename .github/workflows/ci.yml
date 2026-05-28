@@ -32,16 +32,6 @@ jobs:
           - "3.13"
           - "3.14"
     services:
-      redis:
-        image: redis:8
-        ports:
-          - 6379:6379
-        # Set health checks to wait until redis has started
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
       postgres:
         image: postgres:17
         env:
@@ -68,5 +58,4 @@ jobs:
         env:
           PYTHONDONTWRITEBYTECODE: 1
           PYTHONUNBUFFERED: 1
-          REDIS_URL: redis://127.0.0.1:6379/0
           POSTGRES_DSN: postgresql+asyncpg://outbox:outbox@127.0.0.1:5432/outbox
