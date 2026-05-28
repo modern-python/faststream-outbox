@@ -56,10 +56,3 @@ jobs:
           PYTHONDONTWRITEBYTECODE: 1
           PYTHONUNBUFFERED: 1
           REDIS_URL: redis://127.0.0.1:6379/0
-      - uses: codecov/codecov-action@v4.0.1
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-        with:
-          files: ./coverage.xml
-          flags: unittests
-          name: codecov-${{ matrix.python-version }}
