@@ -1,5 +1,6 @@
 import asyncio
 import datetime as _dt
+import typing
 import uuid
 import warnings as _warnings
 from collections.abc import Callable
@@ -37,6 +38,7 @@ from faststream_outbox.annotations import (
 from faststream_outbox.client import AbstractOutboxClient
 from faststream_outbox.configs import OutboxBrokerConfig
 from faststream_outbox.envelope import _encode_payload as encode_payload
+from faststream_outbox.router import OutboxRoute
 from faststream_outbox.subscriber.config import OutboxSubscriberConfig
 from faststream_outbox.testing import FakeOutboxClient, FakeOutboxProducer, _FakeRow
 
@@ -398,6 +400,60 @@ async def test_fake_broker_router_subscriber_receives_publish() -> None:
         await broker.publish("via-router", queue="orders")  # ty: ignore[missing-argument]
 
     assert received == ["via-router"]
+
+
+async def test_publisher_accepts_middlewares_kwarg() -> None:
+    """B3: ``broker.publisher(..., middlewares=...)`` threads the middleware through to publish."""
+    broker = _make_broker()
+    seen: list[str] = []
+
+    async def record_middleware(call_next: typing.Callable, cmd: typing.Any) -> typing.Any:
+        seen.append(f"before:{cmd.destination}")
+        result = await call_next(cmd)
+        seen.append(f"after:{cmd.destination}")
+        return result
+
+    publisher = broker.publisher("orders", middlewares=(record_middleware,))
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await publisher.publish({"x": 1}, session=_fake_session())
+
+    assert seen == ["before:orders", "after:orders"]
+
+
+async def test_outbox_route_accepts_ack_policy() -> None:
+    """B4: ``OutboxRoute(..., ack_policy=...)`` flows through to the registered subscriber."""
+
+    async def handle(body: str) -> None:
+        del body
+
+    # REJECT_ON_ERROR + default ExponentialRetry triggers a misconfig warning at
+    # registration; pair with NoRetry() to keep the test focused on ack_policy.
+    router = OutboxRouter(
+        handlers=(
+            OutboxRoute(
+                handle,
+                queues="orders",
+                ack_policy=AckPolicy.REJECT_ON_ERROR,
+                retry_strategy=NoRetry(),
+            ),
+        ),
+    )
+
+    broker = _make_broker()
+    broker.include_router(router)
+    # Router-registered subscribers live on the router, not directly on
+    # ``broker._subscribers``; ``broker.subscribers`` (property) walks both.
+    sub = broker.subscribers[0]
+    assert sub.ack_policy is AckPolicy.REJECT_ON_ERROR
+
+    # Drive a publish so the handler actually runs end-to-end — exercises
+    # ack_policy through the full dispatch path (not just the stored value).
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish("payload", queue="orders")  # ty: ignore[missing-argument]
+    assert test_broker.fake_client.rows == []  # handler succeeded → row deleted
 
 
 async def test_fake_broker_publish_invokes_flush_terminal_when_lease_lost() -> None:

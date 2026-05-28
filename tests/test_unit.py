@@ -29,6 +29,7 @@ from faststream_outbox import (
     make_outbox_table,
 )
 from faststream_outbox.client import OutboxClient, _validate_schema_sync
+from faststream_outbox.configs import OutboxBrokerConfig
 from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.message import OutboxInnerMessage, OutboxMessage
 from faststream_outbox.parser.parser import OutboxParser
@@ -1251,8 +1252,6 @@ async def test_fake_client_validate_schema_raises_and_ping_passes() -> None:
 
 
 async def test_outbox_broker_config_connect_disconnect_noop() -> None:
-    from faststream_outbox.configs import OutboxBrokerConfig  # noqa: PLC0415
-
     cfg = OutboxBrokerConfig()
     await cfg.connect()  # must not raise
     await cfg.disconnect()  # must not raise
@@ -1261,7 +1260,7 @@ async def test_outbox_broker_config_connect_disconnect_noop() -> None:
 # --- subscriber get_one + _make_response_publisher ---
 
 
-async def test_subscriber_get_one_raises() -> None:
+async def test_subscriber_get_one_and_aiter_raise_with_fetch_unprocessed_pointer() -> None:
     metadata = MetaData()
     t = make_outbox_table(metadata)
     broker = OutboxBroker(outbox_table=t)
@@ -1270,8 +1269,14 @@ async def test_subscriber_get_one_raises() -> None:
     async def handle(body: str) -> None: ...
 
     sub = next(iter(broker._subscribers))  # noqa: SLF001
-    with pytest.raises(NotImplementedError, match="get_one"):
+
+    with pytest.raises(NotImplementedError, match="fetch_unprocessed"):
         await sub.get_one()
+
+    # __aiter__ is also unsupported (was silently abstract-inherited before B6).
+    with pytest.raises(NotImplementedError, match="fetch_unprocessed"):
+        await sub.__aiter__()
+
     # _make_response_publisher returns an OutboxFakePublisher wired to the producer
     # so handlers can ``return OutboxResponse(...)``.
     publishers = sub._make_response_publisher(MagicMock())  # noqa: SLF001
@@ -1288,6 +1293,13 @@ async def test_subscriber_client_property_raises_when_broker_has_no_engine() -> 
     sub = next(iter(broker._subscribers))  # noqa: SLF001
     with pytest.raises(RuntimeError, match="not connected"):
         _ = sub._client  # noqa: SLF001
+
+
+def test_outbox_router_uses_outbox_broker_config() -> None:
+    """B5: router's config must be an ``OutboxBrokerConfig`` (not a plain ``BrokerConfig``)."""
+    router = OutboxRouter()
+    # Router exposes config via ConfigComposition.broker_config; the concrete type lives there.
+    assert isinstance(router.config.broker_config, OutboxBrokerConfig)
 
 
 # --- _open_listen_connection fallback paths ---

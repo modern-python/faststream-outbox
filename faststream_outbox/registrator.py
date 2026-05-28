@@ -15,7 +15,9 @@ from faststream_outbox.subscriber.factory import create_subscriber
 
 if TYPE_CHECKING:
     from fast_depends.dependencies import Dependant
+    from faststream._internal.types import PublisherMiddleware
 
+    from faststream_outbox.response import OutboxPublishCommand
     from faststream_outbox.retry import RetryStrategyProto
     from faststream_outbox.subscriber.usecase import OutboxSubscriber
 
@@ -103,6 +105,7 @@ class OutboxRegistrator(Registrator[OutboxInnerMessage, "OutboxBrokerConfig"]): 
         queue: str,
         *,
         headers: dict[str, str] | None = None,
+        middlewares: Sequence["PublisherMiddleware[OutboxPublishCommand]"] = (),
         title: str | None = None,
         description: str | None = None,
         schema: Any | None = None,
@@ -116,10 +119,14 @@ class OutboxRegistrator(Registrator[OutboxInnerMessage, "OutboxBrokerConfig"]): 
         subscriber raises ``NotImplementedError`` at decoration time, since the dispatch
         loop has no reachable ``AsyncSession`` without breaking the outbox transactional
         contract.
+
+        *middlewares* run around every ``publisher.publish(...)`` call (and around
+        ``broker.publish(...)`` when this publisher is used as the response publisher).
         """
         publisher = create_publisher(
             queue=queue,
             headers=headers,
+            middlewares=middlewares,
             broker_config=self.config,  # ty: ignore[invalid-argument-type]
             title_=title,
             description_=description,

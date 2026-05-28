@@ -100,7 +100,7 @@ class AbstractOutboxClient(abc.ABC):
     ) -> bool: ...
 
     @abc.abstractmethod
-    async def mark_pending_with_lease(  # noqa: PLR0913
+    async def mark_pending_with_lease(
         self,
         conn: "AsyncConnection | None",
         message_id: int,
@@ -231,7 +231,7 @@ class OutboxClient(AbstractOutboxClient):
             result = await conn.execute(stmt)
         return (result.rowcount or 0) > 0
 
-    async def mark_pending_with_lease(  # noqa: PLR0913
+    async def mark_pending_with_lease(
         self,
         conn: "AsyncConnection | None",
         message_id: int,

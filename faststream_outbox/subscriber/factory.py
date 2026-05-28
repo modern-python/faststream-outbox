@@ -15,7 +15,7 @@ if typing.TYPE_CHECKING:
     from faststream_outbox.retry import RetryStrategyProto
 
 
-def create_subscriber(  # noqa: PLR0913
+def create_subscriber(
     *,
     queues: list[str],
     max_workers: int,
@@ -72,7 +72,7 @@ def create_subscriber(  # noqa: PLR0913
     )
 
 
-def _validate_subscriber_config(  # noqa: PLR0913
+def _validate_subscriber_config(
     *,
     max_workers: int,
     fetch_batch_size: int,
