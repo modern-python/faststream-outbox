@@ -6,6 +6,7 @@ from faststream._internal.broker import BrokerUsecase
 from faststream._internal.testing.broker import TestBroker
 
 from faststream_outbox.broker import OutboxBroker
+from faststream_outbox.publisher.usecase import OutboxPublisher
 from faststream_outbox.retry import (
     ConstantRetry,
     ExponentialRetry,
@@ -24,6 +25,7 @@ __all__ = [
     "LinearRetry",
     "NoRetry",
     "OutboxBroker",
+    "OutboxPublisher",
     "OutboxRouter",
     "RetryStrategyProto",
     "TestOutboxBroker",

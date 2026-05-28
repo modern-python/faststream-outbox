@@ -24,15 +24,15 @@ from faststream._internal.types import BrokerMiddleware, CustomCallable
 from faststream.exceptions import IncorrectState
 from faststream.specification.schema import BrokerSpec
 from faststream.specification.schema.extra import Tag, TagDict
-from sqlalchemy import Float, bindparam, delete, func, insert, select, text
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from faststream_outbox.client import AbstractOutboxClient, OutboxClient, _row_to_message
 from faststream_outbox.configs import OutboxBrokerConfig
-from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.message import OutboxInnerMessage
+from faststream_outbox.publisher.producer import OutboxProducer
 from faststream_outbox.registrator import OutboxRegistrator
+from faststream_outbox.response import OutboxPublishCommand
 
 
 if typing.TYPE_CHECKING:
@@ -50,26 +50,13 @@ def _validate_activate_args(
     activate_in: _dt.timedelta | None,
     activate_at: _dt.datetime | None,
 ) -> None:
-    """Mutex + tz-aware checks shared by ``publish`` / ``publish_batch`` (real broker + test fakes)."""
+    """Mutex + tz-aware checks shared by the test fakes. Real broker delegates to ``OutboxPublishCommand``."""
     if activate_in is not None and activate_at is not None:
         msg = f"{method_name} accepts at most one of activate_in / activate_at"
         raise ValueError(msg)
     if activate_at is not None and activate_at.tzinfo is None:
         msg = f"{method_name} requires activate_at to be timezone-aware"
         raise ValueError(msg)
-
-
-def _validate_publish_args(
-    method_name: str,
-    session: object,
-    activate_in: _dt.timedelta | None,
-    activate_at: _dt.datetime | None,
-) -> None:
-    """Full publish validation: session type + activate-args mutex/tz. Real broker only."""
-    if not isinstance(session, AsyncSession):
-        msg = f"{method_name} requires an sqlalchemy.ext.asyncio.AsyncSession"
-        raise TypeError(msg)
-    _validate_activate_args(method_name, activate_in, activate_at)
 
 
 def _compute_next_at_client_side(
@@ -154,6 +141,7 @@ class OutboxBroker(
         self._outbox_table = outbox_table
         client = OutboxClient(engine, outbox_table) if engine is not None else None
         fd_config = FastDependsConfig(use_fastdepends=apply_types, serializer=serializer)
+        producer = OutboxProducer(table=outbox_table, parser=parser, decoder=decoder)
         broker_config = OutboxBrokerConfig(
             engine=engine,
             client=client,
@@ -169,8 +157,11 @@ class OutboxBroker(
             broker_dependencies=dependencies,
             graceful_timeout=graceful_timeout,
             extra_context={"broker": self},
-            producer=_NoProducer(),  # ty: ignore[invalid-argument-type]
+            producer=producer,
         )
+        # Serializer lives on fd_config — wire it onto the producer so encoded
+        # bodies use the same path as the broker's own publish flow.
+        producer.serializer = fd_config._serializer  # noqa: SLF001
         specification = BrokerSpec(
             url=[],
             protocol="postgresql",
@@ -252,53 +243,18 @@ class OutboxBroker(
         Returns the inserted row's ``id`` (BigInt PK), or ``None`` if a timer with
         the same ``(queue, timer_id)`` already exists.
         """
-        _validate_publish_args("broker.publish", session, activate_in, activate_at)
-        serializer = self.config.broker_config.fd_config._serializer  # noqa: SLF001
-        payload, hdrs = _encode_payload(
+        cmd = OutboxPublishCommand(
             body,
+            queue=queue,
+            session=session,
             headers=headers,
             correlation_id=correlation_id,
-            serializer=serializer,
+            activate_in=activate_in,
+            activate_at=activate_at,
+            timer_id=timer_id,
         )
-        t = self._outbox_table
-        values: dict[str, typing.Any] = {"queue": queue, "payload": payload, "headers": hdrs}
-        # Server-side compute keeps timing immune to worker/DB clock skew (mirrors
-        # client.mark_pending_with_lease).
-        if activate_in is not None:
-            values["next_attempt_at"] = func.now() + func.make_interval(
-                0, 0, 0, 0, 0, 0, bindparam("activate_in_seconds", activate_in.total_seconds(), type_=Float)
-            )
-        elif activate_at is not None:
-            values["next_attempt_at"] = activate_at
-        if timer_id is not None:
-            values["timer_id"] = timer_id
-        # Skip NOTIFY only when the row is genuinely future-dated. A past activate_at
-        # (e.g. a recovered idempotency token) is immediately eligible — fire NOTIFY.
-        now = _dt.datetime.now(tz=_dt.UTC)
-        is_future = (activate_in is not None and activate_in > _dt.timedelta(0)) or (
-            activate_at is not None and activate_at > now
-        )
-
-        if timer_id is not None:
-            stmt = (
-                pg_insert(t)
-                .values(**values)
-                .on_conflict_do_nothing(
-                    index_elements=[t.c.queue, t.c.timer_id],
-                    index_where=t.c.timer_id.is_not(None),
-                )
-                .returning(t.c.id)
-            )
-        else:
-            stmt = insert(t).values(**values).returning(t.c.id)
-
-        result = await session.execute(stmt)
-        row_id: int | None = result.scalar()
-        # Skip NOTIFY for future-dated rows (listeners can't act before the gate
-        # opens — polling fires them at next tick) and on conflict (no row landed).
-        if row_id is not None and not is_future:
-            await self._notify(session, queue)
-        return row_id
+        result = await self._basic_publish(cmd, producer=self.config.producer)
+        return typing.cast("int | None", result)
 
     async def publish_batch(  # ty: ignore[invalid-method-override]
         self,
@@ -317,27 +273,22 @@ class OutboxBroker(
         every row in the batch identically — per-row timer dedup is not supported,
         use :meth:`publish` for that.
         """
-        _validate_publish_args("broker.publish_batch", session, activate_in, activate_at)
         if not bodies:
+            # Validate the activate args even when there's no work so callers
+            # get the same misuse error on empty batches as on real ones.
+            _validate_activate_args("broker.publish_batch", activate_in, activate_at)
             return
-        # Client-side time for batch: executemany doesn't compose with column-level
-        # SQL expressions easily, and a few-ms drift versus the DB is harmless for
-        # user-supplied scheduling. (Retries still use server time via mark_pending_with_lease.)
-        now = _dt.datetime.now(tz=_dt.UTC)
-        next_at = _compute_next_at_client_side(activate_in, activate_at)
-        serializer = self.config.broker_config.fd_config._serializer  # noqa: SLF001
-        rows = []
-        for body in bodies:
-            payload, hdrs = _encode_payload(body, headers=headers, serializer=serializer)
-            row: dict[str, typing.Any] = {"queue": queue, "payload": payload, "headers": hdrs}
-            if next_at is not None:
-                row["next_attempt_at"] = next_at
-            rows.append(row)
-        await session.execute(insert(self._outbox_table), rows)
-        # Skip NOTIFY only when the row is genuinely future-dated; past times are
-        # immediately eligible. (See is_future in publish for the matching rule.)
-        if next_at is None or next_at <= now:
-            await self._notify(session, queue)
+        first, *rest = bodies
+        cmd = OutboxPublishCommand(
+            first,
+            *rest,
+            queue=queue,
+            session=session,
+            headers=headers,
+            activate_in=activate_in,
+            activate_at=activate_at,
+        )
+        await self._basic_publish_batch(cmd, producer=self.config.producer)
 
     async def cancel_timer(
         self,
@@ -409,44 +360,6 @@ class OutboxBroker(
         result = await session.execute(stmt)
         return [_row_to_message(dict(row)) for row in result.mappings().all()]
 
-    async def _notify(self, session: AsyncSession, queue: str) -> None:
-        """
-        Emit ``pg_notify('outbox_<table>', queue)`` so listening subscribers wake immediately.
-
-        Uses ``pg_notify(...)`` rather than raw ``NOTIFY`` so the channel and payload
-        bind cleanly as parameters (raw NOTIFY accepts only literals — injection-prone).
-        Runs on the caller's session so the NOTIFY commits with the row insert; if the
-        caller's transaction rolls back, the NOTIFY is silently discarded by Postgres.
-        Safe no-op for non-Postgres dialects: subscribers without a matching LISTEN just
-        ignore it.
-        """
-        await session.execute(
-            text("SELECT pg_notify(:channel, :payload)"),
-            {"channel": f"outbox_{self._outbox_table.name}", "payload": queue},
-        )
-
     async def request(self, *args: typing.Any, **kwargs: typing.Any) -> typing.NoReturn:
         msg = "OutboxBroker does not support request-reply"
         raise NotImplementedError(msg)
-
-
-class _NoProducer:
-    """Stub satisfying FastStream's broker producer slot — the outbox has no real producer."""
-
-    async def publish(self, *_args: typing.Any, **_kwargs: typing.Any) -> typing.NoReturn:
-        msg = "OutboxBroker has no producer"
-        raise NotImplementedError(msg)
-
-    async def request(self, *_args: typing.Any, **_kwargs: typing.Any) -> typing.NoReturn:
-        msg = "OutboxBroker has no producer"
-        raise NotImplementedError(msg)
-
-    async def publish_batch(self, *_args: typing.Any, **_kwargs: typing.Any) -> typing.NoReturn:
-        msg = "OutboxBroker has no producer"
-        raise NotImplementedError(msg)
-
-    def connect(self, *_args: typing.Any, **_kwargs: typing.Any) -> None:
-        pass
-
-    def disconnect(self) -> None:
-        pass

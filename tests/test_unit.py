@@ -10,6 +10,8 @@ import faststream.asgi.factories.asyncapi.try_it_out
 import pytest
 from faststream.exceptions import IncorrectState
 from faststream.middlewares import AckPolicy
+from faststream.response.publish_type import PublishType
+from faststream.response.response import PublishCommand
 from pydantic import BaseModel
 from sqlalchemy import MetaData
 from sqlalchemy.dialects import postgresql
@@ -21,6 +23,7 @@ from faststream_outbox import (
     LinearRetry,
     NoRetry,
     OutboxBroker,
+    OutboxPublisher,
     OutboxRouter,
     TestOutboxBroker,
     make_outbox_table,
@@ -29,8 +32,12 @@ from faststream_outbox.client import OutboxClient, _validate_schema_sync
 from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.message import OutboxInnerMessage, OutboxMessage
 from faststream_outbox.parser.parser import OutboxParser
+from faststream_outbox.publisher.config import OutboxPublisherSpecificationConfig
+from faststream_outbox.publisher.producer import OutboxProducer
+from faststream_outbox.publisher.specification import OutboxPublisherSpecification
+from faststream_outbox.response import OutboxPublishCommand
 from faststream_outbox.subscriber.usecase import OutboxSubscriber, _compute_backoff
-from faststream_outbox.testing import FakeOutboxClient
+from faststream_outbox.testing import FakeOutboxClient, FakeOutboxProducer
 
 
 def test_outbox_broker_registered_in_try_it_out_registry() -> None:
@@ -478,10 +485,53 @@ def test_subscriber_empty_queue_list_raises() -> None:
         broker.subscriber([])
 
 
-def test_publisher_raises_not_implemented() -> None:
+def test_publisher_returns_outbox_publisher() -> None:
     broker = _make_broker()
-    with pytest.raises(NotImplementedError, match="no publisher"):
-        broker.publisher("orders")
+    pub = broker.publisher("orders", headers={"source": "test"})
+    assert isinstance(pub, OutboxPublisher)
+    assert pub.queue == "orders"
+    assert pub.headers == {"source": "test"}
+
+
+def test_publisher_decorator_raises_not_implemented() -> None:
+    broker = _make_broker()
+    pub = broker.publisher("orders")
+
+    async def handler(body: dict) -> None: ...
+
+    with pytest.raises(NotImplementedError, match="cannot decorate"):
+        pub(handler)
+
+
+async def test_publisher_publish_rejects_non_async_session() -> None:
+    broker = _make_broker()
+    pub = broker.publisher("orders")
+    with pytest.raises(TypeError, match="AsyncSession"):
+        await pub.publish(b"x", session=object())  # ty: ignore[invalid-argument-type]
+
+
+async def test_publish_command_validates_activate_args_mutex() -> None:
+    session = _make_session_mock()
+    with pytest.raises(ValueError, match="activate_in / activate_at"):
+        OutboxPublishCommand(
+            b"x",
+            queue="orders",
+            session=session,
+            activate_in=_dt.timedelta(seconds=1),
+            activate_at=_dt.datetime.now(tz=_dt.UTC) + _dt.timedelta(seconds=1),
+        )
+
+
+async def test_publish_command_rejects_naive_activate_at() -> None:
+    session = _make_session_mock()
+    naive = _dt.datetime(2026, 5, 23, 12, 0, 0)  # noqa: DTZ001
+    with pytest.raises(ValueError, match="timezone-aware"):
+        OutboxPublishCommand(b"x", queue="orders", session=session, activate_at=naive)
+
+
+async def test_publish_command_rejects_non_async_session() -> None:
+    with pytest.raises(TypeError, match="AsyncSession"):
+        OutboxPublishCommand(b"x", queue="orders", session=object())  # ty: ignore[invalid-argument-type]
 
 
 def test_duplicate_subscriber_warns() -> None:
@@ -782,23 +832,140 @@ async def test_broker_publish_batch_executes_single_insert_for_many_rows() -> No
     assert notify_params["payload"] == "orders"
 
 
-async def test_no_producer_methods_raise() -> None:
-    from faststream_outbox.broker import _NoProducer  # noqa: PLC0415
-
-    producer = _NoProducer()
-    with pytest.raises(NotImplementedError):
-        await producer.publish()
-    with pytest.raises(NotImplementedError):
-        await producer.request()
-    with pytest.raises(NotImplementedError):
-        await producer.publish_batch()
+async def test_outbox_producer_request_raises_not_implemented() -> None:
+    metadata = MetaData()
+    t = make_outbox_table(metadata)
+    producer = OutboxProducer(table=t, parser=None, decoder=None)
+    session = _make_session_mock()
+    cmd = OutboxPublishCommand(b"x", queue="orders", session=session)
+    with pytest.raises(NotImplementedError, match="request-reply"):
+        await producer.request(cmd)
 
 
-def test_no_producer_connect_disconnect_noop() -> None:
-    from faststream_outbox.broker import _NoProducer  # noqa: PLC0415
-
-    producer = _NoProducer()
+def test_outbox_producer_connect_disconnect_noop() -> None:
+    metadata = MetaData()
+    t = make_outbox_table(metadata)
+    producer = OutboxProducer(table=t, parser=None, decoder=None)
     producer.connect()  # must not raise
+    producer.disconnect()  # must not raise
+
+
+def test_broker_exposes_outbox_producer() -> None:
+    broker = _make_broker()
+    producer = broker.config.broker_config.producer
+    assert isinstance(producer, OutboxProducer)
+
+
+# --- Publisher / producer / spec coverage edges ---
+
+
+def test_publish_command_from_cmd_raises_not_implemented() -> None:
+    """The relay path is rejected, so ``from_cmd`` has no legitimate caller."""
+    cmd = PublishCommand(body=b"x", _publish_type=PublishType.PUBLISH)
+    with pytest.raises(NotImplementedError, match="from_cmd is not supported"):
+        OutboxPublishCommand.from_cmd(cmd)
+
+
+async def test_publisher_internal_publish_method_raises() -> None:
+    """``_publish`` is unreachable in normal use (``__call__`` raises first), but kept for protocol parity."""
+    broker = _make_broker()
+    pub = broker.publisher("orders")
+    cmd = PublishCommand(body=b"x", _publish_type=PublishType.PUBLISH)
+    with pytest.raises(NotImplementedError, match="cannot decorate"):
+        await pub._publish(cmd, _extra_middlewares=())  # noqa: SLF001
+
+
+async def test_publisher_request_raises_not_implemented() -> None:
+    broker = _make_broker()
+    pub = broker.publisher("orders")
+    with pytest.raises(NotImplementedError, match="request-reply"):
+        await pub.request(b"x")
+
+
+async def test_outbox_producer_publish_batch_empty_bodies_is_noop() -> None:
+    """Empty ``batch_bodies`` returns before any SQL fires (the real broker also short-circuits)."""
+    metadata = MetaData()
+    t = make_outbox_table(metadata)
+    producer = OutboxProducer(table=t, parser=None, decoder=None)
+    session = _make_session_mock()
+    cmd = OutboxPublishCommand(None, queue="orders", session=session)
+    cmd.batch_bodies = ()  # PublishCommand carries body=None, but be explicit
+    await producer.publish_batch(cmd)
+    session.execute.assert_not_called()
+
+
+def _make_outbox_publisher_spec(*, title: str | None = None, queue: str = "orders") -> OutboxPublisherSpecification:
+    broker = _make_broker()
+    spec_config = OutboxPublisherSpecificationConfig(
+        queue=queue,
+        title_=title,
+        description_=None,
+        schema_=None,
+        include_in_schema=True,
+    )
+    return OutboxPublisherSpecification(
+        _outer_config=broker.config.broker_config,
+        specification_config=spec_config,
+    )
+
+
+def test_publisher_spec_name_defaults_to_queue_publisher() -> None:
+    assert _make_outbox_publisher_spec(queue="orders").name == "orders:Publisher"
+
+
+def test_publisher_spec_name_uses_explicit_title() -> None:
+    assert _make_outbox_publisher_spec(queue="orders", title="OrderPub").name == "OrderPub"
+
+
+def test_publisher_spec_get_schema_returns_publisher_spec() -> None:
+    schema = _make_outbox_publisher_spec(queue="orders").get_schema()
+    assert "orders:Publisher" in schema
+    entry = schema["orders:Publisher"]
+    assert entry.operation.message.title == "orders:Publisher:Message"
+
+
+# --- FakeOutboxProducer direct coverage ---
+
+
+async def test_fake_outbox_producer_publish_batch_inserts_rows() -> None:
+    broker = _make_broker()
+    fake_client = FakeOutboxClient()
+    producer = FakeOutboxProducer(fake_client, broker, serializer=None, run_loops=False)
+    cmd = OutboxPublishCommand(b"a", b"b", queue="orders", session=_make_session_mock())
+    await producer.publish_batch(cmd)
+    assert len(fake_client.rows) == 2
+    assert {r.payload for r in fake_client.rows} == {b"a", b"b"}
+
+
+async def test_fake_outbox_producer_publish_batch_empty_is_noop() -> None:
+    broker = _make_broker()
+    fake_client = FakeOutboxClient()
+    producer = FakeOutboxProducer(fake_client, broker, serializer=None, run_loops=False)
+    cmd = OutboxPublishCommand(None, queue="orders", session=_make_session_mock())
+    cmd.batch_bodies = ()
+    await producer.publish_batch(cmd)
+    assert fake_client.rows == []
+
+
+async def test_fake_outbox_producer_request_raises() -> None:
+    broker = _make_broker()
+    producer = FakeOutboxProducer(FakeOutboxClient(), broker, serializer=None, run_loops=False)
+    cmd = OutboxPublishCommand(b"x", queue="orders", session=_make_session_mock())
+    with pytest.raises(NotImplementedError, match="request-reply"):
+        await producer.request(cmd)
+
+
+def test_fake_outbox_producer_connect_sets_serializer() -> None:
+    broker = _make_broker()
+    producer = FakeOutboxProducer(FakeOutboxClient(), broker, serializer=None, run_loops=False)
+    sentinel = object()
+    producer.connect(serializer=sentinel)
+    assert producer._serializer is sentinel  # noqa: SLF001
+
+
+def test_fake_outbox_producer_disconnect_is_noop() -> None:
+    broker = _make_broker()
+    producer = FakeOutboxProducer(FakeOutboxClient(), broker, serializer=None, run_loops=False)
     producer.disconnect()  # must not raise
 
 

@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from unittest import mock
 
-from faststream._internal.testing.broker import TestBroker
+from faststream._internal.testing.broker import TestBroker, patch_broker_calls
 
 from faststream_outbox.broker import (
     OutboxBroker,
@@ -29,6 +29,7 @@ from faststream_outbox.broker import (
 from faststream_outbox.client import AbstractOutboxClient
 from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.message import OutboxInnerMessage
+from faststream_outbox.response import OutboxPublishCommand
 
 
 if typing.TYPE_CHECKING:
@@ -236,6 +237,84 @@ async def _sync_dispatch(fake_client: FakeOutboxClient, broker: OutboxBroker, qu
     await subscriber.dispatch_one(_to_inner(fake_row))
 
 
+class FakeOutboxProducer:
+    """
+    In-memory ``OutboxProducer`` substitute routing inserts through ``FakeOutboxClient``.
+
+    Used by ``TestOutboxBroker`` so ``broker.publisher(queue).publish(body, session=...)``
+    drives the same in-memory fake store as ``broker.publish(body, session=...)``. The
+    *session* on the command is ignored — the fake client has no transaction.
+
+    In sync mode (``run_loops=False``), each successful insert short-circuits into
+    ``_sync_dispatch`` so handlers run before ``publish`` returns — matches the
+    ``broker.publish`` patch in ``_build_fake_publish``.
+    """
+
+    _parser: typing.Any = None
+    _decoder: typing.Any = None
+
+    def __init__(
+        self,
+        fake_client: FakeOutboxClient,
+        broker: OutboxBroker,
+        serializer: typing.Any,
+        *,
+        run_loops: bool,
+    ) -> None:
+        self._fake_client = fake_client
+        self._broker = broker
+        self._serializer = serializer
+        self._run_loops = run_loops
+
+    async def publish(self, cmd: OutboxPublishCommand) -> int | None:
+        _validate_activate_args("broker.publish", cmd.activate_in, cmd.activate_at)
+        payload, hdrs = _encode_payload(
+            cmd.body,
+            headers=cmd.headers,
+            correlation_id=cmd.correlation_id,
+            serializer=self._serializer,
+        )
+        next_at = _compute_next_at_client_side(cmd.activate_in, cmd.activate_at)
+        row_id = self._fake_client.feed(
+            queue=cmd.queue,
+            payload=payload,
+            headers=hdrs,
+            next_attempt_at=next_at,
+            timer_id=cmd.timer_id,
+        )
+        if not self._run_loops and row_id is not None:
+            await _sync_dispatch(self._fake_client, self._broker, cmd.queue, row_id)
+        return row_id
+
+    async def publish_batch(self, cmd: OutboxPublishCommand) -> None:
+        _validate_activate_args("broker.publish_batch", cmd.activate_in, cmd.activate_at)
+        bodies = cmd.batch_bodies
+        if not bodies:
+            return
+        next_at = _compute_next_at_client_side(cmd.activate_in, cmd.activate_at)
+        for body in bodies:
+            payload, hdrs = _encode_payload(body, headers=cmd.headers, serializer=self._serializer)
+            row_id = self._fake_client.feed(
+                queue=cmd.queue,
+                payload=payload,
+                headers=hdrs,
+                next_attempt_at=next_at,
+            )
+            if not self._run_loops and row_id is not None:
+                await _sync_dispatch(self._fake_client, self._broker, cmd.queue, row_id)
+
+    async def request(self, cmd: OutboxPublishCommand) -> typing.NoReturn:
+        msg = "OutboxBroker does not support request-reply"
+        raise NotImplementedError(msg)
+
+    def connect(self, connection: typing.Any = None, serializer: typing.Any = None) -> None:  # noqa: ARG002
+        if serializer is not None:
+            self._serializer = serializer
+
+    def disconnect(self) -> None:
+        pass
+
+
 def _build_fake_publish(
     fake_client: FakeOutboxClient,
     broker: OutboxBroker,
@@ -390,9 +469,25 @@ class TestOutboxBroker(TestBroker[OutboxBroker]):  # ty: ignore[invalid-type-arg
 
     @contextmanager
     def _patch_producer(self, broker: OutboxBroker) -> "Iterator[None]":
-        # OutboxBroker has no producer to patch.
-        del broker
-        yield
+        # Swap the broker's producer slot for one that routes inserts through
+        # the in-memory fake client. ``OutboxPublisher.publish`` flows through
+        # ``_basic_publish(cmd, producer=...)``, so replacing the producer is
+        # how publisher.publish() lands rows in the fake store. ``broker.publish``
+        # is patched separately to bypass the producer — that path is the
+        # canonical sync-dispatch entry point and matches existing tests.
+        serializer = broker.config.broker_config.fd_config._serializer  # noqa: SLF001
+        fake_producer = FakeOutboxProducer(
+            self.fake_client,
+            broker,
+            serializer,
+            run_loops=self.run_loops,
+        )
+        original_producer = broker.config.broker_config.producer
+        broker.config.broker_config.producer = fake_producer
+        try:
+            yield
+        finally:
+            broker.config.broker_config.producer = original_producer
 
     @contextmanager
     def _patch_broker(self, broker: OutboxBroker) -> "Iterator[None]":
@@ -417,9 +512,28 @@ class TestOutboxBroker(TestBroker[OutboxBroker]):  # ty: ignore[invalid-type-arg
         finally:
             broker.config.broker_config.client = original_client
 
+    @staticmethod
+    def create_publisher_fake_subscriber(  # pragma: no cover
+        broker: OutboxBroker,
+        publisher: typing.Any,
+    ) -> tuple["OutboxSubscriber", bool]:
+        # Required by FastStream's TestBroker abstract base, but never called —
+        # we skip the publisher fake-subscriber loop in ``_fake_start`` because
+        # ``FakeOutboxProducer`` already lands rows in the fake client AND drives
+        # the real subscriber via ``_sync_dispatch``. The FastStream
+        # publisher-spy infrastructure would mock the real handler and break that.
+        del broker, publisher
+        msg = "TestOutboxBroker handles publisher dispatch via FakeOutboxProducer; this is unreachable."
+        raise NotImplementedError(msg)
+
     def _fake_start(self, broker: OutboxBroker, *args: typing.Any, **kwargs: typing.Any) -> None:
-        # Run the parent _fake_start (sets up publisher fakes, calls _post_start, etc.)
-        super()._fake_start(broker, *args, **kwargs)
+        del args, kwargs
+        # Skip the parent's publisher iteration — see ``create_publisher_fake_subscriber``
+        # for why. We still need to fan out ``_post_start`` on subscribers so their
+        # call models build (matches what TestBroker._fake_start does last).
+        patch_broker_calls(broker)  # ty: ignore[invalid-argument-type]
+        for subscriber in broker.subscribers:
+            subscriber._post_start()  # noqa: SLF001
         # In sync mode, publish drives dispatch directly — don't spawn the loops.
         if not self.run_loops:
             return

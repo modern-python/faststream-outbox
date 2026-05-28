@@ -1,12 +1,14 @@
 import warnings
 from collections.abc import Iterable, Sequence
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, Any, override
 
 from faststream._internal.broker.registrator import Registrator
 from faststream._internal.types import CustomCallable, SubscriberMiddleware
 from faststream.middlewares import AckPolicy
 
 from faststream_outbox.message import OutboxInnerMessage
+from faststream_outbox.publisher.factory import create_publisher
+from faststream_outbox.publisher.usecase import OutboxPublisher
 from faststream_outbox.retry import ExponentialRetry
 from faststream_outbox.subscriber.factory import create_subscriber
 
@@ -96,6 +98,33 @@ class OutboxRegistrator(Registrator[OutboxInnerMessage, "OutboxBrokerConfig"]): 
         )
 
     @override
-    def publisher(self, *args: object, **kwargs: object) -> object:  # ty: ignore[invalid-method-override]
-        msg = "OutboxBroker has no publisher() — insert outbox rows via SQLAlchemy in your own transaction."
-        raise NotImplementedError(msg)
+    def publisher(  # ty: ignore[invalid-method-override]
+        self,
+        queue: str,
+        *,
+        headers: dict[str, str] | None = None,
+        title: str | None = None,
+        description: str | None = None,
+        schema: Any | None = None,
+        include_in_schema: bool = True,
+    ) -> OutboxPublisher:
+        """
+        Construct a queue-scoped publisher.
+
+        The publisher is standalone-only — call ``await pub.publish(body, session=session)``
+        from inside your own transaction. Attempting to use it as a relay decorator on a
+        subscriber raises ``NotImplementedError`` at decoration time, since the dispatch
+        loop has no reachable ``AsyncSession`` without breaking the outbox transactional
+        contract.
+        """
+        publisher = create_publisher(
+            queue=queue,
+            headers=headers,
+            broker_config=self.config,  # ty: ignore[invalid-argument-type]
+            title_=title,
+            description_=description,
+            schema_=schema,
+            include_in_schema=include_in_schema,
+        )
+        super().publisher(publisher)
+        return publisher
