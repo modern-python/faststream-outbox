@@ -2,6 +2,7 @@ import asyncio
 import datetime as _dt
 import json
 import logging
+import typing
 import uuid
 import warnings
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1972,3 +1973,344 @@ def test_subscriber_reject_on_error_with_no_retry_is_silent() -> None:
         # REJECT_ON_ERROR + NoRetry: the same effective behavior. We only warn about
         # REJECT + an *active* retry strategy, not REJECT + NoRetry.
         _register_subscriber(broker, ack_policy=AckPolicy.REJECT_ON_ERROR, retry_strategy=NoRetry())
+
+
+# --- MetricsRecorder seam ------------------------------------------------------------
+
+
+def _events_recorder() -> tuple[list[tuple[str, dict]], typing.Any]:
+    events: list[tuple[str, dict]] = []
+
+    def recorder(event: str, tags: typing.Any) -> None:
+        events.append((event, dict(tags)))
+
+    return events, recorder
+
+
+def _make_broker_with_recorder(recorder: typing.Any, *, max_deliveries: int | None = None) -> OutboxBroker:
+    metadata = MetaData()
+    table = make_outbox_table(metadata)
+    broker = OutboxBroker(outbox_table=table, metrics_recorder=recorder)
+
+    @broker.subscriber("orders", max_deliveries=max_deliveries)
+    async def handle(body: dict) -> None: ...
+
+    return broker
+
+
+async def test_metrics_default_recorder_is_noop_and_publish_consume_cycle_does_not_raise() -> None:
+    broker = _make_broker()
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> None: ...
+
+    test_broker = TestOutboxBroker(broker)
+    session = _make_session_mock()
+    async with test_broker:
+        await broker.publish({"x": 1}, queue="orders", session=session)
+
+
+async def test_metrics_dispatched_and_acked_fire_with_expected_tags() -> None:
+    events, recorder = _events_recorder()
+    broker = _make_broker_with_recorder(recorder)
+    session = _make_session_mock()
+    async with TestOutboxBroker(broker):
+        await broker.publish({"x": 1}, queue="orders", session=session)
+    names = [e for e, _ in events]
+    assert "dispatched" in names
+    assert "acked" in names
+    acked_tags = next(t for e, t in events if e == "acked")
+    assert acked_tags["queue"] == "orders"
+    # FastStream camel-cases the handler's __name__ for ``call_name``; assert
+    # case-insensitively so the test isn't pinned to upstream's casing.
+    assert acked_tags["subscriber"].lower() == "handle"
+    assert acked_tags["duration_seconds"] >= 0.0
+    dispatched_tags = next(t for e, t in events if e == "dispatched")
+    assert dispatched_tags["size_bytes"] > 0
+
+
+async def test_metrics_recorder_raise_is_swallowed_and_consume_completes() -> None:
+    def raising(event: str, tags: typing.Any) -> None:  # noqa: ARG001
+        msg = "recorder boom"
+        raise RuntimeError(msg)
+
+    broker = _make_broker_with_recorder(raising)
+    test_broker = TestOutboxBroker(broker)
+    session = _make_session_mock()
+    async with test_broker:
+        await broker.publish({"x": 1}, queue="orders", session=session)
+        # Row must be deleted because consume completed and acked.
+        assert not test_broker.fake_client.rows
+
+
+async def test_metrics_lease_lost_terminal_emits_recorder_event() -> None:
+    events, recorder = _events_recorder()
+
+    class LeaseLostFake(FakeOutboxClient):
+        async def delete_with_lease(self, *args: object, **kwargs: object) -> bool:  # noqa: ARG002
+            return False
+
+    broker = _make_broker_with_recorder(recorder, max_deliveries=1)
+    test_broker = TestOutboxBroker(broker)
+    test_broker.fake_client = LeaseLostFake()
+    msg = _make_msg(id=42, queue="orders", deliveries_count=3)
+
+    async with test_broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        await sub._flush_terminal(msg, writer_conn=None)  # noqa: SLF001
+
+    lease_events = [t for e, t in events if e == "lease_lost"]
+    assert len(lease_events) == 1
+    assert lease_events[0]["phase"] == "terminal"
+    assert lease_events[0]["row_id"] == 42
+    assert lease_events[0]["queue"] == "orders"
+
+
+async def test_metrics_lease_lost_retry_emits_recorder_event() -> None:
+    events, recorder = _events_recorder()
+
+    class LeaseLostFake(FakeOutboxClient):
+        async def mark_pending_with_lease(self, *args: object, **kwargs: object) -> bool:  # noqa: ARG002
+            return False
+
+    broker = _make_broker_with_recorder(recorder, max_deliveries=1)
+    test_broker = TestOutboxBroker(broker)
+    test_broker.fake_client = LeaseLostFake()
+    msg = _make_msg(id=99, queue="orders", deliveries_count=2)
+    msg.pending_delay_seconds = 1.0
+
+    async with test_broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        await sub._flush_retry(msg, writer_conn=None)  # noqa: SLF001
+
+    lease_events = [t for e, t in events if e == "lease_lost"]
+    assert len(lease_events) == 1
+    assert lease_events[0]["phase"] == "retry"
+
+
+async def test_metrics_fetched_emits_with_count() -> None:
+    events, recorder = _events_recorder()
+    broker = _make_broker_with_recorder(recorder)
+    sub = next(iter(broker._subscribers))  # noqa: SLF001
+    fake = FakeOutboxClient()
+    fake.feed(queue="orders", payload=b"a")
+    fake.feed(queue="orders", payload=b"b")
+    fake.feed(queue="orders", payload=b"c")
+    broker.config.broker_config.client = fake
+    sub.running = True
+
+    async def _stop_after(*args: object, **kwargs: object) -> list[OutboxInnerMessage]:  # noqa: ARG001
+        sub.running = False
+        return await FakeOutboxClient.fetch(fake, None, ["orders"], limit=3, lease_ttl_seconds=60.0)
+
+    with patch.object(fake, "fetch", new=_stop_after):
+        await sub._fetch_inner(fetch_conn=None, listen_conn=None)  # noqa: SLF001
+
+    fetched = [t for e, t in events if e == "fetched"]
+    assert len(fetched) == 1
+    assert fetched[0]["count"] == 3
+    assert fetched[0]["queue"] == "orders"
+
+
+async def test_metrics_fetched_emits_count_zero_on_idle() -> None:
+    events, recorder = _events_recorder()
+    broker = _make_broker_with_recorder(recorder)
+    sub = next(iter(broker._subscribers))  # noqa: SLF001
+    fake = FakeOutboxClient()
+    broker.config.broker_config.client = fake
+    sub.running = True
+
+    async def _empty_then_stop(*args: object, **kwargs: object) -> list[OutboxInnerMessage]:  # noqa: ARG001
+        sub.running = False
+        return []
+
+    with patch.object(fake, "fetch", new=_empty_then_stop):
+        await sub._fetch_inner(fetch_conn=None, listen_conn=None)  # noqa: SLF001
+
+    fetched = [t for e, t in events if e == "fetched"]
+    assert len(fetched) == 1
+    assert fetched[0]["count"] == 0
+
+
+async def test_metrics_max_deliveries_emits_terminal_reason() -> None:
+    events, recorder = _events_recorder()
+    broker = _make_broker_with_recorder(recorder, max_deliveries=1)
+    fake = FakeOutboxClient()
+    test_broker = TestOutboxBroker(broker)
+    test_broker.fake_client = fake
+    msg = _make_msg_over_max_deliveries()
+
+    async with test_broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        await sub.dispatch_one(msg, writer_conn=None)
+
+    terminals = [t for e, t in events if e == "nacked_terminal"]
+    assert len(terminals) == 1
+    assert terminals[0]["reason"] == "max_deliveries"
+    assert "duration_seconds" not in terminals[0]
+
+
+async def test_metrics_nacked_retried_includes_next_delay_and_exception_type() -> None:
+    events, recorder = _events_recorder()
+
+    metadata = MetaData()
+    table = make_outbox_table(metadata)
+    broker = OutboxBroker(outbox_table=table, metrics_recorder=recorder)
+
+    @broker.subscriber("orders", retry_strategy=ConstantRetry(delay_seconds=42.0))
+    async def handle(body: dict) -> None:  # noqa: ARG001
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    session = _make_session_mock()
+    async with TestOutboxBroker(broker):
+        await broker.publish({"x": 1}, queue="orders", session=session)
+
+    retried = [t for e, t in events if e == "nacked_retried"]
+    assert len(retried) == 1
+    assert retried[0]["next_delay_seconds"] == 42.0
+    assert retried[0]["exception_type"] == "RuntimeError"
+    assert retried[0]["duration_seconds"] >= 0.0
+
+
+async def test_metrics_retry_terminal_emits_with_duration() -> None:
+    events, recorder = _events_recorder()
+
+    metadata = MetaData()
+    table = make_outbox_table(metadata)
+    broker = OutboxBroker(outbox_table=table, metrics_recorder=recorder)
+
+    @broker.subscriber("orders", retry_strategy=NoRetry())
+    async def handle(body: dict) -> None:  # noqa: ARG001
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    session = _make_session_mock()
+    async with TestOutboxBroker(broker):
+        await broker.publish({"x": 1}, queue="orders", session=session)
+
+    terminals = [t for e, t in events if e == "nacked_terminal"]
+    assert len(terminals) == 1
+    assert terminals[0]["reason"] == "retry_terminal"
+    assert terminals[0]["exception_type"] == "RuntimeError"
+    assert terminals[0]["duration_seconds"] >= 0.0
+
+
+async def test_metrics_duration_seconds_reflects_handler_runtime() -> None:
+    events, recorder = _events_recorder()
+
+    metadata = MetaData()
+    table = make_outbox_table(metadata)
+    broker = OutboxBroker(outbox_table=table, metrics_recorder=recorder)
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> None:  # noqa: ARG001
+        await asyncio.sleep(0.02)
+
+    session = _make_session_mock()
+    async with TestOutboxBroker(broker):
+        await broker.publish({"x": 1}, queue="orders", session=session)
+
+    acked = next(t for e, t in events if e == "acked")
+    assert acked["duration_seconds"] >= 0.015
+
+
+async def test_metrics_published_event_fires_with_success_status_and_size() -> None:
+    events, recorder = _events_recorder()
+    broker = _make_broker_with_recorder(recorder)
+    session = _make_session_mock()
+    async with TestOutboxBroker(broker):
+        await broker.publish({"x": 1}, queue="orders", session=session)
+
+    pub = [t for e, t in events if e == "published"]
+    assert len(pub) >= 1
+    assert pub[0]["status"] == "success"
+    assert pub[0]["queue"] == "orders"
+    assert pub[0]["count"] == 1
+    assert pub[0]["size_bytes"] > 0
+
+
+async def test_metrics_published_batch_emits_count_equal_to_batch_size() -> None:
+    events, recorder = _events_recorder()
+    broker = _make_broker_with_recorder(recorder)
+    session = _make_session_mock()
+    async with TestOutboxBroker(broker):
+        await broker.publish_batch({"x": 1}, {"y": 2}, {"z": 3}, queue="orders", session=session)
+
+    pub = [t for e, t in events if e == "published"]
+    # ``_build_fake_publish_batch`` aggregates: one event per ``publish_batch`` call
+    # with ``count == landed`` (mirrors the real producer's batch contract).
+    assert len(pub) == 1
+    assert pub[0]["count"] == 3
+
+
+# --- OutboxProducer error-path coverage --------------------------------------------------
+
+
+def _make_producer(recorder: typing.Any) -> OutboxProducer:
+    metadata = MetaData()
+    table = make_outbox_table(metadata)
+    return OutboxProducer(table=table, parser=None, decoder=None, metrics_recorder=recorder)
+
+
+async def test_producer_publish_emits_error_event_and_reraises_on_sql_failure() -> None:
+    events, recorder = _events_recorder()
+    producer = _make_producer(recorder)
+    session = AsyncMock(spec=AsyncSession)
+    session.execute.side_effect = RuntimeError("forced INSERT failure")
+    cmd = OutboxPublishCommand({"x": 1}, queue="orders", session=session)
+
+    with pytest.raises(RuntimeError, match="forced INSERT failure"):
+        await producer.publish(cmd)
+
+    pub = [t for e, t in events if e == "published"]
+    assert len(pub) == 1
+    assert pub[0]["status"] == "error"
+    assert pub[0]["count"] == 0
+    assert pub[0]["exception_type"] == "RuntimeError"
+    assert pub[0]["queue"] == "orders"
+    assert pub[0]["duration_seconds"] >= 0.0
+    assert pub[0]["size_bytes"] > 0
+
+
+async def test_producer_publish_batch_emits_error_event_and_reraises_on_sql_failure() -> None:
+    events, recorder = _events_recorder()
+    producer = _make_producer(recorder)
+    session = AsyncMock(spec=AsyncSession)
+    session.execute.side_effect = RuntimeError("forced batch INSERT failure")
+    bodies = [{"x": 1}, {"y": 2}, {"z": 3}]
+    cmd = OutboxPublishCommand(*bodies, queue="orders", session=session)
+
+    with pytest.raises(RuntimeError, match="forced batch INSERT failure"):
+        await producer.publish_batch(cmd)
+
+    pub = [t for e, t in events if e == "published"]
+    assert len(pub) == 1
+    assert pub[0]["status"] == "error"
+    assert pub[0]["count"] == 0
+    assert pub[0]["exception_type"] == "RuntimeError"
+    assert pub[0]["queue"] == "orders"
+    # The producer encodes every body before calling session.execute, so size_bytes
+    # reflects the cumulative encoded payload size even though no row landed.
+    assert pub[0]["size_bytes"] > 0
+    assert pub[0]["duration_seconds"] >= 0.0
+
+
+async def test_producer_emit_metric_swallows_recorder_exceptions(caplog: pytest.LogCaptureFixture) -> None:
+    """A raising recorder must not poison the producer's success path."""
+
+    def raising_recorder(event: str, tags: typing.Any) -> None:  # noqa: ARG001
+        msg = "recorder boom"
+        raise RuntimeError(msg)
+
+    producer = _make_producer(raising_recorder)
+    session = _make_session_mock(scalar_return=99)
+    cmd = OutboxPublishCommand({"x": 1}, queue="orders", session=session)
+
+    with caplog.at_level(logging.DEBUG, logger="faststream_outbox.publisher.producer"):
+        row_id = await producer.publish(cmd)
+
+    # publish completes despite the raising recorder.
+    assert row_id == 99
+    matching = [r for r in caplog.records if "metrics recorder raised" in r.getMessage() and r.exc_info is not None]
+    assert matching, "expected DEBUG log 'metrics recorder raised' with exc_info"

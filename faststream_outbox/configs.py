@@ -11,6 +11,8 @@ from dataclasses import dataclass
 
 from faststream._internal.configs import BrokerConfig
 
+from faststream_outbox.metrics import MetricsRecorder, _noop_recorder
+
 
 if typing.TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
@@ -22,6 +24,7 @@ if typing.TYPE_CHECKING:
 class OutboxBrokerConfig(BrokerConfig):
     engine: "AsyncEngine | None" = None
     client: "AbstractOutboxClient | None" = None
+    metrics_recorder: MetricsRecorder = _noop_recorder
 
     async def connect(self) -> None:
         # Engine and client are wired up by the broker's constructor; nothing to do here.

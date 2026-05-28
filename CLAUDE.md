@@ -14,7 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `just install` — `uv lock --upgrade && uv sync --all-extras --all-groups --frozen`.
 - `just build` / `just down` / `just sh` — image build, teardown, shell into the app container.
 
-`tests/test_unit.py` and `tests/test_fake.py` need no Postgres — runnable with `uv run pytest tests/test_unit.py` directly. `tests/test_integration.py` requires Postgres at `POSTGRES_DSN` (default `postgresql+asyncpg://outbox:outbox@localhost:5432/outbox`); the `pg_engine` fixture skips if unreachable. Coverage is on by default (`pyproject.toml` `addopts`).
+`tests/test_unit.py` and `tests/test_fake.py` need no Postgres — runnable with `uv run pytest tests/test_unit.py` directly. `tests/test_integration.py` requires Postgres at `POSTGRES_DSN` (default `postgresql+asyncpg://outbox:outbox@localhost:5432/outbox`); the `pg_engine` fixture skips if unreachable. Coverage is on by default (`pyproject.toml` `addopts`) with a strict `--cov-fail-under=100` ratchet — partial runs (`pytest -k name`, a single test file, etc.) will fail that gate. Pass `--no-cov` or `--cov-fail-under=0` when iterating locally on a subset; the full `just test` run satisfies the gate.
 
 ## Architecture
 
@@ -110,6 +110,26 @@ Critical property for the outbox transactional contract: `wrap_callable_to_fasta
 ### Engine ownership
 
 The caller owns the `AsyncEngine`. `OutboxBrokerConfig.disconnect()` deliberately does nothing; `EngineState` is just a lazy holder so the broker can be constructed before the engine is wired (used by the test broker).
+
+### Metrics seam (`metrics/__init__.py`)
+
+`OutboxBroker(..., metrics_recorder=...)` accepts a `MetricsRecorder = Callable[[str, Mapping[str, Any]], None]`. The default (`_noop_recorder`) lets instrumentation sites call unconditionally. The recorder threads through `OutboxBrokerConfig.metrics_recorder` to two places: the subscriber's six emission points (`fetched`, `dispatched`, `acked`, `nacked_retried`, `nacked_terminal`, `lease_lost`) via `OutboxSubscriber._emit_metric`, and the producer's single emission point (`published`) via `OutboxProducer._emit_metric`. The producer reads the recorder from its own constructor kwarg (passed in alongside the config field) so the canonical insert path doesn't have to reach through the broker config at call time.
+
+Every call site wraps the recorder in `try/except` and logs at DEBUG — a broken recorder never poisons the dispatch loop. The recorder is called from the event loop and **must not block**; sync `Counter.inc()` is fine, blocking HTTP/StatsD calls are not. The library does not wrap user recorders in `asyncio.to_thread` — that would destroy ordering and create per-event task explosion.
+
+Bundled adapters in `metrics/prometheus.py` and `metrics/opentelemetry.py` are optional extras (`pip install faststream-outbox[prometheus]` / `[opentelemetry]`) — both modules guard their imports so importing `faststream_outbox` without the extras stays clean. Metric names, status values (`acked, nacked, error`), histogram buckets, and constructor argument names mirror upstream FastStream's `PrometheusMiddleware` / `TelemetryMiddleware` so users running other brokers see consistent dashboards. **The Prometheus adapter uses a different label set for consume vs publish, matching upstream verbatim: consume tags by `handler` (the subscriber); publish tags by `destination` (the queue). The canonical `messaging.system` / `broker` label value is `"outbox"` — shared by `PrometheusRecorder`, `OpenTelemetryRecorder`, and the native middleware providers below.** OTel adapter is meter-only — the callable seam can't bracket span lifecycles; spans land via the native middleware path instead.
+
+Test broker (`testing.py`) mirrors the producer-side `published` emission in `_build_fake_publish` / `_build_fake_publish_batch` (and `FakeOutboxProducer.publish` / `.publish_batch`) so test code can assert on publish-side metrics without exercising the real producer path; the synthetic events use `duration_seconds=0.0` since the in-memory client has no real write to time.
+
+### Native middleware integration (`opentelemetry/`, `prometheus/`)
+
+Thin subclasses of upstream FastStream's `TelemetryMiddleware[OutboxPublishCommand]` and `PrometheusMiddleware[OutboxInnerMessage, OutboxPublishCommand]` register via `broker_middlewares=[...]`. They fire on `consume_scope` (via `OutboxSubscriber.dispatch_one → self.consume(row)`) and `publish_scope` (via `OutboxBroker.publish → _basic_publish` in `faststream/_internal/broker/pub_base.py:39-51`) — both work without modifying `dispatch_one` or `OutboxProducer`. Empirically verified.
+
+Providers (`opentelemetry/provider.py`, `prometheus/provider.py`) set `messaging_system = "outbox"` — the canonical value shared with the recorder-seam adapters above. The OTel provider maps `row.id → messaging.message.id`, `row.queue → messaging.destination_publish.name`, `correlation_id → messaging.message.conversation_id`, `len(payload) → messaging.message.payload_size_bytes`, and `len(cmd.batch_bodies) → messaging.batch.message_count` when >1. Attribute keys are baked as string literals to avoid the deprecated `SpanAttributes` enum from upstream `opentelemetry.semconv.trace`.
+
+**Test broker quirk**: `TestOutboxBroker._patch_broker` replaces `broker.publish` directly via `mock.patch.object`, bypassing `_basic_publish` — so middleware-registered publish metrics do **not** fire in test mode. Consume metrics still fire (`dispatch_one` walks middleware normally). The recorder-seam `published` event provides synthetic publish-side coverage in test mode via the fake producer.
+
+**Two-seam layering**: middleware and recorder are complementary, not redundant. Middleware owns `consume_scope` / `publish_scope` (spans, durations, status, message size). Recorder owns events outside the bus: `fetched` (no `StreamMessage` exists at fetch time), `lease_lost` (after `consume_scope` exits), `nacked_terminal(reason="max_deliveries")` (fires before consume opens). Each fires for events the other physically cannot observe.
 
 ### Retry strategies (`retry.py`)
 

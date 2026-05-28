@@ -1,0 +1,201 @@
+"""Unit tests for ``PrometheusRecorder`` — drop-in adapter for the seam."""
+
+import typing
+
+import pytest
+
+
+prometheus_client = pytest.importorskip("prometheus_client")
+from prometheus_client import CollectorRegistry  # noqa: E402
+
+from faststream_outbox.metrics.prometheus import PrometheusRecorder  # noqa: E402
+
+
+def _sample(reg: CollectorRegistry, name: str, labels: dict[str, str]) -> float | None:
+    return reg.get_sample_value(name, labels)
+
+
+def _base_labels(handler: str = "h") -> dict[str, str]:
+    return {"app_name": "", "broker": "outbox", "handler": handler}
+
+
+def _make_recorder(**kwargs: typing.Any) -> tuple[CollectorRegistry, PrometheusRecorder]:
+    reg = CollectorRegistry()
+    return reg, PrometheusRecorder(registry=reg, **kwargs)
+
+
+def test_prometheus_recorder_constructs_with_defaults() -> None:
+    _, _ = _make_recorder()
+
+
+def test_prometheus_fetched_event_increments_non_empty_label() -> None:
+    reg, rec = _make_recorder()
+    rec("fetched", {"queue": "q", "subscriber": "h", "count": 3})
+    rec("fetched", {"queue": "q", "subscriber": "h", "count": 0})
+    assert _sample(reg, "faststream_outbox_fetch_batches_total", {**_base_labels(), "non_empty": "true"}) == 1.0
+    assert _sample(reg, "faststream_outbox_fetch_batches_total", {**_base_labels(), "non_empty": "false"}) == 1.0
+
+
+def test_prometheus_dispatched_increments_received_and_in_process_and_size() -> None:
+    reg, rec = _make_recorder()
+    rec("dispatched", {"queue": "q", "subscriber": "h", "deliveries_count": 1, "size_bytes": 128})
+    assert _sample(reg, "faststream_received_messages_total", _base_labels()) == 1.0
+    assert _sample(reg, "faststream_received_messages_in_process", _base_labels()) == 1.0
+    # Histogram size bucket: ensure observation landed (count != None).
+    assert _sample(reg, "faststream_received_messages_size_bytes_count", _base_labels()) == 1.0
+
+
+def test_prometheus_acked_maps_to_acked_status_and_decrements_in_process() -> None:
+    reg, rec = _make_recorder()
+    rec("dispatched", {"queue": "q", "subscriber": "h", "deliveries_count": 1, "size_bytes": 8})
+    rec("acked", {"queue": "q", "subscriber": "h", "deliveries_count": 1, "duration_seconds": 0.02})
+    assert _sample(reg, "faststream_received_processed_messages_total", {**_base_labels(), "status": "acked"}) == 1.0
+    assert _sample(reg, "faststream_received_messages_in_process", _base_labels()) == 0.0
+    assert _sample(reg, "faststream_received_processed_messages_duration_seconds_count", _base_labels()) == 1.0
+
+
+def test_prometheus_nacked_retried_maps_to_nacked_status_with_exception_type() -> None:
+    reg, rec = _make_recorder()
+    rec("dispatched", {"queue": "q", "subscriber": "h", "deliveries_count": 1, "size_bytes": 8})
+    rec(
+        "nacked_retried",
+        {
+            "queue": "q",
+            "subscriber": "h",
+            "deliveries_count": 1,
+            "duration_seconds": 0.01,
+            "next_delay_seconds": 5.0,
+            "exception_type": "ValueError",
+        },
+    )
+    assert _sample(reg, "faststream_received_processed_messages_total", {**_base_labels(), "status": "nacked"}) == 1.0
+    assert (
+        _sample(
+            reg,
+            "faststream_received_processed_messages_exceptions_total",
+            {**_base_labels(), "exception_type": "ValueError"},
+        )
+        == 1.0
+    )
+
+
+def test_prometheus_nacked_terminal_records_reason_label() -> None:
+    reg, rec = _make_recorder()
+    rec("dispatched", {"queue": "q", "subscriber": "h", "deliveries_count": 5, "size_bytes": 4})
+    rec(
+        "nacked_terminal",
+        {"queue": "q", "subscriber": "h", "deliveries_count": 5, "reason": "max_deliveries"},
+    )
+    assert _sample(reg, "faststream_outbox_terminal_total", {**_base_labels(), "reason": "max_deliveries"}) == 1.0
+    assert _sample(reg, "faststream_received_processed_messages_total", {**_base_labels(), "status": "nacked"}) == 1.0
+
+
+def test_prometheus_lease_lost_increments_error_status_and_phase_counter() -> None:
+    reg, rec = _make_recorder()
+    rec("lease_lost", {"queue": "q", "subscriber": "h", "phase": "terminal"})
+    assert _sample(reg, "faststream_received_processed_messages_total", {**_base_labels(), "status": "error"}) == 1.0
+    assert _sample(reg, "faststream_outbox_lease_lost_total", {**_base_labels(), "phase": "terminal"}) == 1.0
+
+
+def test_prometheus_published_event_uses_destination_label() -> None:
+    reg, rec = _make_recorder()
+    rec(
+        "published",
+        {"queue": "q", "status": "success", "count": 1, "size_bytes": 16, "duration_seconds": 0.001},
+    )
+    # Upstream PrometheusMiddleware tags publish-side metrics by ``destination``,
+    # not ``handler``. The recorder must match so users registering both seams
+    # see one consistent time series per queue.
+    assert (
+        _sample(
+            reg,
+            "faststream_published_messages_total",
+            {"app_name": "", "broker": "outbox", "destination": "q", "status": "success"},
+        )
+        == 1.0
+    )
+
+
+def test_prometheus_published_duration_uses_destination_label() -> None:
+    reg, rec = _make_recorder()
+    rec(
+        "published",
+        {"queue": "orders", "status": "success", "count": 1, "size_bytes": 8, "duration_seconds": 0.001},
+    )
+    assert (
+        _sample(
+            reg,
+            "faststream_published_messages_duration_seconds_count",
+            {"app_name": "", "broker": "outbox", "destination": "orders"},
+        )
+        == 1.0
+    )
+
+
+def test_prometheus_published_exception_uses_destination_label() -> None:
+    reg, rec = _make_recorder()
+    rec(
+        "published",
+        {
+            "queue": "orders",
+            "status": "error",
+            "count": 0,
+            "size_bytes": 0,
+            "duration_seconds": 0.001,
+            "exception_type": "IntegrityError",
+        },
+    )
+    assert (
+        _sample(
+            reg,
+            "faststream_published_messages_exceptions_total",
+            {"app_name": "", "broker": "outbox", "destination": "orders", "exception_type": "IntegrityError"},
+        )
+        == 1.0
+    )
+
+
+def test_prometheus_unknown_event_is_silently_ignored() -> None:
+    _, rec = _make_recorder()
+    rec("dlq_written", {"queue": "q", "subscriber": "h"})  # forward-compat
+
+
+def test_prometheus_app_name_label_is_applied() -> None:
+    reg, rec = _make_recorder(app_name="checkout")
+    rec("fetched", {"queue": "q", "subscriber": "h", "count": 1})
+    assert (
+        _sample(
+            reg,
+            "faststream_outbox_fetch_batches_total",
+            {"app_name": "checkout", "broker": "outbox", "handler": "h", "non_empty": "true"},
+        )
+        == 1.0
+    )
+
+
+def test_prometheus_custom_label_value_resolved_per_event() -> None:
+    reg, rec = _make_recorder(custom_labels={"env": "prod", "tenant": lambda tags: str(tags.get("queue", "x"))})
+    rec("fetched", {"queue": "ordersA", "subscriber": "h", "count": 2})
+    assert (
+        _sample(
+            reg,
+            "faststream_outbox_fetch_batches_total",
+            {
+                "app_name": "",
+                "broker": "outbox",
+                "handler": "h",
+                "env": "prod",
+                "tenant": "ordersA",
+                "non_empty": "true",
+            },
+        )
+        == 1.0
+    )
+
+
+def test_prometheus_custom_metrics_prefix_renames_series() -> None:
+    reg, rec = _make_recorder(metrics_prefix="my_app")
+    rec("fetched", {"queue": "q", "subscriber": "h", "count": 1})
+    # The default prefix metric must NOT exist.
+    assert _sample(reg, "faststream_outbox_fetch_batches_total", {**_base_labels(), "non_empty": "true"}) is None
+    assert _sample(reg, "my_app_outbox_fetch_batches_total", {**_base_labels(), "non_empty": "true"}) == 1.0
