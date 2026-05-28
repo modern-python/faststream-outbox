@@ -33,6 +33,7 @@ from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.message import OutboxInnerMessage, OutboxMessage
 from faststream_outbox.parser.parser import OutboxParser
 from faststream_outbox.publisher.config import OutboxPublisherSpecificationConfig
+from faststream_outbox.publisher.fake import OutboxFakePublisher
 from faststream_outbox.publisher.producer import OutboxProducer
 from faststream_outbox.publisher.specification import OutboxPublisherSpecification
 from faststream_outbox.response import OutboxPublishCommand
@@ -1271,8 +1272,11 @@ async def test_subscriber_get_one_raises() -> None:
     sub = next(iter(broker._subscribers))  # noqa: SLF001
     with pytest.raises(NotImplementedError, match="get_one"):
         await sub.get_one()
-    # _make_response_publisher returns ()
-    assert sub._make_response_publisher(MagicMock()) == ()  # noqa: SLF001
+    # _make_response_publisher returns an OutboxFakePublisher wired to the producer
+    # so handlers can ``return OutboxResponse(...)``.
+    publishers = sub._make_response_publisher(MagicMock())  # noqa: SLF001
+    assert len(publishers) == 1
+    assert isinstance(publishers[0], OutboxFakePublisher)
 
 
 async def test_subscriber_client_property_raises_when_broker_has_no_engine() -> None:
