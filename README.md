@@ -32,6 +32,12 @@ async with session_factory() as session, session.begin():
     await broker.publish(1, queue="orders", session=session)
 ```
 
+**Optional extras:**
+
+- `faststream-outbox[asyncpg]` — asyncpg driver (enables `LISTEN/NOTIFY` for sub-100ms idle dispatch).
+- `faststream-outbox[fastapi]` — FastAPI integration via `OutboxRouter` (see [FastAPI integration](#fastapi-integration)).
+- `faststream-outbox[validate]` — Alembic for `broker.validate_schema()` (see [Schema validation](#schema-validation)).
+
 ## How it works
 
 `make_outbox_table(metadata, table_name="outbox")` returns a `sqlalchemy.Table` that you attach to your own `MetaData` and migrate via Alembic. The package does **not** own your schema; it only describes the columns it needs.
@@ -42,7 +48,7 @@ async with session_factory() as session, session.begin():
 
 ### Publisher decorator
 
-`broker.publisher(queue, *, headers=None, title=None, description=None, schema=None, include_in_schema=True)` returns an `OutboxPublisher` — a typed, queue-scoped wrapper around `broker.publish` with the same transactional contract:
+`broker.publisher(queue, *, headers=None, middlewares=(), title=None, description=None, schema=None, include_in_schema=True)` returns an `OutboxPublisher` — a typed, queue-scoped wrapper around `broker.publish` with the same transactional contract:
 
 ```python
 orders_pub = broker.publisher("orders", headers={"source": "checkout"})
@@ -53,7 +59,44 @@ async def checkout(order: Order, session: AsyncSession) -> None:
     await session.commit()                              # row + domain commit together
 ```
 
-The publisher exists primarily for AsyncAPI spec coverage and to encapsulate per-queue config (static headers, etc.). It is **standalone-only**: stacking it as a relay decorator on a subscriber (`@orders_pub @broker.subscriber("inbox", ...)`) raises `NotImplementedError` at decoration time, because the dispatch loop has no reachable `AsyncSession` without breaking the outbox transactional contract. For "consume from queue A → enqueue to queue B" relays, call `broker.publish(value, queue="B", session=session)` directly inside your handler — on the same session that owns the inbound row's terminal write.
+The publisher exists primarily for AsyncAPI spec coverage and to encapsulate per-queue config (static headers, etc.). It is **standalone-only**: stacking it as a relay decorator on a subscriber (`@orders_pub @broker.subscriber("inbox", ...)`) raises `NotImplementedError` at decoration time, because the dispatch loop has no reachable `AsyncSession` without breaking the outbox transactional contract. For "consume from queue A → enqueue to queue B" relays, either call `broker.publish(value, queue="B", session=session)` directly inside your handler — on the same session that owns the inbound row's terminal write — or `return OutboxResponse(...)` (see [Handler return type](#handler-return-type--chained-publishing)).
+
+Per-publisher `middlewares=` wrap every `publisher.publish(...)` call — useful for tracing spans, metrics counters, or audit-log writes scoped to a single queue without affecting other publishers.
+
+### Handler return type — chained publishing
+
+For "consume from queue A → enqueue to queue B" flows, a handler can `return OutboxResponse(body=..., queue="B", session=session)` instead of calling `broker.publish(...)` manually. FastStream's response-publisher flow routes the returned value through the producer; the same transactional contract applies (you provide the session, the row commits with your domain writes):
+
+```python
+from faststream_outbox import OutboxMessage, OutboxResponse
+
+@broker.subscriber("orders")
+async def handle(
+    msg: OutboxMessage,
+    session: AsyncSession = Depends(get_session),
+) -> OutboxResponse:
+    ...  # process inbound
+    return OutboxResponse(
+        body={"chained": True},
+        queue="downstream",
+        session=session,
+    )
+```
+
+`correlation_id` propagates from the inbound message if you don't set one explicitly — useful for trace stitching. Plain returns (`None`, `dict`, etc.) are silently skipped, so handlers that don't want to chain just return normally.
+
+### Annotated handler params
+
+`faststream_outbox.annotations` exports `Annotated[..., Context(...)]` shortcuts so handler signatures stay concise:
+
+```python
+from faststream_outbox.annotations import OutboxBroker, OutboxMessage
+
+@broker.subscriber("orders")
+async def handle(msg: OutboxMessage, broker: OutboxBroker) -> None: ...
+```
+
+The same names live in `faststream_outbox.fastapi` for FastAPI handlers — they resolve via the same `Context()` paths but go through FastAPI's dependency resolver so `Depends(...)` and these shortcuts can be mixed freely.
 
 A subscriber owns two async loops:
 
@@ -79,6 +122,53 @@ async def quick_job(msg): ...
 ```
 
 Pick `lease_ttl_seconds` strictly greater than that subscriber's P99 handler duration, with margin for clock skew. The tight TTL on the fast queue keeps stuck-row reclaim fast; the tall TTL on the slow queue tolerates outliers without slowing reclaim of genuinely stuck rows elsewhere. Producers route to the appropriate queue at `publish` time.
+
+## FastAPI integration
+
+The outbox + FastAPI is the canonical use case: handlers receive an `AsyncSession` via FastAPI dependency injection, and the outbox row commits with the caller's domain writes — same transaction.
+
+```bash
+pip install faststream-outbox[fastapi]
+```
+
+```python
+from collections.abc import AsyncIterator
+
+from fastapi import Depends, FastAPI
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from faststream_outbox.fastapi import OutboxBroker, OutboxRouter
+
+engine = create_async_engine("postgresql+asyncpg://localhost/app")
+session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+async def get_session() -> AsyncIterator[AsyncSession]:
+    async with session_factory() as s, s.begin():
+        yield s
+
+router = OutboxRouter(engine, outbox_table=outbox_table)
+
+@router.subscriber("orders")
+async def handle(
+    body: dict,
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    ...  # domain writes on `session` commit with any chained outbox publishes
+
+@router.post("/orders")
+async def create_order(
+    order: OrderIn,
+    broker: OutboxBroker,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    session.add(Order(...))
+    await broker.publish({"order_id": ...}, queue="orders", session=session)
+    return {"ok": True}
+
+app = FastAPI()
+app.include_router(router)
+```
+
+Mounting the router auto-starts the inner broker via FastAPI lifespan; you do not call `broker.start()`. HTTP routes (`@router.get`, `@router.post`, …) and outbox subscribers coexist on one router. `faststream_outbox.fastapi` re-exports the same Annotated context shortcuts as `faststream_outbox.annotations` (FastAPI-aware, so they cooperate with `Depends(...)`).
 
 ## Timers (delayed delivery)
 
@@ -217,6 +307,8 @@ Per-subscriber knobs (passed to `@broker.subscriber("…", …)`):
 **Engine pool sizing.** Each subscriber holds `max_workers + 1` long-lived SQLAlchemy connections (one writer per worker + one fetch), plus one raw asyncpg connection for `LISTEN` when available. Size your engine for `Σ subscribers × (max_workers + 1)` or `broker.start()` will block on pool checkout. SQLAlchemy's default `pool_size=5, max_overflow=10` covers a handful of single-worker subscribers; raise it for larger fleets.
 
 That formula is **per process**. Each replica opens its own pool, so your Postgres `max_connections` needs to cover `replicas × Σ subscribers × (max_workers + 1)` — otherwise additional replicas (or rolling deployments) will be refused at startup with `FATAL: too many connections`.
+
+**Read-only inspection.** `subscriber.get_one()` and `async for msg in subscriber:` are not supported on `OutboxSubscriber` — they would acquire a lease and bump `deliveries_count`, surprising semantics for a peek API. Use `broker.fetch_unprocessed(session=..., queue=...)` for lease-free reads of the current table state.
 
 ## Acknowledgements
 
