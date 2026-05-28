@@ -7,7 +7,7 @@ client and to subscribers.
 """
 
 import typing
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from faststream._internal.configs import BrokerConfig
 
@@ -24,7 +24,7 @@ if typing.TYPE_CHECKING:
 class OutboxBrokerConfig(BrokerConfig):
     engine: "AsyncEngine | None" = None
     client: "AbstractOutboxClient | None" = None
-    metrics_recorder: MetricsRecorder = field(default=_noop_recorder)
+    metrics_recorder: MetricsRecorder = _noop_recorder
 
     async def connect(self) -> None:
         # Engine and client are wired up by the broker's constructor; nothing to do here.

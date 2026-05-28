@@ -2238,10 +2238,10 @@ async def test_metrics_published_batch_emits_count_equal_to_batch_size() -> None
         await broker.publish_batch({"x": 1}, {"y": 2}, {"z": 3}, queue="orders", session=session)
 
     pub = [t for e, t in events if e == "published"]
-    # In sync test mode, publish_batch routes each body through fake publish individually,
-    # so we see 3 published events (one per body) rather than 1 batch event with count=3.
-    # Either contract is acceptable — assert the cumulative count totals to the batch size.
-    assert sum(t["count"] for t in pub) == 3
+    # ``_build_fake_publish_batch`` aggregates: one event per ``publish_batch`` call
+    # with ``count == landed`` (mirrors the real producer's batch contract).
+    assert len(pub) == 1
+    assert pub[0]["count"] == 3
 
 
 # --- OutboxProducer error-path coverage --------------------------------------------------

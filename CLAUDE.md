@@ -14,7 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `just install` — `uv lock --upgrade && uv sync --all-extras --all-groups --frozen`.
 - `just build` / `just down` / `just sh` — image build, teardown, shell into the app container.
 
-`tests/test_unit.py` and `tests/test_fake.py` need no Postgres — runnable with `uv run pytest tests/test_unit.py` directly. `tests/test_integration.py` requires Postgres at `POSTGRES_DSN` (default `postgresql+asyncpg://outbox:outbox@localhost:5432/outbox`); the `pg_engine` fixture skips if unreachable. Coverage is on by default (`pyproject.toml` `addopts`).
+`tests/test_unit.py` and `tests/test_fake.py` need no Postgres — runnable with `uv run pytest tests/test_unit.py` directly. `tests/test_integration.py` requires Postgres at `POSTGRES_DSN` (default `postgresql+asyncpg://outbox:outbox@localhost:5432/outbox`); the `pg_engine` fixture skips if unreachable. Coverage is on by default (`pyproject.toml` `addopts`) with a strict `--cov-fail-under=100` ratchet — partial runs (`pytest -k name`, a single test file, etc.) will fail that gate. Pass `--no-cov` or `--cov-fail-under=0` when iterating locally on a subset; the full `just test` run satisfies the gate.
 
 ## Architecture
 

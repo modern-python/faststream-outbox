@@ -434,6 +434,10 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             finally:
                 await row.assert_state_set(logger)
         except Exception as e:  # noqa: BLE001
+            # No metric emitted here intentionally: the row was never marked
+            # terminal/retry, so its state is undefined — flushing or emitting an
+            # ack/nack would lie. The lease will expire and the row will be
+            # reclaimed; the ERROR log is the operator signal.
             self._log(log_level=logging.ERROR, message=f"Outbox worker error: {e!r}", exc_info=e)
             return
         duration_seconds = time.perf_counter() - start_perf
