@@ -16,7 +16,7 @@ import datetime as _dt
 import typing
 
 from faststream.response.publish_type import PublishType
-from faststream.response.response import BatchPublishCommand, PublishCommand
+from faststream.response.response import BatchPublishCommand, PublishCommand, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -81,3 +81,50 @@ class OutboxPublishCommand(BatchPublishCommand):
             "decoration time. Construct OutboxPublishCommand directly with an AsyncSession."
         )
         raise NotImplementedError(msg)
+
+
+class OutboxResponse(Response):
+    """
+    Handler return type — auto-published as a follow-on outbox row.
+
+    Idiomatic FastStream shape: ``async def h(...) -> OutboxResponse``. Requires
+    ``session=...`` for the same reason ``broker.publish`` does — the new row must
+    commit with the caller's domain writes. Validation (session type, activate
+    args mutex, tz-aware datetime) is deferred to ``OutboxPublishCommand.__init__``
+    on ``as_publish_command()`` so there's a single source of truth.
+
+    ``correlation_id`` defaults to the inbound message's correlation_id when not set
+    — FastStream's ``SubscriberUsecase.process_message`` does the inheritance before
+    publishing the response.
+    """
+
+    def __init__(  # noqa: PLR0913
+        self,
+        body: typing.Any,
+        *,
+        queue: str,
+        session: AsyncSession,
+        headers: dict[str, str] | None = None,
+        correlation_id: str | None = None,
+        activate_in: _dt.timedelta | None = None,
+        activate_at: _dt.datetime | None = None,
+        timer_id: str | None = None,
+    ) -> None:
+        super().__init__(body=body, headers=headers, correlation_id=correlation_id)
+        self.queue = queue
+        self.session = session
+        self.activate_in = activate_in
+        self.activate_at = activate_at
+        self.timer_id = timer_id
+
+    def as_publish_command(self) -> OutboxPublishCommand:
+        return OutboxPublishCommand(
+            self.body,
+            queue=self.queue,
+            session=self.session,
+            headers=self.headers,
+            correlation_id=self.correlation_id,
+            activate_in=self.activate_in,
+            activate_at=self.activate_at,
+            timer_id=self.timer_id,
+        )

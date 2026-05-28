@@ -37,6 +37,7 @@ from faststream.specification.schema import Message, Operation, SubscriberSpec
 
 from faststream_outbox.message import OutboxInnerMessage
 from faststream_outbox.parser.parser import OutboxParser
+from faststream_outbox.publisher.fake import OutboxFakePublisher
 from faststream_outbox.subscriber.config import OutboxSubscriberConfig, OutboxSubscriberSpecificationConfig
 
 
@@ -484,7 +485,14 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         self,
         message: "StreamMessage[OutboxInnerMessage]",  # noqa: ARG002
     ) -> Sequence["PublisherProto"]:
-        return ()
+        # OutboxFakePublisher gates internally on ``isinstance(cmd, OutboxPublishCommand)``,
+        # so plain handler returns (None, dict, etc.) become no-ops here. Only handlers
+        # that explicitly ``return OutboxResponse(...)`` produce a published row.
+        # ty diagnostic: OutboxFakePublisher implements ``_publish`` (the only method
+        # SubscriberUsecase.process_message calls on a response publisher) but skips
+        # the ``publish``/``request`` boilerplate from the native FakePublisher base.
+        # Safe to ignore — those methods are unreachable for response publishers.
+        return (OutboxFakePublisher(producer=self._outer_config.producer),)  # ty: ignore[invalid-return-type]
 
     def get_log_context(
         self,

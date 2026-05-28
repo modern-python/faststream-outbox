@@ -6,6 +6,7 @@ from collections.abc import Callable
 from unittest.mock import AsyncMock
 
 import pytest
+from faststream import Context as _Context
 from faststream.middlewares import AckPolicy
 from sqlalchemy import MetaData
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,15 +15,30 @@ from faststream_outbox import (
     ConstantRetry,
     NoRetry,
     OutboxBroker,
+    OutboxMessage,
+    OutboxResponse,
     OutboxRouter,
     RetryStrategyProto,
     TestOutboxBroker,
     make_outbox_table,
 )
+from faststream_outbox.annotations import (
+    OutboxBroker as AnnotatedOutboxBroker,
+)
+from faststream_outbox.annotations import (
+    OutboxClient as AnnotatedOutboxClient,
+)
+from faststream_outbox.annotations import (
+    OutboxMessage as AnnotatedOutboxMessage,
+)
+from faststream_outbox.annotations import (
+    OutboxProducer as AnnotatedOutboxProducer,
+)
+from faststream_outbox.client import AbstractOutboxClient
 from faststream_outbox.configs import OutboxBrokerConfig
 from faststream_outbox.envelope import _encode_payload as encode_payload
 from faststream_outbox.subscriber.config import OutboxSubscriberConfig
-from faststream_outbox.testing import FakeOutboxClient, _FakeRow
+from faststream_outbox.testing import FakeOutboxClient, FakeOutboxProducer, _FakeRow
 
 
 def _fake_session() -> AsyncMock:
@@ -1043,3 +1059,173 @@ async def test_subscriber_config_ack_policy_returns_explicit_value() -> None:
         max_deliveries=None,
     )
     assert cfg.ack_policy is AckPolicy.REJECT_ON_ERROR
+
+
+# --- OutboxResponse + annotations tests ---------------------------------------------
+
+
+async def test_handler_returning_outbox_response_publishes_followup_row() -> None:
+    """Handler returns OutboxResponse → row lands on target queue, both rows deleted."""
+    broker = _make_broker()
+    next_received: list[dict] = []
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> OutboxResponse:
+        return OutboxResponse(
+            body={"echoed": body["x"]},
+            queue="downstream",
+            session=_fake_session(),
+        )
+
+    @broker.subscriber("downstream")
+    async def handle_next(body: dict) -> None:
+        next_received.append(body)
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish({"x": "hi"}, queue="orders")  # ty: ignore[missing-argument]
+
+    assert next_received == [{"echoed": "hi"}]
+    assert test_broker.fake_client.rows == []
+
+
+async def test_handler_returning_outbox_response_inherits_correlation_id() -> None:
+    """When OutboxResponse.correlation_id is None, FastStream inherits from inbound."""
+    broker = _make_broker()
+    downstream_cors: list[str] = []
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> OutboxResponse:
+        del body
+        return OutboxResponse(body={"v": 1}, queue="downstream", session=_fake_session())
+
+    @broker.subscriber("downstream")
+    async def handle_next(
+        body: dict,
+        correlation_id: str = _Context("message.correlation_id"),
+    ) -> None:
+        del body
+        downstream_cors.append(correlation_id)
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish({"x": 1}, queue="orders", correlation_id="trace-xyz")  # ty: ignore[missing-argument]
+
+    assert downstream_cors == ["trace-xyz"]
+
+
+async def test_handler_returning_outbox_response_with_activate_in_records_future_next_attempt_at() -> None:
+    """OutboxResponse(activate_in=...) records a future next_attempt_at on the new row."""
+    broker = _make_broker()
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> OutboxResponse:
+        del body
+        return OutboxResponse(
+            body="delayed",
+            queue="downstream",  # no subscriber — row persists for inspection
+            session=_fake_session(),
+            activate_in=_dt.timedelta(seconds=60),
+        )
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish({"x": 1}, queue="orders")  # ty: ignore[missing-argument]
+
+    downstream = [r for r in test_broker.fake_client.rows if r.queue == "downstream"]
+    assert len(downstream) == 1
+    assert downstream[0].next_attempt_at > _dt.datetime.now(tz=_dt.UTC)
+
+
+async def test_handler_returning_outbox_response_with_timer_id_dedups() -> None:
+    """Returning the same timer_id twice produces only one row."""
+    broker = _make_broker()
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> OutboxResponse:
+        del body
+        return OutboxResponse(
+            body="once",
+            queue="downstream",
+            session=_fake_session(),
+            timer_id="dedupe-key",
+        )
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish({"x": 1}, queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish({"x": 2}, queue="orders")  # ty: ignore[missing-argument]
+
+    downstream = [r for r in test_broker.fake_client.rows if r.queue == "downstream"]
+    assert len(downstream) == 1
+    assert downstream[0].timer_id == "dedupe-key"
+
+
+async def test_handler_returning_plain_value_does_not_publish_followup_row() -> None:
+    """Plain handler returns are silently skipped — no spurious rows on isinstance gate."""
+    broker = _make_broker()
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> dict:
+        return {"unrelated": body["x"]}
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish({"x": 1}, queue="orders")  # ty: ignore[missing-argument]
+
+    # Inbound row deleted on ack; no extra rows from the dict return.
+    assert test_broker.fake_client.rows == []
+
+
+async def test_handler_raising_before_returning_outbox_response_does_not_publish() -> None:
+    """An exception inside the handler bypasses the response-publisher path entirely."""
+    broker = _make_broker()
+
+    @broker.subscriber("orders", retry_strategy=NoRetry())
+    async def handle(body: dict) -> OutboxResponse:
+        # Build the response then raise — process_message exits on exception
+        # before iterating the response publishers, so nothing lands downstream.
+        _unused = OutboxResponse(body="never", queue="downstream", session=_fake_session())
+        del _unused, body
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish({"x": 1}, queue="orders")  # ty: ignore[missing-argument]
+
+    # Inbound deleted by NoRetry; downstream untouched.
+    assert test_broker.fake_client.rows == []
+
+
+async def test_annotations_inject_message_broker_producer_client() -> None:
+    """Annotated context shortcuts resolve to the runtime objects FastStream registers."""
+    broker = _make_broker()
+    captured: dict[str, object] = {}
+
+    @broker.subscriber("orders")
+    async def handle(
+        body: dict,
+        msg: AnnotatedOutboxMessage,
+        ob_broker: AnnotatedOutboxBroker,
+        producer: AnnotatedOutboxProducer,
+        client: AnnotatedOutboxClient,
+    ) -> None:
+        del body
+        captured["msg"] = msg
+        captured["broker"] = ob_broker
+        captured["producer"] = producer
+        captured["client"] = client
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish({"x": 1}, queue="orders")  # ty: ignore[missing-argument]
+
+    assert isinstance(captured["msg"], OutboxMessage)
+    assert captured["broker"] is broker
+    # In test mode the producer slot is swapped to FakeOutboxProducer during the
+    # ``async with`` block; identity-check would compare against the restored
+    # post-exit value, so check by type instead.
+    assert isinstance(captured["producer"], FakeOutboxProducer)
+    assert isinstance(captured["client"], AbstractOutboxClient)
+    assert captured["client"] is test_broker.fake_client

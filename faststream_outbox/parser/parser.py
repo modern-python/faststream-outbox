@@ -15,6 +15,12 @@ class OutboxParser:
             content_type=headers.get("content-type"),
             message_id=str(msg.id),
             correlation_id=headers.get("correlation_id", str(msg.id)),
+            # Set so ``SubscriberUsecase.__get_response_publisher`` (gated on a
+            # truthy ``reply_to``) wires up the response publisher when a handler
+            # returns ``OutboxResponse``. The inbound queue is the semantically
+            # natural reply destination; the user's ``OutboxResponse.queue`` is
+            # the authoritative destination — this value is only the gate.
+            reply_to=msg.queue,
         )
 
     async def decode_message(self, msg: OutboxMessage) -> Any:
