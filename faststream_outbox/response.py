@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 class OutboxPublishCommand(BatchPublishCommand):
     """Outbox-specific publish command: carries session + scheduling fields end-to-end."""
 
-    def __init__(  # noqa: PLR0913
+    def __init__(
         self,
         body: typing.Any,
         /,
@@ -98,7 +98,7 @@ class OutboxResponse(Response):
     publishing the response.
     """
 
-    def __init__(  # noqa: PLR0913
+    def __init__(
         self,
         body: typing.Any,
         *,

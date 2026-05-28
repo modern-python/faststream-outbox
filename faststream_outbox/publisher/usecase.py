@@ -65,7 +65,7 @@ class OutboxPublisher(PublisherUsecase):
     ) -> "HandlerCallWrapper[P_HandlerParams, T_HandlerReturn]":
         raise NotImplementedError(_REJECT_RELAY_MSG)
 
-    async def publish(  # ty: ignore[invalid-method-override]  # noqa: PLR0913
+    async def publish(  # ty: ignore[invalid-method-override]
         self,
         body: "SendableMessage",
         *,

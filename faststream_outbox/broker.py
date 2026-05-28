@@ -117,7 +117,7 @@ class OutboxBroker(
 
     _subscribers: list["OutboxSubscriber"]
 
-    def __init__(  # noqa: PLR0913
+    def __init__(
         self,
         engine: "AsyncEngine | None" = None,
         *,
@@ -215,7 +215,7 @@ class OutboxBroker(
         """Validate the user's table matches what the package expects. Opt-in."""
         await self.client.validate_schema()
 
-    async def publish(  # ty: ignore[invalid-method-override]  # noqa: PLR0913
+    async def publish(  # ty: ignore[invalid-method-override]
         self,
         body: typing.Any,
         *,

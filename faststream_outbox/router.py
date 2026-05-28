@@ -3,9 +3,10 @@ from typing import TYPE_CHECKING
 
 from faststream._internal.basic_types import SendableMessage
 from faststream._internal.broker.router import BrokerRouter, SubscriberRoute
-from faststream._internal.configs import BrokerConfig
 from faststream._internal.types import BrokerMiddleware, CustomCallable, SubscriberMiddleware
+from faststream.middlewares import AckPolicy
 
+from faststream_outbox.configs import OutboxBrokerConfig
 from faststream_outbox.message import OutboxInnerMessage
 from faststream_outbox.registrator import OutboxRegistrator
 
@@ -31,6 +32,7 @@ class OutboxRoute(SubscriberRoute):
         max_fetch_interval: float = 10.0,
         lease_ttl_seconds: float = 60.0,
         max_deliveries: int | None = None,
+        ack_policy: AckPolicy | None = None,
         dependencies: Iterable["Dependant"] = (),
         parser: CustomCallable | None = None,
         decoder: CustomCallable | None = None,
@@ -49,6 +51,7 @@ class OutboxRoute(SubscriberRoute):
             max_fetch_interval=max_fetch_interval,
             lease_ttl_seconds=lease_ttl_seconds,
             max_deliveries=max_deliveries,
+            ack_policy=ack_policy,
             dependencies=dependencies,
             parser=parser,
             decoder=decoder,
@@ -59,7 +62,7 @@ class OutboxRoute(SubscriberRoute):
         )
 
 
-class OutboxRouter(OutboxRegistrator, BrokerRouter[OutboxInnerMessage, BrokerConfig]):
+class OutboxRouter(OutboxRegistrator, BrokerRouter[OutboxInnerMessage, OutboxBrokerConfig]):
     """
     Includable router for ``OutboxBroker``.
 
@@ -69,7 +72,7 @@ class OutboxRouter(OutboxRegistrator, BrokerRouter[OutboxInnerMessage, BrokerCon
     agree on the exact string. If you want namespacing, put it in the queue name.
     """
 
-    def __init__(  # noqa: PLR0913
+    def __init__(
         self,
         handlers: Iterable[OutboxRoute] = (),
         *,
@@ -80,8 +83,12 @@ class OutboxRouter(OutboxRegistrator, BrokerRouter[OutboxInnerMessage, BrokerCon
         include_in_schema: bool | None = None,
         routers: Sequence[OutboxRegistrator] = (),
     ) -> None:
+        # OutboxBrokerConfig (vs the parent BrokerConfig) keeps the typed-config
+        # contract of OutboxRegistrator. The outbox-specific fields (engine, client)
+        # stay None on the router; broker.include_router merges the broker's
+        # populated config in, so the router never needs them itself.
         super().__init__(
-            config=BrokerConfig(
+            config=OutboxBrokerConfig(
                 broker_middlewares=middlewares,
                 broker_dependencies=dependencies,
                 broker_parser=parser,

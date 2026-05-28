@@ -147,7 +147,7 @@ class FakeOutboxClient(AbstractOutboxClient):
                 return True
         return False
 
-    async def mark_pending_with_lease(  # noqa: PLR0913
+    async def mark_pending_with_lease(
         self,
         conn: typing.Any,  # noqa: ARG002
         message_id: int,
@@ -322,7 +322,7 @@ def _build_fake_publish(
     *,
     run_loops: bool,
 ) -> typing.Callable[..., typing.Awaitable[int | None]]:
-    async def fake_publish(  # noqa: PLR0913
+    async def fake_publish(
         body: typing.Any,
         *,
         queue: str,

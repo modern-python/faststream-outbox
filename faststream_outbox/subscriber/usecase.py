@@ -49,6 +49,11 @@ except ImportError:  # pragma: no cover
 
 _BACKOFF_EXP_CAP = 30
 _BACKOFF_MAX_SECONDS = 30.0
+
+_UNSUPPORTED_PEEK_MSG = (
+    "OutboxBroker does not support get_one() / async iteration. "
+    "Use `broker.fetch_unprocessed(session=..., queue=...)` for lease-free read access."
+)
 # Periodic probe of the LISTEN connection so silent drops (firewall RST, NAT idle timeout,
 # asyncpg reader-task death) surface as exceptions and the outer loop reconnects. The
 # bounded `wait_for` timeout is load-bearing: an unwrapped SELECT 1 against a half-dead
@@ -478,8 +483,17 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
 
     @typing.override
     async def get_one(self, *, timeout: float = 5.0) -> typing.NoReturn:
-        msg = "OutboxBroker does not support get_one()"
-        raise NotImplementedError(msg)
+        raise NotImplementedError(_UNSUPPORTED_PEEK_MSG)
+
+    @typing.override
+    async def __aiter__(self) -> AsyncIterator["StreamMessage[OutboxInnerMessage]"]:
+        # Native FakeStream subscribers (e.g. redis ListSubscriber.__aiter__) implement
+        # this against a blocking pop; for the outbox, a true peek would acquire a lease
+        # and bump deliveries_count — surprising semantics for a "look but don't touch"
+        # API. Route operators at ``broker.fetch_unprocessed`` instead, which is
+        # lease-free and doesn't mutate row state. Matches the base's no-yield shape so
+        # the override stays a coroutine returning AsyncIterator (not an async generator).
+        raise NotImplementedError(_UNSUPPORTED_PEEK_MSG)
 
     def _make_response_publisher(
         self,
