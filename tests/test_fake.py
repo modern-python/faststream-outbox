@@ -3,10 +3,12 @@ import datetime as _dt
 import uuid
 import warnings as _warnings
 from collections.abc import Callable
+from unittest.mock import AsyncMock
 
 import pytest
 from faststream.middlewares import AckPolicy
 from sqlalchemy import MetaData
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from faststream_outbox import (
     ConstantRetry,
@@ -21,6 +23,17 @@ from faststream_outbox.configs import OutboxBrokerConfig
 from faststream_outbox.envelope import _encode_payload as encode_payload
 from faststream_outbox.subscriber.config import OutboxSubscriberConfig
 from faststream_outbox.testing import FakeOutboxClient, _FakeRow
+
+
+def _fake_session() -> AsyncMock:
+    """
+    Build an ``AsyncMock(spec=AsyncSession)`` for tests where the session is ignored.
+
+    ``OutboxPublishCommand`` requires an ``AsyncSession``; the fake producer doesn't
+    touch it. The mock passes ``isinstance`` and lets publisher tests focus on the
+    fake-store side effects.
+    """
+    return AsyncMock(spec=AsyncSession)
 
 
 def _make_broker() -> OutboxBroker:
@@ -915,6 +928,104 @@ async def test_fake_broker_nack_on_error_default_keeps_row_for_retry() -> None:
     row = test_broker.fake_client.rows[0]
     assert row.attempts_count == 1
     assert row.next_attempt_at > _dt.datetime.now(tz=_dt.UTC)
+
+
+# --- Publisher tests --------------------------------------------------------------------
+
+
+async def test_publisher_publish_inserts_row_via_fake_producer() -> None:
+    """``publisher.publish`` routes through the fake producer → fake client store."""
+    broker = _make_broker()
+    received: list[dict] = []
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> None:
+        received.append(body)
+
+    pub = broker.publisher("orders")
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        result = await pub.publish({"id": 1}, session=_fake_session())
+    assert isinstance(result, int)
+    assert received == [{"id": 1}]
+
+
+async def test_publisher_static_headers_merge_with_per_call() -> None:
+    """Per-call headers override the publisher's static headers (inspect fake row directly)."""
+    broker = _make_broker()
+    # No subscriber so the row stays in the fake store for inspection — sync
+    # dispatch on an ack'ed delivery would delete it before we can read headers.
+    pub = broker.publisher("orders", headers={"source": "default", "trace": "abc"})
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await pub.publish(b"x", session=_fake_session(), headers={"source": "override"})
+
+    assert len(test_broker.fake_client.rows) == 1
+    row_headers = test_broker.fake_client.rows[0].headers
+    assert row_headers is not None
+    assert row_headers["source"] == "override"  # per-call wins
+    assert row_headers["trace"] == "abc"  # static still present
+
+
+async def test_publisher_with_timer_id_dedups() -> None:
+    """Second publish with the same timer_id is a no-op (returns None)."""
+    broker = _make_broker()
+    # No subscriber — sync dispatch would delete the first row before the second
+    # publish runs, masking the dedup behavior. Without a handler the row stays
+    # in the fake store and the second publish's ``(queue, timer_id)`` check fires.
+    pub = broker.publisher("orders")
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        first = await pub.publish(b"hello", session=_fake_session(), timer_id="dedup-key")
+        second = await pub.publish(b"hello", session=_fake_session(), timer_id="dedup-key")
+
+    assert first is not None
+    assert second is None  # dedup'd
+    assert len(test_broker.fake_client.rows) == 1
+
+
+async def test_publisher_with_activate_in_records_next_attempt() -> None:
+    """Future-dated rows are stored with next_attempt_at; sync mode dispatches immediately."""
+    broker = _make_broker()
+
+    # No subscriber for "backlog" — the row stays in the fake store so we can
+    # inspect next_attempt_at without sync dispatch deleting it.
+    pub = broker.publisher("backlog")
+    test_broker = TestOutboxBroker(broker)
+    before = _dt.datetime.now(tz=_dt.UTC)
+    async with test_broker:
+        await pub.publish(b"x", session=_fake_session(), activate_in=_dt.timedelta(seconds=30))
+        assert len(test_broker.fake_client.rows) == 1
+        assert test_broker.fake_client.rows[0].next_attempt_at > before
+
+
+async def test_publisher_decorator_chain_rejected_at_setup() -> None:
+    """Stacking ``@publisher @broker.subscriber`` is rejected at decoration time."""
+    broker = _make_broker()
+    pub = broker.publisher("relay")
+
+    async def handler(body: dict) -> None: ...
+
+    with pytest.raises(NotImplementedError, match="cannot decorate"):
+        pub(handler)
+
+
+async def test_publisher_publish_batch_via_broker_still_works() -> None:
+    """Sanity: the publisher's existence doesn't break broker.publish_batch."""
+    broker = _make_broker()
+    received: list[str] = []
+
+    @broker.subscriber("orders")
+    async def handle(body: str) -> None:
+        received.append(body)
+
+    broker.publisher("orders")  # registers AsyncAPI spec but isn't called
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish_batch("a", "b", queue="orders")  # ty: ignore[missing-argument]
+
+    assert received == ["a", "b"]
 
 
 async def test_subscriber_config_ack_policy_returns_explicit_value() -> None:

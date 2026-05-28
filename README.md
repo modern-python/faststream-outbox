@@ -40,6 +40,21 @@ async with session_factory() as session, session.begin():
 
 `broker.publish_batch(*bodies, queue, session, headers=None, activate_in=None, activate_at=None)` inserts many rows in a single round-trip with the same transactional contract.
 
+### Publisher decorator
+
+`broker.publisher(queue, *, headers=None, title=None, description=None, schema=None, include_in_schema=True)` returns an `OutboxPublisher` — a typed, queue-scoped wrapper around `broker.publish` with the same transactional contract:
+
+```python
+orders_pub = broker.publisher("orders", headers={"source": "checkout"})
+
+async def checkout(order: Order, session: AsyncSession) -> None:
+    session.add(order)                                  # your domain write
+    await orders_pub.publish({"order_id": order.id}, session=session)
+    await session.commit()                              # row + domain commit together
+```
+
+The publisher exists primarily for AsyncAPI spec coverage and to encapsulate per-queue config (static headers, etc.). It is **standalone-only**: stacking it as a relay decorator on a subscriber (`@orders_pub @broker.subscriber("inbox", ...)`) raises `NotImplementedError` at decoration time, because the dispatch loop has no reachable `AsyncSession` without breaking the outbox transactional contract. For "consume from queue A → enqueue to queue B" relays, call `broker.publish(value, queue="B", session=session)` directly inside your handler — on the same session that owns the inbound row's terminal write.
+
 A subscriber owns two async loops:
 
 1. **fetch** — claims available rows via `SELECT … FOR UPDATE SKIP LOCKED → UPDATE acquired_token=:uuid, acquired_at=now() RETURNING *` in a single CTE. A row is "available" iff its lease is unset *or* expired (`acquired_at < now() - lease_ttl_seconds`), so the fetch query reclaims stuck rows inline — no separate reaper is needed. With the asyncpg driver, the loop also `LISTEN`s on `outbox_<table>` and `publish` emits `pg_notify(...)`, so idle dispatch latency is sub-100ms instead of up to `max_fetch_interval`. Polling stays as the fallback.

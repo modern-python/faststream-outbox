@@ -928,3 +928,71 @@ async def test_concurrent_drain_with_eight_workers_holds_pool_bounded(pg_engine,
         )
     finally:
         await local_engine.dispose()
+
+
+# --- Publisher tests --------------------------------------------------------------------
+
+
+async def test_publisher_publish_persists_row(pg_engine, outbox_table) -> None:
+    """``publisher.publish`` commits with the caller's transaction, just like ``broker.publish``."""
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    pub = broker.publisher("orders", headers={"source": "pub-test"})
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+
+    async with session_factory() as session:
+        async with session.begin():
+            row_id = await pub.publish({"order_id": 99}, session=session)
+            # Mid-transaction: separate connection must not see the row.
+            count_during = await _row_count(pg_engine, outbox_table)
+            assert count_during == 0
+        count_after = await _row_count(pg_engine, outbox_table)
+        assert count_after == 1
+        assert isinstance(row_id, int)
+
+    # Verify static headers + queue landed on the row.
+    async with pg_engine.connect() as conn:
+        result = await conn.execute(select(outbox_table))
+        rows = result.mappings().all()
+    assert rows[0]["queue"] == "orders"
+    assert rows[0]["headers"]["source"] == "pub-test"
+
+
+async def test_publisher_publish_with_subscriber_end_to_end(pg_engine, outbox_table) -> None:
+    received: list[dict] = []
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+
+    @broker.subscriber("orders", min_fetch_interval=0.05, max_fetch_interval=0.5)
+    async def handle(body: dict) -> None:
+        received.append(body)
+
+    pub = broker.publisher("orders")
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with broker:
+        async with session_factory() as session, session.begin():
+            await pub.publish({"order_id": 7}, session=session)
+        await _wait_until(lambda: received, timeout=5.0)
+
+    assert received == [{"order_id": 7}]
+
+
+async def test_publisher_with_activate_in_delays_delivery(pg_engine, outbox_table) -> None:
+    """``publisher.publish(activate_in=...)`` schedules the row for the future."""
+    received: list[dict] = []
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+
+    @broker.subscriber("orders", min_fetch_interval=0.05, max_fetch_interval=0.5)
+    async def handle(body: dict) -> None:
+        received.append(body)
+
+    pub = broker.publisher("orders")
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    delay_seconds = 0.7
+    start = asyncio.get_event_loop().time()
+    async with broker:
+        async with session_factory() as session, session.begin():
+            await pub.publish({"x": 1}, session=session, activate_in=_dt.timedelta(seconds=delay_seconds))
+        await _wait_until(lambda: received, timeout=5.0)
+
+    elapsed = asyncio.get_event_loop().time() - start
+    assert received == [{"x": 1}]
+    assert elapsed >= delay_seconds, f"delivery fired in {elapsed:.2f}s, expected >= {delay_seconds}s"
