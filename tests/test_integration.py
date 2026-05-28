@@ -429,20 +429,12 @@ async def test_fetch_uses_persistent_connection(pg_engine, outbox_table) -> None
     original_fetch = OutboxClient.fetch
 
     async def tracking_fetch(self, conn, queues, *, limit, lease_ttl_seconds):
-        # Probe the pid in its own transaction so SQLAlchemy's autobegun txn is
-        # closed before original_fetch opens its own ``async with conn.begin():``.
-        async with conn.begin():
-            result = await conn.execute(text("SELECT pg_backend_pid()"))
-            fetch_pids.append(result.scalar_one())
-        # pragma: teardown race — on slower runners the worker task can be
-        # cancelled by broker shutdown between the async-with exit above and
-        # this return-await, so the line never executes. The append above
-        # ran (asserted below via `len(fetch_pids) >= 3`), and the missing
-        # original_fetch call only matters if the broker was already shutting
-        # down, so dropping it is harmless to the test.
-        return await original_fetch(  # pragma: no cover
-            self, conn, queues, limit=limit, lease_ttl_seconds=lease_ttl_seconds
-        )
+        # Read the backend pid synchronously off the underlying asyncpg
+        # connection. No await before the append means broker-shutdown
+        # cancellation can't interrupt the probe mid-flight, so coverage
+        # on this wrapper is deterministic across runners.
+        fetch_pids.append(conn.sync_connection.connection.driver_connection.get_server_pid())
+        return await original_fetch(self, conn, queues, limit=limit, lease_ttl_seconds=lease_ttl_seconds)
 
     @broker.subscriber("orders", min_fetch_interval=0.01, max_fetch_interval=0.05)
     async def handle(body: dict) -> None:
