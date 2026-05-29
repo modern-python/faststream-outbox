@@ -215,18 +215,21 @@ class OutboxClient(AbstractOutboxClient):
         """
         Delete *message_id* iff it still holds *acquired_token*. Returns True if deleted.
 
-        Opens its own transaction on *conn* via ``async with conn.begin():``. The lease
-        guard means a slow handler whose lease was reclaimed by a newer fetch finds
-        ``rowcount == 0`` and is silently dropped. See :meth:`fetch` for why *conn* is
-        ``AsyncConnection | None`` instead of ``AsyncConnection``.
+        Issues a single ``DELETE`` on *conn* with no explicit transaction wrapper — the
+        production writer connection is configured ``isolation_level="AUTOCOMMIT"`` by
+        :meth:`OutboxSubscriber._open_worker_resources` so each call is one round-trip.
+        The lease guard rides on the ``WHERE acquired_token = …`` clause, not the
+        transaction: a slow handler whose lease was reclaimed by a newer fetch finds
+        ``rowcount == 0`` and is silently dropped, whether *conn* is in autocommit
+        (production path) or in an outer transaction (tests). See :meth:`fetch` for why
+        *conn* is ``AsyncConnection | None`` instead of ``AsyncConnection``.
         """
         if conn is None:
             msg = "OutboxClient.delete_with_lease requires a live AsyncConnection (got None)"
             raise TypeError(msg)
         t = self._table
         stmt = delete(t).where(t.c.id == message_id, t.c.acquired_token == acquired_token)
-        async with conn.begin():
-            result = await conn.execute(stmt)
+        result = await conn.execute(stmt)
         return (result.rowcount or 0) > 0
 
     async def mark_pending_with_lease(
@@ -243,10 +246,14 @@ class OutboxClient(AbstractOutboxClient):
         """
         Release the lease on *message_id* and reschedule it for retry, iff it still holds the lease.
 
-        Opens its own transaction on *conn* via ``async with conn.begin():``.
-        ``next_attempt_at`` is computed server-side as ``now() + delay_seconds`` so retry
-        timing uses the DB clock. See :meth:`fetch` for why *conn* is
-        ``AsyncConnection | None`` instead of ``AsyncConnection``.
+        Issues a single ``UPDATE`` on *conn* with no explicit transaction wrapper — the
+        production writer connection is configured ``isolation_level="AUTOCOMMIT"`` by
+        :meth:`OutboxSubscriber._open_worker_resources` so each call is one round-trip.
+        ``next_attempt_at`` is computed server-side as ``now() + delay_seconds`` (DB-clock
+        anchored) regardless of the transaction context. The lease guard rides on the
+        ``WHERE acquired_token = …`` clause, not the transaction wrapping it. See
+        :meth:`fetch` for why *conn* is ``AsyncConnection | None`` instead of
+        ``AsyncConnection``.
         """
         if conn is None:
             msg = "OutboxClient.mark_pending_with_lease requires a live AsyncConnection (got None)"
@@ -265,8 +272,7 @@ class OutboxClient(AbstractOutboxClient):
                 acquired_token=None,
             )
         )
-        async with conn.begin():
-            result = await conn.execute(stmt, {"delay": max(0.0, delay_seconds)})
+        result = await conn.execute(stmt, {"delay": max(0.0, delay_seconds)})
         return (result.rowcount or 0) > 0
 
     async def validate_schema(self) -> None:

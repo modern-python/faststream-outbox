@@ -1655,6 +1655,7 @@ async def test_worker_loop_opens_writer_conn_once_when_engine_available() -> Non
     broker, test_broker = _make_broker_for_dispatch(fake)
     fake_engine = MagicMock()
     fake_conn = MagicMock()
+    fake_conn.execution_options = AsyncMock(return_value=fake_conn)
     aenter = AsyncMock(return_value=fake_conn)
     aexit = AsyncMock(return_value=None)
     fake_engine.connect.return_value.__aenter__ = aenter
@@ -1678,6 +1679,38 @@ async def test_worker_loop_opens_writer_conn_once_when_engine_available() -> Non
 
     assert fake_engine.connect.call_count == 1
     assert seen_conns == [fake_conn]
+    fake_conn.execution_options.assert_awaited_once_with(isolation_level="AUTOCOMMIT")
+
+
+async def test_open_worker_resources_sets_autocommit() -> None:
+    """``_open_worker_resources`` configures the writer conn as AUTOCOMMIT before yielding."""
+    fake = FakeOutboxClient()
+    broker, test_broker = _make_broker_for_dispatch(fake)
+    fake_engine = MagicMock()
+    raw_conn = MagicMock()
+    autocommit_conn = MagicMock()
+    raw_conn.execution_options = AsyncMock(return_value=autocommit_conn)
+    fake_engine.connect.return_value.__aenter__ = AsyncMock(return_value=raw_conn)
+    fake_engine.connect.return_value.__aexit__ = AsyncMock(return_value=None)
+
+    async with test_broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        async with sub._open_worker_resources(fake_engine) as kwargs:  # noqa: SLF001
+            yielded = kwargs["writer_conn"]
+
+    raw_conn.execution_options.assert_awaited_once_with(isolation_level="AUTOCOMMIT")
+    assert yielded is autocommit_conn  # the configured conn, not the raw one
+
+
+async def test_open_worker_resources_yields_none_when_engine_is_none() -> None:
+    """``_open_worker_resources(None)`` yields ``writer_conn=None`` without touching execution_options."""
+    fake = FakeOutboxClient()
+    broker, test_broker = _make_broker_for_dispatch(fake)
+
+    async with test_broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        async with sub._open_worker_resources(None) as kwargs:  # noqa: SLF001
+            assert kwargs == {"writer_conn": None}
 
 
 async def test_worker_loop_takes_no_conn_path_when_engine_is_none() -> None:
@@ -1733,7 +1766,9 @@ async def test_worker_loop_reconnects_after_error(monkeypatch: pytest.MonkeyPatc
     broker, test_broker = _make_broker_for_dispatch(fake)
     fake_engine = MagicMock()
     conn_a = MagicMock()
+    conn_a.execution_options = AsyncMock(return_value=conn_a)
     conn_b = MagicMock()
+    conn_b.execution_options = AsyncMock(return_value=conn_b)
     cm_a = MagicMock()
     cm_a.__aenter__ = AsyncMock(return_value=conn_a)
     cm_a.__aexit__ = AsyncMock(return_value=None)
@@ -1766,40 +1801,34 @@ async def test_worker_loop_reconnects_after_error(monkeypatch: pytest.MonkeyPatc
 
 
 async def test_outbox_client_delete_with_lease_uses_caller_conn() -> None:
-    """``delete_with_lease`` runs its statement on the supplied conn, not via engine.begin()."""
+    """``delete_with_lease`` runs its statement on the supplied conn with no explicit transaction."""
     metadata = MetaData()
     t = make_outbox_table(metadata)
     engine = MagicMock()
     client = OutboxClient(engine, t)
 
     fake_conn = MagicMock()
-    begin_cm = MagicMock()
-    begin_cm.__aenter__ = AsyncMock(return_value=None)
-    begin_cm.__aexit__ = AsyncMock(return_value=None)
-    fake_conn.begin = MagicMock(return_value=begin_cm)
+    fake_conn.begin = MagicMock()
     fake_conn.execute = AsyncMock(return_value=MagicMock(rowcount=1))
 
     deleted = await client.delete_with_lease(fake_conn, 42, uuid.uuid4())
 
     assert deleted is True
-    fake_conn.begin.assert_called_once()
     fake_conn.execute.assert_awaited_once()
+    fake_conn.begin.assert_not_called()  # autocommit writer conn — no per-row BEGIN/COMMIT
     engine.connect.assert_not_called()  # caller conn, not pool checkout
     engine.begin.assert_not_called()
 
 
 async def test_outbox_client_mark_pending_with_lease_uses_caller_conn() -> None:
-    """``mark_pending_with_lease`` runs its statement on the supplied conn."""
+    """``mark_pending_with_lease`` runs its statement on the supplied conn with no explicit transaction."""
     metadata = MetaData()
     t = make_outbox_table(metadata)
     engine = MagicMock()
     client = OutboxClient(engine, t)
 
     fake_conn = MagicMock()
-    begin_cm = MagicMock()
-    begin_cm.__aenter__ = AsyncMock(return_value=None)
-    begin_cm.__aexit__ = AsyncMock(return_value=None)
-    fake_conn.begin = MagicMock(return_value=begin_cm)
+    fake_conn.begin = MagicMock()
     fake_conn.execute = AsyncMock(return_value=MagicMock(rowcount=1))
     now = _dt.datetime.now(tz=_dt.UTC)
 
@@ -1814,8 +1843,8 @@ async def test_outbox_client_mark_pending_with_lease_uses_caller_conn() -> None:
     )
 
     assert updated is True
-    fake_conn.begin.assert_called_once()
     fake_conn.execute.assert_awaited_once()
+    fake_conn.begin.assert_not_called()  # autocommit writer conn — no per-row BEGIN/COMMIT
     engine.connect.assert_not_called()
     engine.begin.assert_not_called()
 
