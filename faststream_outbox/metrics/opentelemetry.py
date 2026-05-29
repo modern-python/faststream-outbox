@@ -89,7 +89,7 @@ class OpenTelemetryRecorder:
         meter: "ot_metrics.Meter | None" = None,
         include_messages_counters: bool = False,
     ) -> None:
-        if not is_opentelemetry_installed:  # pragma: no cover  # opentelemetry is in the dev group
+        if not is_opentelemetry_installed:
             msg = (
                 "OpenTelemetryRecorder requires the 'opentelemetry' extra: "
                 "pip install 'faststream-outbox[opentelemetry]'"

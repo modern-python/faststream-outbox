@@ -1,7 +1,7 @@
 """Unit tests for ``PrometheusRecorder`` — drop-in adapter for the seam."""
 
 import typing
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -283,3 +283,12 @@ async def test_prometheus_e2e_handler_raises_with_noretry_emits_nacked_terminal_
         )
         == 1.0
     )
+
+
+def test_prometheus_recorder_raises_friendly_error_when_extra_missing() -> None:
+    """Emulating ``prometheus_client`` as not installed must surface the install-hint ImportError."""
+    with (
+        patch("faststream_outbox.metrics.prometheus.is_prometheus_client_installed", new=False),
+        pytest.raises(ImportError, match=r"pip install 'faststream-outbox\[prometheus\]'"),
+    ):
+        PrometheusRecorder(registry=CollectorRegistry())

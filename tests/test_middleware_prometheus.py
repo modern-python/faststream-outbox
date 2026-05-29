@@ -8,7 +8,7 @@ publish-scope middleware fires through ``_basic_publish``.
 
 import datetime as _dt
 import uuid
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -263,3 +263,12 @@ async def test_outbox_prometheus_middleware_publish_scope_does_not_fire_under_te
     assert non_zero_publish_samples == [], (
         f"publish_scope middleware fired under TestOutboxBroker: {non_zero_publish_samples}"
     )
+
+
+def test_outbox_prometheus_middleware_raises_friendly_error_when_extra_missing() -> None:
+    """Emulating ``prometheus_client`` as not installed must surface the install-hint ImportError."""
+    with (
+        patch("faststream_outbox.prometheus.middleware.is_prometheus_client_installed", new=False),
+        pytest.raises(ImportError, match=r"pip install 'faststream-outbox\[prometheus\]'"),
+    ):
+        OutboxPrometheusMiddleware(registry=CollectorRegistry())

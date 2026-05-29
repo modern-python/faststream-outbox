@@ -10,7 +10,7 @@ unit tests exercise attribute mapping directly. We use OTel SDK's
 import datetime as _dt
 import typing
 import uuid
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -230,3 +230,12 @@ async def test_outbox_telemetry_middleware_publish_scope_does_not_fire_under_tes
     # the test broker the publish path bypasses _basic_publish, so the instrument
     # must be absent.
     assert "messaging.publish.duration" not in instruments
+
+
+def test_outbox_telemetry_middleware_raises_friendly_error_when_extra_missing() -> None:
+    """Emulating ``opentelemetry`` as not installed must surface the install-hint ImportError."""
+    with (
+        patch("faststream_outbox.opentelemetry.middleware.is_opentelemetry_installed", new=False),
+        pytest.raises(ImportError, match=r"pip install 'faststream-outbox\[opentelemetry\]'"),
+    ):
+        OutboxTelemetryMiddleware()

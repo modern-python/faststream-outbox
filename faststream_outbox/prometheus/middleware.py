@@ -38,7 +38,7 @@ class OutboxPrometheusMiddleware(
         received_messages_size_buckets: Sequence[float] | None = None,
         custom_labels: dict[str, str | Callable[[typing.Any], str]] | None = None,
     ) -> None:
-        if not is_prometheus_client_installed:  # pragma: no cover  # prometheus_client is in the dev group
+        if not is_prometheus_client_installed:
             msg = (
                 "OutboxPrometheusMiddleware requires the 'prometheus' extra: "
                 "pip install 'faststream-outbox[prometheus]'"

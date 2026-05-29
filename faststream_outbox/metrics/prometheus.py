@@ -103,7 +103,7 @@ class PrometheusRecorder:
         received_messages_size_buckets: Sequence[float] | None = None,
         custom_labels: dict[str, str | Callable[[Mapping[str, typing.Any]], str]] | None = None,
     ) -> None:
-        if not is_prometheus_client_installed:  # pragma: no cover  # prometheus_client is in the dev group
+        if not is_prometheus_client_installed:
             msg = "PrometheusRecorder requires the 'prometheus' extra: pip install 'faststream-outbox[prometheus]'"
             raise ImportError(msg)
         self._app_name = "" if app_name is EMPTY else app_name
@@ -274,7 +274,7 @@ class PrometheusRecorder:
             # every attempt (with the status label) so failed-publish latency stays
             # observable.
             count = tags.get("count", 1)
-            if count:
+            if count > 0:
                 self._published_total.labels(*publish_base, status).inc(count)
             duration = tags.get("duration_seconds")
             if duration is not None:

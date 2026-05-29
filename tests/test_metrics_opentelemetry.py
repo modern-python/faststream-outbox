@@ -1,7 +1,7 @@
 """Unit tests for ``OpenTelemetryRecorder`` — drop-in adapter for the seam."""
 
 import typing
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -238,3 +238,12 @@ async def test_otel_e2e_handler_raises_with_noretry_stamps_terminal_reason_attr(
     assert attrs["messaging.outbox.terminal_reason"] == "retry_terminal"
     assert attrs["error.type"] == "RuntimeError"
     assert attrs["messaging.outbox.status"] == "nacked"
+
+
+def test_otel_recorder_raises_friendly_error_when_extra_missing() -> None:
+    """Emulating ``opentelemetry`` as not installed must surface the install-hint ImportError."""
+    with (
+        patch("faststream_outbox.metrics.opentelemetry.is_opentelemetry_installed", new=False),
+        pytest.raises(ImportError, match=r"pip install 'faststream-outbox\[opentelemetry\]'"),
+    ):
+        OpenTelemetryRecorder()

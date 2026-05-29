@@ -146,10 +146,14 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
     def _emit_metric(self, event: str, tags: Mapping[str, typing.Any]) -> None:
         try:
             self._outer_config.metrics_recorder(event, tags)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            # Match the producer's swallow-and-log shape (with ``exc_info``) so
+            # operators see the same traceback whether the recorder raised on a
+            # subscriber or publisher event.
             self._log(
                 log_level=logging.DEBUG,
                 message="metrics recorder raised",
+                exc_info=exc,
             )
 
     @typing.override
