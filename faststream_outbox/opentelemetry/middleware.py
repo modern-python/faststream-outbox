@@ -7,12 +7,18 @@ upstream Kafka / Rabbit / Redis middleware. For outbox-internal events
 (``fetched``, ``lease_lost``), use the ``MetricsRecorder`` seam alongside.
 """
 
-from faststream.opentelemetry.middleware import TelemetryMiddleware
-from opentelemetry.metrics import Meter, MeterProvider
-from opentelemetry.trace import TracerProvider
+import typing
 
+from faststream.opentelemetry.middleware import TelemetryMiddleware
+
+from faststream_outbox._import_checker import is_opentelemetry_installed
 from faststream_outbox.opentelemetry.provider import OutboxTelemetrySettingsProvider
 from faststream_outbox.response import OutboxPublishCommand
+
+
+if typing.TYPE_CHECKING:
+    from opentelemetry.metrics import Meter, MeterProvider
+    from opentelemetry.trace import TracerProvider
 
 
 class OutboxTelemetryMiddleware(TelemetryMiddleware[OutboxPublishCommand]):
@@ -21,11 +27,17 @@ class OutboxTelemetryMiddleware(TelemetryMiddleware[OutboxPublishCommand]):
     def __init__(
         self,
         *,
-        tracer_provider: TracerProvider | None = None,
-        meter_provider: MeterProvider | None = None,
-        meter: Meter | None = None,
-        include_messages_counters: bool = True,
+        tracer_provider: "TracerProvider | None" = None,
+        meter_provider: "MeterProvider | None" = None,
+        meter: "Meter | None" = None,
+        include_messages_counters: bool = False,
     ) -> None:
+        if not is_opentelemetry_installed:
+            msg = (
+                "OutboxTelemetryMiddleware requires the 'opentelemetry' extra: "
+                "pip install 'faststream-outbox[opentelemetry]'"
+            )
+            raise ImportError(msg)
         super().__init__(
             settings_provider_factory=lambda _: OutboxTelemetrySettingsProvider(),
             tracer_provider=tracer_provider,

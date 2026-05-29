@@ -1,14 +1,18 @@
 """Unit tests for ``PrometheusRecorder`` — drop-in adapter for the seam."""
 
 import typing
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 
-prometheus_client = pytest.importorskip("prometheus_client")
-from prometheus_client import CollectorRegistry  # noqa: E402
+pytest.importorskip("prometheus_client")
+from prometheus_client import CollectorRegistry
+from sqlalchemy import MetaData
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from faststream_outbox.metrics.prometheus import PrometheusRecorder  # noqa: E402
+from faststream_outbox import NoRetry, OutboxBroker, TestOutboxBroker, make_outbox_table
+from faststream_outbox.metrics.prometheus import PrometheusRecorder
 
 
 def _sample(reg: CollectorRegistry, name: str, labels: dict[str, str]) -> float | None:
@@ -199,3 +203,92 @@ def test_prometheus_custom_metrics_prefix_renames_series() -> None:
     # The default prefix metric must NOT exist.
     assert _sample(reg, "faststream_outbox_fetch_batches_total", {**_base_labels(), "non_empty": "true"}) is None
     assert _sample(reg, "my_app_outbox_fetch_batches_total", {**_base_labels(), "non_empty": "true"}) == 1.0
+
+
+# ----- end-to-end recorder coverage (handler raises → nacked events flow) -----
+# These tests prove the contract between subscriber emission sites and the
+# Prometheus adapter end-to-end. Unit tests above hand-craft tag dicts and would
+# not catch a rename like ``exception_type`` → ``exc_type`` in the emission code.
+
+
+def _e2e_session() -> AsyncMock:
+    return AsyncMock(spec=AsyncSession)
+
+
+async def test_prometheus_e2e_handler_raises_emits_nacked_retried_with_exception_type() -> None:
+    """Default retry strategy → handler raise schedules a retry → nacked_retried event."""
+    reg = CollectorRegistry()
+    metadata = MetaData()
+    table = make_outbox_table(metadata)
+    broker = OutboxBroker(outbox_table=table, metrics_recorder=PrometheusRecorder(registry=reg))
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> None:
+        del body
+        msg = "boom"
+        raise ValueError(msg)
+
+    async with TestOutboxBroker(broker):
+        await broker.publish({"x": 1}, queue="orders", session=_e2e_session())
+
+    # The subscriber's `call_name` is "handle". Status must be "nacked".
+    assert (
+        _sample(
+            reg,
+            "faststream_received_processed_messages_total",
+            {**_base_labels("Handle"), "status": "nacked"},
+        )
+        == 1.0
+    )
+    assert (
+        _sample(
+            reg,
+            "faststream_received_processed_messages_exceptions_total",
+            {**_base_labels("Handle"), "exception_type": "ValueError"},
+        )
+        == 1.0
+    )
+
+
+async def test_prometheus_e2e_handler_raises_with_noretry_emits_nacked_terminal_with_reason() -> None:
+    """NoRetry strategy → handler raise terminates → nacked_terminal(reason="retry_terminal")."""
+    reg = CollectorRegistry()
+    metadata = MetaData()
+    table = make_outbox_table(metadata)
+    broker = OutboxBroker(outbox_table=table, metrics_recorder=PrometheusRecorder(registry=reg))
+
+    @broker.subscriber("orders", retry_strategy=NoRetry())
+    async def handle(body: dict) -> None:
+        del body
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    async with TestOutboxBroker(broker):
+        await broker.publish({"x": 1}, queue="orders", session=_e2e_session())
+
+    assert (
+        _sample(
+            reg,
+            "faststream_outbox_terminal_total",
+            {**_base_labels("Handle"), "reason": "retry_terminal"},
+        )
+        == 1.0
+    )
+    # Terminal nacked path also bumps the upstream ``status="nacked"`` counter.
+    assert (
+        _sample(
+            reg,
+            "faststream_received_processed_messages_total",
+            {**_base_labels("Handle"), "status": "nacked"},
+        )
+        == 1.0
+    )
+
+
+def test_prometheus_recorder_raises_friendly_error_when_extra_missing() -> None:
+    """Emulating ``prometheus_client`` as not installed must surface the install-hint ImportError."""
+    with (
+        patch("faststream_outbox.metrics.prometheus.is_prometheus_client_installed", new=False),
+        pytest.raises(ImportError, match=r"pip install 'faststream-outbox\[prometheus\]'"),
+    ):
+        PrometheusRecorder(registry=CollectorRegistry())

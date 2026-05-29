@@ -39,12 +39,15 @@ Usage::
 import typing
 from collections.abc import Mapping
 
+from faststream_outbox._import_checker import is_opentelemetry_installed
+from faststream_outbox.metrics import BROKER_SYSTEM
 
-try:
+
+if typing.TYPE_CHECKING:
     from opentelemetry import metrics as ot_metrics
-except ImportError as e:  # pragma: no cover
-    msg = "OpenTelemetryRecorder requires the 'opentelemetry' extra: pip install 'faststream-outbox[opentelemetry]'"
-    raise ImportError(msg) from e
+
+if is_opentelemetry_installed:
+    from opentelemetry import metrics as ot_metrics
 
 
 # Mirror FastStream's opentelemetry/consts.py keys verbatim. We bake the keys as
@@ -55,7 +58,6 @@ _ATTR_SYSTEM = "messaging.system"
 _ATTR_DEST = "messaging.destination.name"
 _ATTR_OPERATION = "messaging.operation"
 _ATTR_ERROR_TYPE = "error.type"
-_MESSAGING_SYSTEM = "outbox"
 
 # Outbox-specific extension attributes — namespaced under ``messaging.outbox.*``
 # so they don't collide with stock messaging-semconv keys.
@@ -87,6 +89,12 @@ class OpenTelemetryRecorder:
         meter: "ot_metrics.Meter | None" = None,
         include_messages_counters: bool = False,
     ) -> None:
+        if not is_opentelemetry_installed:
+            msg = (
+                "OpenTelemetryRecorder requires the 'opentelemetry' extra: "
+                "pip install 'faststream-outbox[opentelemetry]'"
+            )
+            raise ImportError(msg)
         if meter is not None:
             chosen_meter = meter
         elif meter_provider is not None:
@@ -135,7 +143,7 @@ class OpenTelemetryRecorder:
 
     def _attrs(self, tags: Mapping[str, typing.Any], *, operation: str) -> dict[str, typing.Any]:
         attrs: dict[str, typing.Any] = {
-            _ATTR_SYSTEM: _MESSAGING_SYSTEM,
+            _ATTR_SYSTEM: BROKER_SYSTEM,
             _ATTR_DEST: tags["queue"],
             _ATTR_OPERATION: operation,
         }

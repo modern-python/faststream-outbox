@@ -33,28 +33,26 @@ from sqlalchemy import (
     update,
 )
 
+# Optional dependency: alembic backs validate_schema() only. The probe lives in
+# ``_import_checker`` so every optional-extra site uses the same shape. Users who
+# don't call validate_schema() never trigger the runtime import path.
+from faststream_outbox._import_checker import is_alembic_installed
 from faststream_outbox.message import OutboxInnerMessage
 from faststream_outbox.schema import make_outbox_table
-
-
-# Optional dependency: alembic backs validate_schema() only. Importing at module
-# level (per the project's "no inline imports" convention) means we resolve once
-# at import time; users who don't call validate_schema() never trigger the path
-# and never need the dependency installed.
-try:
-    from alembic.autogenerate import compare_metadata as _alembic_compare_metadata
-    from alembic.migration import MigrationContext as _AlembicMigrationContext
-except ImportError:  # pragma: no cover  # alembic is in the dev group so the except branch is unreachable in CI
-    _alembic_compare_metadata = None  # ty: ignore[invalid-assignment]
-    _AlembicMigrationContext = None  # ty: ignore[invalid-assignment]
 
 
 if TYPE_CHECKING:
     import typing
     from collections.abc import Mapping, Sequence
 
+    from alembic.autogenerate import compare_metadata as _alembic_compare_metadata
+    from alembic.migration import MigrationContext as _AlembicMigrationContext
     from sqlalchemy import Connection, Table
     from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+
+if is_alembic_installed:
+    from alembic.autogenerate import compare_metadata as _alembic_compare_metadata
+    from alembic.migration import MigrationContext as _AlembicMigrationContext
 
 
 class AbstractOutboxClient(abc.ABC):
@@ -333,7 +331,7 @@ def _validate_schema_sync(connection: "Connection", table: "Table") -> list[str]
     additional server defaults, add a targeted ``information_schema`` probe rather than flipping
     this flag.
     """
-    if _alembic_compare_metadata is None or _AlembicMigrationContext is None:
+    if not is_alembic_installed:
         msg = "validate_schema() requires alembic. Install with `pip install faststream-outbox[validate]`."
         raise ImportError(msg)
 

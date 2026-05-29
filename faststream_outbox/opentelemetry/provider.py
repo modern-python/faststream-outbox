@@ -6,6 +6,7 @@ from faststream.opentelemetry import TelemetrySettingsProvider
 from faststream.opentelemetry.consts import MESSAGING_DESTINATION_PUBLISH_NAME
 
 from faststream_outbox.message import OutboxInnerMessage
+from faststream_outbox.metrics import BROKER_SYSTEM
 from faststream_outbox.response import OutboxPublishCommand
 
 
@@ -32,10 +33,10 @@ class OutboxTelemetrySettingsProvider(
     __slots__ = ("messaging_system",)
 
     def __init__(self) -> None:
-        # Canonical value — must match ``messaging.metrics.opentelemetry._MESSAGING_SYSTEM``
-        # and ``messaging.metrics.prometheus._BROKER_LABEL`` so dashboards see one
-        # ``messaging.system`` / ``broker`` value across both seams.
-        self.messaging_system = "outbox"
+        # Canonical value — shared with the recorder-seam adapters via the
+        # ``BROKER_SYSTEM`` constant so dashboards see one ``messaging.system``
+        # / ``broker`` value across both seams.
+        self.messaging_system = BROKER_SYSTEM
 
     def get_consume_attrs_from_message(
         self,
