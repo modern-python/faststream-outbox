@@ -1578,6 +1578,42 @@ async def test_dispatch_one_outer_except_swallows_consume_failure() -> None:
             await sub.dispatch_one(msg, writer_conn=None)
 
 
+async def test_dispatch_one_preserves_row_when_consume_early_exits_on_shutdown() -> None:
+    """
+    Shutdown race in dispatch_one.
+
+    ``SubscriberUsecase.consume()`` returns ``None`` without invoking
+    ``process_message`` when ``running`` is False. Previously ``dispatch_one`` fell
+    into ``assert_state_set → reject() → _safe_flush`` and silently DELETEd the row.
+    The early-return guard preserves the row so its lease expires and another
+    replica reclaims it.
+    """
+    events, recorder = _events_recorder()
+    metadata = MetaData()
+    table = make_outbox_table(metadata)
+    broker = OutboxBroker(outbox_table=table, metrics_recorder=recorder)
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> None: ...
+
+    fake = FakeOutboxClient()
+    test_broker = TestOutboxBroker(broker)
+    test_broker.fake_client = fake
+    msg = _make_msg(queue="orders")
+
+    async with test_broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        # Simulate the race: a worker has pulled a row from _inflight, then stop()
+        # flipped running to False before dispatch_one's consume() call.
+        sub.running = False
+        with patch.object(fake, "delete_with_lease", new=AsyncMock(return_value=True)) as delete_spy:
+            await sub.dispatch_one(msg, writer_conn=None)
+
+    delete_spy.assert_not_awaited()
+    assert not any(e == "acked" for e, _ in events)
+    assert not any(e.startswith("nacked") for e, _ in events)
+
+
 async def test_flush_terminal_logs_lease_lost_at_warning_with_structured_fields() -> None:
     """M7: when delete returns rowcount=0 (lease reclaimed) the broker emits a WARNING with structured fields."""
 

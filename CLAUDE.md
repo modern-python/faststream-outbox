@@ -76,6 +76,8 @@ Lease-loss is logged at WARNING with `extra={"event": "lease_lost", "phase": "te
 
 **Writer-connection autocommit.** `_open_worker_resources` configures the per-worker writer connection with `isolation_level="AUTOCOMMIT"`. The two terminal-state writes (`delete_with_lease`, `mark_pending_with_lease`) are each a single statement, so an explicit BEGIN/COMMIT would just add two Postgres round-trips per row with no benefit. Autocommit collapses the per-row cost from three round-trips (BEGIN + DELETE/UPDATE + COMMIT) to one while preserving the lease-token guard — the `WHERE acquired_token = …` clause is what enforces the invariant, not the transaction wrapping the statement. The fetch connection is **not** autocommit-configured: it owns LISTEN/NOTIFY and the CTE-update flow is paid once per batch, where the BEGIN/COMMIT amortizes naturally.
 
+**Shutdown race in `dispatch_one`.** If `stop()` flips `running=False` between a worker pulling a row from `_inflight` and `consume()` being entered, FastStream's base `SubscriberUsecase.consume()` early-exits (`if not self.running: return None`) without running the handler. `dispatch_one` detects this state — `not row.state_set and not self.running` after `consume()` returns without raising — and returns before the `assert_state_set → reject() → _safe_flush` path that would otherwise silently DELETE the row. The lease lives until `lease_ttl_seconds` expires and another replica reclaims the row on next start. No metric fires at this site (the row is neither acked nor nacked). Without this guard, busy subscribers leak rows on every rolling deploy.
+
 ### Test broker
 
 `TestOutboxBroker` (in `testing.py`) swaps in a `FakeOutboxClient` (in-memory list of `_FakeRow` dicts). Two dispatch modes:
