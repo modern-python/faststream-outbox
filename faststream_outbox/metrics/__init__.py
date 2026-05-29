@@ -20,6 +20,10 @@ Event vocabulary (stable, additive):
 * ``lease_lost`` — terminal flush found a foreign lease. Tags include ``phase`` (``terminal`` | ``retry``).
 * ``published`` — producer-side insert. Tags include ``status`` (``success`` | ``error``),
   ``count, size_bytes, duration_seconds``. No ``subscriber`` tag.
+  ``count`` is **messages landed**, not publish attempts — errors and ``timer_id``
+  no-ops carry ``count=0``. Counter-style adapters should `inc(count)` so totals
+  reflect messages-on-the-wire; duration histograms record every attempt
+  (including failures) so failed-publish latency stays observable.
 
 Recorders run on the event loop and **must not block**. Synchronous
 ``prometheus_client.Counter.inc()`` is fine (microseconds); a blocking HTTP/StatsD
@@ -27,6 +31,7 @@ call is not. We do not wrap recorders in ``asyncio.to_thread`` — that would de
 ordering and explode the task graph.
 """
 
+import logging
 import typing
 from collections.abc import Callable, Mapping
 
@@ -34,8 +39,33 @@ from collections.abc import Callable, Mapping
 MetricsRecorder = Callable[[str, Mapping[str, typing.Any]], None]
 
 
+# Canonical broker-system identifier — stamped as ``messaging.system`` (OTel)
+# and ``broker`` (Prometheus) by both the recorder-seam adapters in this package
+# and the native middleware providers in ``faststream_outbox.{opentelemetry,
+# prometheus}.provider``. Centralized here so dashboards see a single value
+# across both seams and a rename is a one-line change.
+BROKER_SYSTEM = "outbox"
+
+
+_logger = logging.getLogger(__name__)
+
+
 def _noop_recorder(_event: str, _tags: Mapping[str, typing.Any]) -> None:
     """Default recorder — does nothing; lets instrumentation sites call unconditionally."""
 
 
-__all__ = ["MetricsRecorder", "_noop_recorder"]
+def _safe_emit(recorder: MetricsRecorder, event: str, tags: Mapping[str, typing.Any]) -> None:
+    """
+    Invoke ``recorder`` swallowing exceptions and logging at DEBUG.
+
+    Shared by every call site that emits metrics from the test broker. A broken
+    user-supplied recorder must never poison the dispatch path — DEBUG-level
+    logging surfaces the failure to operators without flooding production logs.
+    """
+    try:
+        recorder(event, tags)
+    except Exception:  # noqa: BLE001
+        _logger.log(logging.DEBUG, "metrics recorder raised", exc_info=True)
+
+
+__all__ = ["BROKER_SYSTEM", "MetricsRecorder", "_noop_recorder", "_safe_emit"]

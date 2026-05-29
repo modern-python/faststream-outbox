@@ -203,3 +203,30 @@ def test_outbox_telemetry_provider_publish_destination_name() -> None:
         session=AsyncMock(spec=AsyncSession),
     )
     assert provider.get_publish_destination_name(cmd) == "dst-q"
+
+
+async def test_outbox_telemetry_middleware_publish_scope_does_not_fire_under_test_broker() -> None:
+    """
+    ``TestOutboxBroker`` patches ``broker.publish`` directly, bypassing ``_basic_publish``.
+
+    The middleware's ``publish_scope`` therefore must not fire. The recorder seam
+    (via ``FakeOutboxProducer`` / ``_build_fake_publish``) is the publish-side
+    metrics path in test mode. Negative-assert here so a future refactor that
+    routes test-broker publishes through ``_basic_publish`` (and thus through
+    the publish-scope middleware) trips this guardrail.
+    """
+    reader = InMemoryMetricReader()
+    broker = _make_broker(reader)
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> None:
+        pass
+
+    async with TestOutboxBroker(broker):
+        await broker.publish({"x": 1}, queue="orders", session=_session_mock())
+
+    instruments = _instruments(reader)
+    # Publish-scope middleware would create messaging.publish.duration; under
+    # the test broker the publish path bypasses _basic_publish, so the instrument
+    # must be absent.
+    assert "messaging.publish.duration" not in instruments

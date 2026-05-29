@@ -29,26 +29,29 @@ Usage::
 import typing
 from collections.abc import Callable, Mapping, Sequence
 
-
-try:
-    from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
-except ImportError as e:  # pragma: no cover
-    msg = "PrometheusRecorder requires the 'prometheus' extra: pip install 'faststream-outbox[prometheus]'"
-    raise ImportError(msg) from e
-
 from faststream._internal.constants import EMPTY
 
+from faststream_outbox._import_checker import is_prometheus_client_installed
+from faststream_outbox.metrics import BROKER_SYSTEM
 
-try:
-    # ``DEFAULT_SIZE_BUCKETS`` is a class attribute on FastStream's MetricsContainer,
-    # not a module-level constant. Re-export through the attribute access so any
-    # future upstream tweak (different bucket spacing, additional buckets) flows
-    # in automatically.
-    from faststream.prometheus.container import MetricsContainer as _UpstreamContainer
 
-    _UPSTREAM_SIZE_BUCKETS: tuple[float, ...] = tuple(_UpstreamContainer.DEFAULT_SIZE_BUCKETS)
-except ImportError:  # pragma: no cover
-    _UPSTREAM_SIZE_BUCKETS = tuple(2.0**n for n in range(4, 25))
+if typing.TYPE_CHECKING:
+    from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
+
+if is_prometheus_client_installed:
+    from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
+
+# ``DEFAULT_SIZE_BUCKETS`` is a class attribute on FastStream's MetricsContainer,
+# not a module-level constant. Re-export through the attribute access so any
+# future upstream tweak (different bucket spacing, additional buckets) flows
+# in automatically. Upstream ``faststream.prometheus`` is part of the dev group;
+# the import is unconditional rather than guarded behind an extra probe because
+# the canonical source of buckets lives in upstream FastStream, not in a separate
+# package.
+from faststream.prometheus.container import MetricsContainer as _UpstreamContainer
+
+
+_UPSTREAM_SIZE_BUCKETS: tuple[float, ...] = tuple(_UpstreamContainer.DEFAULT_SIZE_BUCKETS)
 
 # Mirror FastStream's PrometheusMiddleware duration histogram boundaries verbatim
 # so dashboards comparing process duration across brokers use the same buckets.
@@ -69,7 +72,6 @@ _DEFAULT_DURATION_BUCKETS: tuple[float, ...] = (
     10.0,
     float("inf"),
 )
-_BROKER_LABEL = "outbox"
 
 
 class PrometheusRecorder:
@@ -95,12 +97,15 @@ class PrometheusRecorder:
     def __init__(
         self,
         *,
-        registry: CollectorRegistry,
+        registry: "CollectorRegistry",
         app_name: str = EMPTY,
         metrics_prefix: str = "faststream",
         received_messages_size_buckets: Sequence[float] | None = None,
         custom_labels: dict[str, str | Callable[[Mapping[str, typing.Any]], str]] | None = None,
     ) -> None:
+        if not is_prometheus_client_installed:  # pragma: no cover  # prometheus_client is in the dev group
+            msg = "PrometheusRecorder requires the 'prometheus' extra: pip install 'faststream-outbox[prometheus]'"
+            raise ImportError(msg)
         self._app_name = "" if app_name is EMPTY else app_name
         self._custom_label_keys = list((custom_labels or {}).keys())
         self._custom_label_resolvers = list((custom_labels or {}).values())
@@ -209,7 +214,7 @@ class PrometheusRecorder:
         # producer): map it to the empty string so the ``handler`` label still
         # has a stable value rather than KeyError-ing the metric lookup.
         handler = tags.get("subscriber", "")
-        return (self._app_name, _BROKER_LABEL, handler, *self._resolve_custom_values(tags))
+        return (self._app_name, BROKER_SYSTEM, handler, *self._resolve_custom_values(tags))
 
     def _publish_values(self, tags: Mapping[str, typing.Any]) -> tuple[str, ...]:
         # Upstream tags publish-side metrics by ``destination`` (the queue
@@ -218,7 +223,7 @@ class PrometheusRecorder:
         # series consistent when ``OutboxPrometheusMiddleware`` is registered
         # alongside this recorder.
         destination = tags.get("queue", "")
-        return (self._app_name, _BROKER_LABEL, destination, *self._resolve_custom_values(tags))
+        return (self._app_name, BROKER_SYSTEM, destination, *self._resolve_custom_values(tags))
 
     def __call__(self, event: str, tags: Mapping[str, typing.Any]) -> None:  # noqa: C901
         consume_base = self._consume_values(tags)
@@ -262,7 +267,15 @@ class PrometheusRecorder:
         if event == "published":
             publish_base = self._publish_values(tags)
             status = tags.get("status", "success")
-            self._published_total.labels(*publish_base, status).inc()
+            # Count = messages landed. Errors (count=0) and timer_id conflicts
+            # (count=0) don't increment the totals — aligns with the OTel adapter's
+            # ``messaging.publish.messages`` semantics. ``_published_exceptions``
+            # below is the canonical error counter; ``_published_duration`` records
+            # every attempt (with the status label) so failed-publish latency stays
+            # observable.
+            count = tags.get("count", 1)
+            if count:
+                self._published_total.labels(*publish_base, status).inc(count)
             duration = tags.get("duration_seconds")
             if duration is not None:
                 self._published_duration.labels(*publish_base).observe(duration)

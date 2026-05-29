@@ -5,6 +5,7 @@ import typing
 from faststream.prometheus import ConsumeAttrs, MetricsSettingsProvider
 
 from faststream_outbox.message import OutboxInnerMessage
+from faststream_outbox.metrics import BROKER_SYSTEM
 from faststream_outbox.response import OutboxPublishCommand
 
 
@@ -20,10 +21,9 @@ class OutboxMetricsSettingsProvider(
     __slots__ = ("messaging_system",)
 
     def __init__(self) -> None:
-        # Canonical value — must match ``metrics.prometheus._BROKER_LABEL`` and
-        # ``opentelemetry.provider.messaging_system`` so the ``broker`` label is
-        # the same value across recorder + middleware seams.
-        self.messaging_system = "outbox"
+        # Canonical value — shared via the ``BROKER_SYSTEM`` constant so the
+        # ``broker`` label is the same value across recorder + middleware seams.
+        self.messaging_system = BROKER_SYSTEM
 
     def get_consume_attrs_from_message(
         self,

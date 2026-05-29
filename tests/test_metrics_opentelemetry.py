@@ -1,6 +1,7 @@
 """Unit tests for ``OpenTelemetryRecorder`` — drop-in adapter for the seam."""
 
 import typing
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -9,7 +10,10 @@ pytest.importorskip("opentelemetry")
 from opentelemetry import metrics as ot_metrics
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+from sqlalchemy import MetaData
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from faststream_outbox import NoRetry, OutboxBroker, TestOutboxBroker, make_outbox_table
 from faststream_outbox.metrics.opentelemetry import OpenTelemetryRecorder
 
 
@@ -172,3 +176,65 @@ def test_otel_published_error_stamps_error_type_attribute() -> None:
     attrs = dict(metrics["messaging.publish.duration"].data_points[0].attributes)
     assert attrs["error.type"] == "IntegrityError"
     assert attrs["messaging.outbox.status"] == "error"
+
+
+# ----- end-to-end recorder coverage (handler raises → nacked events flow) -----
+# Mirrors the Prometheus E2E tests: prove the contract between subscriber emission
+# sites and the OTel adapter without hand-crafting tag dicts.
+
+
+def _e2e_session() -> AsyncMock:
+    return AsyncMock(spec=AsyncSession)
+
+
+def _e2e_broker(reader: InMemoryMetricReader, **subscriber_kwargs: typing.Any) -> OutboxBroker:
+    del subscriber_kwargs  # consumed by caller's decorator
+    metadata = MetaData()
+    table = make_outbox_table(metadata)
+    provider = MeterProvider(metric_readers=[reader])
+    return OutboxBroker(
+        outbox_table=table,
+        metrics_recorder=OpenTelemetryRecorder(meter_provider=provider, include_messages_counters=True),
+    )
+
+
+async def test_otel_e2e_handler_raises_emits_nacked_status_and_error_type_attrs() -> None:
+    """Default retry → handler raise schedules retry → process.duration carries status="nacked", error.type."""
+    reader = InMemoryMetricReader()
+    broker = _e2e_broker(reader)
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> None:
+        del body
+        msg = "boom"
+        raise ValueError(msg)
+
+    async with TestOutboxBroker(broker):
+        await broker.publish({"x": 1}, queue="orders", session=_e2e_session())
+
+    metrics = _collect_metrics(reader)
+    assert "messaging.process.duration" in metrics
+    attrs = dict(metrics["messaging.process.duration"].data_points[0].attributes)
+    assert attrs["messaging.outbox.status"] == "nacked"
+    assert attrs["error.type"] == "ValueError"
+
+
+async def test_otel_e2e_handler_raises_with_noretry_stamps_terminal_reason_attr() -> None:
+    """NoRetry → handler raise terminates → process.duration carries terminal_reason="retry_terminal"."""
+    reader = InMemoryMetricReader()
+    broker = _e2e_broker(reader)
+
+    @broker.subscriber("orders", retry_strategy=NoRetry())
+    async def handle(body: dict) -> None:
+        del body
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    async with TestOutboxBroker(broker):
+        await broker.publish({"x": 1}, queue="orders", session=_e2e_session())
+
+    metrics = _collect_metrics(reader)
+    attrs = dict(metrics["messaging.process.duration"].data_points[0].attributes)
+    assert attrs["messaging.outbox.terminal_reason"] == "retry_terminal"
+    assert attrs["error.type"] == "RuntimeError"
+    assert attrs["messaging.outbox.status"] == "nacked"

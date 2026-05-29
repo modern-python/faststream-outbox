@@ -15,7 +15,7 @@ or scheduled delivery actually waiting. ``feed()`` simulates a row insert.
 import datetime as _dt
 import typing
 import uuid
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from unittest import mock
 
@@ -29,6 +29,7 @@ from faststream_outbox.broker import (
 from faststream_outbox.client import AbstractOutboxClient
 from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.message import OutboxInnerMessage
+from faststream_outbox.metrics import _safe_emit
 from faststream_outbox.response import OutboxPublishCommand
 
 
@@ -283,17 +284,17 @@ class FakeOutboxProducer:
             timer_id=cmd.timer_id,
         )
         recorder = self._broker.config.broker_config.metrics_recorder
-        with suppress(Exception):
-            recorder(
-                "published",
-                {
-                    "queue": cmd.queue,
-                    "status": "success",
-                    "count": 0 if row_id is None else 1,
-                    "size_bytes": len(payload),
-                    "duration_seconds": 0.0,
-                },
-            )
+        _safe_emit(
+            recorder,
+            "published",
+            {
+                "queue": cmd.queue,
+                "status": "success",
+                "count": 0 if row_id is None else 1,
+                "size_bytes": len(payload),
+                "duration_seconds": 0.0,
+            },
+        )
         if not self._run_loops and row_id is not None:
             await _sync_dispatch(self._fake_client, self._broker, cmd.queue, row_id)
         return row_id
@@ -320,17 +321,17 @@ class FakeOutboxProducer:
                 landed += 1
             if not self._run_loops and row_id is not None:
                 await _sync_dispatch(self._fake_client, self._broker, cmd.queue, row_id)
-        with suppress(Exception):
-            recorder(
-                "published",
-                {
-                    "queue": cmd.queue,
-                    "status": "success",
-                    "count": landed,
-                    "size_bytes": total_size,
-                    "duration_seconds": 0.0,
-                },
-            )
+        _safe_emit(
+            recorder,
+            "published",
+            {
+                "queue": cmd.queue,
+                "status": "success",
+                "count": landed,
+                "size_bytes": total_size,
+                "duration_seconds": 0.0,
+            },
+        )
 
     async def request(self, cmd: OutboxPublishCommand) -> typing.NoReturn:
         msg = "OutboxBroker does not support request-reply"
@@ -383,17 +384,17 @@ def _build_fake_publish(
         # success/no-op; reproduce that here so test-broker users can assert on
         # publish-side metrics without exercising the full Postgres path.
         recorder = broker.config.broker_config.metrics_recorder
-        with suppress(Exception):
-            recorder(
-                "published",
-                {
-                    "queue": queue,
-                    "status": "success",
-                    "count": 0 if row_id is None else 1,
-                    "size_bytes": len(payload),
-                    "duration_seconds": 0.0,
-                },
-            )
+        _safe_emit(
+            recorder,
+            "published",
+            {
+                "queue": queue,
+                "status": "success",
+                "count": 0 if row_id is None else 1,
+                "size_bytes": len(payload),
+                "duration_seconds": 0.0,
+            },
+        )
         # Sync dispatch ignores next_attempt_at — timers fire immediately in test mode.
         # Skip only when loop mode is on (loops would re-dispatch) or the insert was a
         # timer-dedup no-op.
@@ -440,17 +441,17 @@ def _build_fake_publish_batch(
                 landed += 1
             if not run_loops and row_id is not None:
                 await _sync_dispatch(fake_client, broker, queue, row_id)
-        with suppress(Exception):
-            recorder(
-                "published",
-                {
-                    "queue": queue,
-                    "status": "success",
-                    "count": landed,
-                    "size_bytes": total_size,
-                    "duration_seconds": 0.0,
-                },
-            )
+        _safe_emit(
+            recorder,
+            "published",
+            {
+                "queue": queue,
+                "status": "success",
+                "count": landed,
+                "size_bytes": total_size,
+                "duration_seconds": 0.0,
+            },
+        )
 
     return fake_publish_batch
 

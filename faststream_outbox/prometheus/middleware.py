@@ -14,6 +14,7 @@ from collections.abc import Callable, Sequence
 from faststream._internal.constants import EMPTY
 from faststream.prometheus.middleware import PrometheusMiddleware
 
+from faststream_outbox._import_checker import is_prometheus_client_installed
 from faststream_outbox.message import OutboxInnerMessage
 from faststream_outbox.prometheus.provider import OutboxMetricsSettingsProvider
 from faststream_outbox.response import OutboxPublishCommand
@@ -37,6 +38,12 @@ class OutboxPrometheusMiddleware(
         received_messages_size_buckets: Sequence[float] | None = None,
         custom_labels: dict[str, str | Callable[[typing.Any], str]] | None = None,
     ) -> None:
+        if not is_prometheus_client_installed:  # pragma: no cover  # prometheus_client is in the dev group
+            msg = (
+                "OutboxPrometheusMiddleware requires the 'prometheus' extra: "
+                "pip install 'faststream-outbox[prometheus]'"
+            )
+            raise ImportError(msg)
         super().__init__(
             settings_provider_factory=lambda _: OutboxMetricsSettingsProvider(),
             registry=registry,

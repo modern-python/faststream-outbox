@@ -228,3 +228,38 @@ async def test_outbox_prometheus_middleware_and_recorder_share_consume_series() 
 
     assert _acked_from(middleware_reg) == 1.0
     assert _acked_from(recorder_reg) == 1.0
+
+
+async def test_outbox_prometheus_middleware_publish_scope_does_not_fire_under_test_broker() -> None:
+    """
+    ``TestOutboxBroker`` patches ``broker.publish`` directly, bypassing ``_basic_publish``.
+
+    The middleware's ``publish_scope`` therefore must not fire. The recorder seam
+    (via ``FakeOutboxProducer`` / ``_build_fake_publish``) is the publish-side
+    metrics path in test mode. Negative-assert here so a future refactor that
+    routes test-broker publishes through ``_basic_publish`` (and thus through
+    the publish-scope middleware) trips this guardrail instead of silently
+    double-counting in production users that test through ``TestOutboxBroker``.
+    """
+    reg = CollectorRegistry()
+    broker = _make_broker(reg)
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> None:
+        pass
+
+    async with TestOutboxBroker(broker):
+        await broker.publish({"x": 1}, queue="orders", session=_session_mock())
+
+    # A Counter that's never been ``.labels(...).inc()``-ed produces zero samples;
+    # any non-zero sample on the publish-side series means middleware fired.
+    non_zero_publish_samples = [
+        (sample.name, dict(sample.labels), sample.value)
+        for metric in reg.collect()
+        if metric.name == "faststream_published_messages"
+        for sample in metric.samples
+        if sample.value > 0.0
+    ]
+    assert non_zero_publish_samples == [], (
+        f"publish_scope middleware fired under TestOutboxBroker: {non_zero_publish_samples}"
+    )

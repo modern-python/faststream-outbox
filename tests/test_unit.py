@@ -994,14 +994,10 @@ def test_validate_schema_sync_raises_when_alembic_missing() -> None:
     """Without alembic installed the validator must raise ImportError with the install hint."""
     metadata = MetaData()
     t = make_outbox_table(metadata)
-    # Alembic is imported at module load; simulate "not installed" by zeroing the
-    # sentinels the function checks — matches what client.py's except-ImportError does.
+    # Alembic is probed via ``_import_checker.is_alembic_installed`` at import time;
+    # simulate "not installed" by flipping the boolean the function checks.
     with (
-        patch.multiple(
-            "faststream_outbox.client",
-            _alembic_compare_metadata=None,
-            _AlembicMigrationContext=None,
-        ),
+        patch("faststream_outbox.client.is_alembic_installed", new=False),
         pytest.raises(ImportError, match=r"pip install faststream-outbox\[validate\]"),
     ):
         _validate_schema_sync(MagicMock(), t)
