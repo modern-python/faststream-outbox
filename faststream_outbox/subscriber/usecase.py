@@ -439,10 +439,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         )
         start_perf = time.perf_counter()
         try:
-            try:
-                await self.consume(row)
-            finally:
-                await row.assert_state_set(logger)
+            await self.consume(row)
         except Exception as e:  # noqa: BLE001
             # No metric emitted here intentionally: the row was never marked
             # terminal/retry, so its state is undefined — flushing or emitting an
@@ -450,6 +447,14 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             # reclaimed; the ERROR log is the operator signal.
             self._log(log_level=logging.ERROR, message=f"Outbox worker error: {e!r}", exc_info=e)
             return
+        # Shutdown race: SubscriberUsecase.consume() returns None without invoking
+        # process_message when self.running has been flipped to False by stop().
+        # Detecting that here lets us preserve the row instead of falling through
+        # to assert_state_set → reject() → _safe_flush → DELETE. The row's lease
+        # expires after lease_ttl_seconds and is reclaimed on next start.
+        if not row.state_set and not self.running:
+            return
+        await row.assert_state_set(logger)
         duration_seconds = time.perf_counter() - start_perf
         common = {**base, "deliveries_count": row.deliveries_count, "duration_seconds": duration_seconds}
         if row.last_exception is None:
