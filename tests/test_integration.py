@@ -7,7 +7,7 @@ import uuid
 from unittest import mock
 
 import pytest
-from sqlalchemy import MetaData, event, insert, select, text
+from sqlalchemy import MetaData, Table, event, insert, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from faststream_outbox import (
@@ -97,38 +97,79 @@ async def test_two_concurrent_fetches_dont_double_claim(pg_engine, outbox_table)
     assert len(set(all_ids)) == 20  # no duplicates
 
 
-async def test_delete_with_lease_succeeds_with_correct_token(pg_engine, outbox_table) -> None:
+async def test_delete_with_lease_succeeds_with_correct_token(pg_engine: AsyncEngine, outbox_table: Table) -> None:
     async with pg_engine.begin() as conn:
         await conn.execute(insert(outbox_table).values(queue="orders", payload=b"x"))
     client = OutboxClient(pg_engine, outbox_table)
-    async with pg_engine.connect() as conn:
-        rows = await client.fetch(conn, ["orders"], limit=1, lease_ttl_seconds=60.0)
-        assert len(rows) == 1
-        deleted = await client.delete_with_lease(conn, rows[0].id, rows[0].acquired_token)  # ty: ignore[invalid-argument-type]
+    async with pg_engine.connect() as fetch_conn:
+        rows = await client.fetch(fetch_conn, ["orders"], limit=1, lease_ttl_seconds=60.0)
+    assert len(rows) == 1
+    # delete_with_lease expects an AUTOCOMMIT-configured conn (the production writer
+    # conn from _open_worker_resources) — same shape here.
+    async with pg_engine.connect() as raw_conn:
+        writer_conn = await raw_conn.execution_options(isolation_level="AUTOCOMMIT")
+        deleted = await client.delete_with_lease(writer_conn, rows[0].id, rows[0].acquired_token)  # ty: ignore[invalid-argument-type]
     assert deleted is True
     assert await _row_count(pg_engine, outbox_table) == 0
 
 
-async def test_delete_with_wrong_token_is_noop(pg_engine, outbox_table) -> None:
+async def test_delete_with_wrong_token_is_noop(pg_engine: AsyncEngine, outbox_table: Table) -> None:
     async with pg_engine.begin() as conn:
         await conn.execute(insert(outbox_table).values(queue="orders", payload=b"x"))
     client = OutboxClient(pg_engine, outbox_table)
-    async with pg_engine.connect() as conn:
-        rows = await client.fetch(conn, ["orders"], limit=1, lease_ttl_seconds=60.0)
-        deleted = await client.delete_with_lease(conn, rows[0].id, uuid.uuid4())  # wrong token
+    async with pg_engine.connect() as fetch_conn:
+        rows = await client.fetch(fetch_conn, ["orders"], limit=1, lease_ttl_seconds=60.0)
+    async with pg_engine.connect() as raw_conn:
+        writer_conn = await raw_conn.execution_options(isolation_level="AUTOCOMMIT")
+        deleted = await client.delete_with_lease(writer_conn, rows[0].id, uuid.uuid4())  # wrong token
     assert deleted is False
     assert await _row_count(pg_engine, outbox_table) == 1  # row still there
 
 
-async def test_mark_pending_with_lease(pg_engine, outbox_table) -> None:
+async def test_writer_connection_autocommit_round_trip(pg_engine: AsyncEngine, outbox_table: Table) -> None:
+    """
+    Autocommit-configured writer conn runs ``delete_with_lease`` end-to-end against real Postgres.
+
+    The connection is configured exactly the way ``_open_worker_resources`` configures the
+    worker writer (``isolation_level="AUTOCOMMIT"``); ``delete_with_lease`` runs with no
+    outer ``conn.begin()`` and the write commits on its own — proves the autocommit setup
+    is valid on the asyncpg dialect.
+    """
+    token = uuid.uuid4()
+    now = _dt.datetime.now(tz=_dt.UTC)
+    async with pg_engine.begin() as conn:
+        result = await conn.execute(
+            insert(outbox_table)
+            .values(queue="orders", payload=b"x", acquired_at=now, acquired_token=token)
+            .returning(outbox_table.c.id),
+        )
+        row_id = result.scalar_one()
+
+    client = OutboxClient(pg_engine, outbox_table)
+    async with pg_engine.connect() as raw_conn:
+        writer_conn = await raw_conn.execution_options(isolation_level="AUTOCOMMIT")
+        deleted = await client.delete_with_lease(writer_conn, row_id, token)
+        # Still inside the autocommit conn — under default isolation the DELETE would
+        # be buffered until conn.close(); under AUTOCOMMIT it should already be visible.
+        async with pg_engine.connect() as probe_conn:
+            remaining = await probe_conn.execute(select(outbox_table).where(outbox_table.c.id == row_id))
+            assert remaining.first() is None
+    assert deleted is True
+    assert await _row_count(pg_engine, outbox_table) == 0
+
+
+async def test_mark_pending_with_lease(pg_engine: AsyncEngine, outbox_table: Table) -> None:
     async with pg_engine.begin() as conn:
         await conn.execute(insert(outbox_table).values(queue="orders", payload=b"x"))
     client = OutboxClient(pg_engine, outbox_table)
-    async with pg_engine.connect() as conn:
-        rows = await client.fetch(conn, ["orders"], limit=1, lease_ttl_seconds=60.0)
-        msg = rows[0]
+    async with pg_engine.connect() as fetch_conn:
+        rows = await client.fetch(fetch_conn, ["orders"], limit=1, lease_ttl_seconds=60.0)
+    msg = rows[0]
+    # mark_pending_with_lease expects an AUTOCOMMIT-configured conn (production writer conn).
+    async with pg_engine.connect() as raw_conn:
+        writer_conn = await raw_conn.execution_options(isolation_level="AUTOCOMMIT")
         updated = await client.mark_pending_with_lease(
-            conn,
+            writer_conn,
             msg.id,
             msg.acquired_token,  # ty: ignore[invalid-argument-type]
             delay_seconds=600.0,  # 10 minutes in the future
@@ -136,13 +177,14 @@ async def test_mark_pending_with_lease(pg_engine, outbox_table) -> None:
             first_attempt_at=_dt.datetime.now(tz=_dt.UTC),
             last_attempt_at=_dt.datetime.now(tz=_dt.UTC),
         )
-        assert updated is True
-        # Refetch — should be empty because next_attempt_at is in the future
-        rows2 = await client.fetch(conn, ["orders"], limit=10, lease_ttl_seconds=60.0)
+    assert updated is True
+    # Refetch — should be empty because next_attempt_at is in the future
+    async with pg_engine.connect() as fetch_conn:
+        rows2 = await client.fetch(fetch_conn, ["orders"], limit=10, lease_ttl_seconds=60.0)
     assert rows2 == []
 
 
-async def test_mark_pending_with_lease_uses_db_clock(pg_engine, outbox_table) -> None:
+async def test_mark_pending_with_lease_uses_db_clock(pg_engine: AsyncEngine, outbox_table: Table) -> None:
     """next_attempt_at must be computed server-side as now() + delay, not from the worker's clock."""
     async with pg_engine.begin() as conn:
         await conn.execute(insert(outbox_table).values(queue="orders", payload=b"x"))
@@ -155,9 +197,11 @@ async def test_mark_pending_with_lease_uses_db_clock(pg_engine, outbox_table) ->
     # would freeze inside the outer connection.
     async with pg_engine.connect() as conn:
         db_before = (await conn.execute(text("SELECT clock_timestamp()"))).scalar()
-    async with pg_engine.connect() as conn:
+    # mark_pending_with_lease expects an AUTOCOMMIT-configured conn (production writer conn).
+    async with pg_engine.connect() as raw_conn:
+        writer_conn = await raw_conn.execution_options(isolation_level="AUTOCOMMIT")
         await client.mark_pending_with_lease(
-            conn,
+            writer_conn,
             msg.id,
             msg.acquired_token,  # ty: ignore[invalid-argument-type]
             delay_seconds=delay,
@@ -168,7 +212,7 @@ async def test_mark_pending_with_lease_uses_db_clock(pg_engine, outbox_table) ->
     async with pg_engine.connect() as conn:
         db_after = (await conn.execute(text("SELECT clock_timestamp()"))).scalar()
         next_at = (await conn.execute(select(outbox_table.c.next_attempt_at))).scalar_one()
-    # next_attempt_at was set inside the mark_pending_with_lease transaction whose
+    # next_attempt_at was set by the autocommit'd UPDATE whose server-side
     # now() falls between db_before and db_after.
     assert db_before + _dt.timedelta(seconds=delay) <= next_at <= db_after + _dt.timedelta(seconds=delay)
 

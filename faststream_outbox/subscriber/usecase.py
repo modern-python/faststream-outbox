@@ -343,7 +343,13 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             yield {"writer_conn": None}
             return
         async with engine.connect() as writer_conn:
-            yield {"writer_conn": writer_conn}
+            # Each terminal/retry write is a single statement; the explicit per-row
+            # BEGIN/COMMIT in delete_with_lease / mark_pending_with_lease would add
+            # two Postgres round-trips per row with no benefit. Autocommit collapses
+            # the per-row cost to one round-trip; the lease guard rides on the WHERE
+            # clause, not the transaction wrapping it.
+            autocommit_conn = await writer_conn.execution_options(isolation_level="AUTOCOMMIT")
+            yield {"writer_conn": autocommit_conn}
 
     async def _run_with_reconnect(
         self,
