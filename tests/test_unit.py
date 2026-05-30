@@ -30,6 +30,7 @@ from faststream_outbox import (
     make_dlq_table,
     make_outbox_table,
 )
+from faststream_outbox.annotations import OutboxMessage as AnnotatedOutboxMessage
 from faststream_outbox.client import OutboxClient, _validate_schema_sync
 from faststream_outbox.configs import OutboxBrokerConfig
 from faststream_outbox.envelope import _encode_payload
@@ -40,7 +41,12 @@ from faststream_outbox.publisher.fake import OutboxFakePublisher
 from faststream_outbox.publisher.producer import OutboxProducer
 from faststream_outbox.publisher.specification import OutboxPublisherSpecification
 from faststream_outbox.response import OutboxPublishCommand
-from faststream_outbox.subscriber.usecase import OutboxSubscriber, _compute_backoff
+from faststream_outbox.subscriber.usecase import (
+    _LAST_EXCEPTION_MAX_CHARS,
+    _TRUNCATION_SUFFIX,
+    OutboxSubscriber,
+    _compute_backoff,
+)
 from faststream_outbox.testing import FakeOutboxClient, FakeOutboxProducer
 
 
@@ -2656,3 +2662,108 @@ async def test_flush_terminal_dlq_payload_last_exception_none_when_no_exc() -> N
     payload = spy.await_args.kwargs["dlq_payload"]
     assert payload["failure_reason"] == "rejected"
     assert payload["last_exception"] is None
+
+
+# --- last_exception truncation in DLQ payload --------------------------------
+
+
+async def test_flush_terminal_dlq_payload_truncates_long_exception_repr() -> None:
+    """A pathological exception with a multi-MB ``repr`` is truncated before write."""
+    broker, test_broker = _make_broker_with_dlq()
+    fake = FakeOutboxClient()
+    test_broker.fake_client = fake
+    msg = _make_msg(id=14, queue="orders")
+    msg.terminal_failure_reason = "retry_terminal"
+    # Build an exception whose ``repr`` is much larger than the cap.
+    huge_payload = "x" * (_LAST_EXCEPTION_MAX_CHARS * 3)
+    msg.last_exception = RuntimeError(huge_payload)
+
+    with patch.object(fake, "delete_with_lease", new=AsyncMock(return_value=True)) as spy:
+        async with test_broker:
+            sub = next(iter(broker._subscribers))  # noqa: SLF001
+            await sub._flush_terminal(msg, writer_conn=None)  # noqa: SLF001
+
+    assert spy.await_args is not None
+    rendered = spy.await_args.kwargs["dlq_payload"]["last_exception"]
+    assert rendered is not None
+    assert len(rendered) == _LAST_EXCEPTION_MAX_CHARS
+    assert rendered.endswith(_TRUNCATION_SUFFIX)
+
+
+async def test_flush_terminal_dlq_payload_short_exception_not_truncated() -> None:
+    """A normal-sized exception ``repr`` passes through untouched."""
+    broker, test_broker = _make_broker_with_dlq()
+    fake = FakeOutboxClient()
+    test_broker.fake_client = fake
+    msg = _make_msg(id=15, queue="orders")
+    msg.terminal_failure_reason = "retry_terminal"
+    msg.last_exception = ValueError("short message")
+
+    with patch.object(fake, "delete_with_lease", new=AsyncMock(return_value=True)) as spy:
+        async with test_broker:
+            sub = next(iter(broker._subscribers))  # noqa: SLF001
+            await sub._flush_terminal(msg, writer_conn=None)  # noqa: SLF001
+
+    assert spy.await_args is not None
+    assert spy.await_args.kwargs["dlq_payload"]["last_exception"] == repr(ValueError("short message"))
+
+
+# --- nacked_terminal metric reason on manual reject() / REJECT_ON_ERROR -----
+
+
+async def test_metrics_manual_reject_without_exception_emits_nacked_terminal_rejected() -> None:
+    """
+    Manual ``msg.reject()`` (no exception raised) emits ``nacked_terminal(reason="rejected")``.
+
+    Previously routed to ``acked`` because ``last_exception is None`` was checked first.
+    """
+    events, recorder = _events_recorder()
+    metadata = MetaData()
+    table = make_outbox_table(metadata)
+    broker = OutboxBroker(outbox_table=table, metrics_recorder=recorder)
+
+    @broker.subscriber("orders", ack_policy=AckPolicy.MANUAL)
+    async def handle(body: dict, msg: AnnotatedOutboxMessage) -> None:
+        del body
+        await msg.reject()
+
+    session = _make_session_mock()
+    async with TestOutboxBroker(broker):
+        await broker.publish({"x": 1}, queue="orders", session=session)
+
+    terminals = [t for e, t in events if e == "nacked_terminal"]
+    assert len(terminals) == 1
+    assert terminals[0]["reason"] == "rejected"
+    assert "exception_type" not in terminals[0]
+    assert not any(e == "acked" for e, _ in events)
+
+
+async def test_metrics_reject_on_error_terminal_emits_reason_rejected() -> None:
+    """
+    REJECT_ON_ERROR + handler raise emits ``reason="rejected"`` (was ``"retry_terminal"``).
+
+    The metric branch previously hardcoded ``"retry_terminal"`` for the post-handler
+    terminal path; it now reads ``terminal_failure_reason`` and includes ``exception_type``.
+    """
+    events, recorder = _events_recorder()
+    metadata = MetaData()
+    table = make_outbox_table(metadata)
+    broker = OutboxBroker(outbox_table=table, metrics_recorder=recorder)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+
+        @broker.subscriber("orders", ack_policy=AckPolicy.REJECT_ON_ERROR)
+        async def handle(body: dict) -> None:
+            del body
+            err = "explode"
+            raise RuntimeError(err)
+
+    session = _make_session_mock()
+    async with TestOutboxBroker(broker):
+        await broker.publish({"x": 1}, queue="orders", session=session)
+
+    terminals = [t for e, t in events if e == "nacked_terminal"]
+    assert len(terminals) == 1
+    assert terminals[0]["reason"] == "rejected"
+    assert terminals[0]["exception_type"] == "RuntimeError"

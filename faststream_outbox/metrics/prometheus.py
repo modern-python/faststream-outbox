@@ -203,6 +203,15 @@ class PrometheusRecorder:
             [*consume_labels, "phase"],
             registry=registry,
         )
+        # Pairs with ``_terminal_reason`` so dashboards can compare "row failed
+        # terminally" vs "audit landed" — divergence signals DLQ misconfiguration
+        # (schema mismatch, etc.) without silent data loss.
+        self._dlq_written = Counter(
+            f"{p}_outbox_dlq_written_total",
+            "DLQ audit rows written by terminal flush, broken down by reason.",
+            [*consume_labels, "reason"],
+            registry=registry,
+        )
 
     def _resolve_custom_values(self, tags: Mapping[str, typing.Any]) -> tuple[str, ...]:
         return tuple(
@@ -225,7 +234,7 @@ class PrometheusRecorder:
         destination = tags.get("queue", "")
         return (self._app_name, BROKER_SYSTEM, destination, *self._resolve_custom_values(tags))
 
-    def __call__(self, event: str, tags: Mapping[str, typing.Any]) -> None:  # noqa: C901
+    def __call__(self, event: str, tags: Mapping[str, typing.Any]) -> None:  # noqa: C901, PLR0912
         consume_base = self._consume_values(tags)
 
         if event == "fetched":
@@ -264,6 +273,10 @@ class PrometheusRecorder:
             self._lease_lost.labels(*consume_base, tags["phase"]).inc()
             return
 
+        if event == "dlq_written":
+            self._dlq_written.labels(*consume_base, tags["failure_reason"]).inc()
+            return
+
         if event == "published":
             publish_base = self._publish_values(tags)
             status = tags.get("status", "success")
@@ -283,7 +296,7 @@ class PrometheusRecorder:
             if exc is not None:
                 self._published_exceptions.labels(*publish_base, exc).inc()
             return
-        # Unknown event — silently ignored so future events (e.g. ``dlq_written``)
+        # Unknown event — silently ignored so future event vocabulary additions
         # don't break old recorders.
 
 

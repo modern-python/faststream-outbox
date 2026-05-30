@@ -117,8 +117,30 @@ def test_otel_published_records_publish_duration() -> None:
 
 def test_otel_unknown_event_is_silently_ignored() -> None:
     reader, rec = _reader_and_recorder()
-    rec("dlq_written", {"queue": "q", "subscriber": "h"})  # forward-compat
+    rec("future_event_not_yet_added", {"queue": "q", "subscriber": "h"})  # forward-compat
     assert _collect_metrics(reader) == {}
+
+
+def test_otel_dlq_written_emits_counter_with_reason_attr() -> None:
+    reader, rec = _reader_and_recorder()
+    rec(
+        "dlq_written",
+        {
+            "queue": "q",
+            "subscriber": "h",
+            "deliveries_count": 3,
+            "failure_reason": "retry_terminal",
+            "exception_type": "RuntimeError",
+        },
+    )
+    metrics = _collect_metrics(reader)
+    assert "messaging.outbox.dlq_written" in metrics
+    counter_points = metrics["messaging.outbox.dlq_written"].data_points
+    assert sum(p.value for p in counter_points) == 1
+    attrs = counter_points[0].attributes
+    assert attrs is not None
+    assert attrs["messaging.outbox.dlq_reason"] == "retry_terminal"
+    assert attrs["error.type"] == "RuntimeError"
 
 
 def test_otel_meter_argument_takes_precedence_over_meter_provider() -> None:

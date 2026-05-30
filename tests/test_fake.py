@@ -41,7 +41,7 @@ from faststream_outbox.configs import OutboxBrokerConfig
 from faststream_outbox.envelope import _encode_payload as encode_payload
 from faststream_outbox.router import OutboxRoute
 from faststream_outbox.subscriber.config import OutboxSubscriberConfig
-from faststream_outbox.testing import FakeOutboxClient, FakeOutboxProducer, _FakeRow
+from faststream_outbox.testing import FakeOutboxClient, FakeOutboxProducer, _FakeRow, _to_inner
 
 
 def _fake_session() -> AsyncMock:
@@ -1390,8 +1390,6 @@ async def test_fake_dlq_captures_max_deliveries_failure() -> None:
         row.acquired_token = uuid.uuid4()
         row.acquired_at = _dt.datetime.now(tz=_dt.UTC)
         sub = next(iter(broker._subscribers))  # noqa: SLF001
-        from faststream_outbox.testing import _to_inner  # noqa: PLC0415
-
         await sub.dispatch_one(_to_inner(row), writer_conn=None)
 
     assert test_broker.fake_client.rows == []

@@ -50,6 +50,15 @@ except ImportError:  # pragma: no cover
 _BACKOFF_EXP_CAP = 30
 _BACKOFF_MAX_SECONDS = 30.0
 
+# Cap for the ``last_exception`` string written to the DLQ. Some exceptions carry
+# huge payloads (validation errors with the full request body, asyncpg ``DataError``
+# with the rejected row, etc.). An unbounded ``repr`` would extend the writer
+# round-trip on a poison row by hundreds of ms and bloat the DLQ table. 8 KiB is
+# generous enough to keep tracebacks and structured detail intact while bounding
+# worst-case write cost. Truncation appends ``…[truncated]``.
+_LAST_EXCEPTION_MAX_CHARS = 8192
+_TRUNCATION_SUFFIX = "…[truncated]"
+
 _UNSUPPORTED_PEEK_MSG = (
     "OutboxBroker does not support get_one() / async iteration. "
     "Use `broker.fetch_unprocessed(session=..., queue=...)` for lease-free read access."
@@ -69,6 +78,17 @@ def _compute_backoff(attempt: int, ceiling: float, *, base: float = 1.0) -> floa
     *attempt* is 1-based — the first attempt sleeps ~``base * U(0.5, 1.5)``.
     """
     return min(base * (2.0 ** (attempt - 1)) * random.uniform(0.5, 1.5), ceiling)  # noqa: S311
+
+
+def _truncate_exception(exc: BaseException | None) -> str | None:
+    """Render *exc* via ``repr`` and bound it to ``_LAST_EXCEPTION_MAX_CHARS``."""
+    if exc is None:
+        return None
+    rendered = repr(exc)
+    if len(rendered) <= _LAST_EXCEPTION_MAX_CHARS:
+        return rendered
+    keep = _LAST_EXCEPTION_MAX_CHARS - len(_TRUNCATION_SUFFIX)
+    return rendered[:keep] + _TRUNCATION_SUFFIX
 
 
 if typing.TYPE_CHECKING:
@@ -485,26 +505,24 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         await row.assert_state_set(logger)
         duration_seconds = time.perf_counter() - start_perf
         common = {**base, "deliveries_count": row.deliveries_count, "duration_seconds": duration_seconds}
-        if row.last_exception is None:
-            self._emit_metric("acked", common)
+        # Branch on ``terminal_failure_reason`` (set by ``_nack``/``_reject``) before
+        # ``last_exception`` so manual ``msg.reject()`` (no exception raised) still
+        # surfaces as ``nacked_terminal(reason="rejected")``, and ack-policy-driven
+        # rejects (REJECT_ON_ERROR) carry ``reason="rejected"`` rather than the
+        # incorrect ``"retry_terminal"`` they got under the old ``last_exception``-first
+        # ordering. Successful handlers leave ``terminal_failure_reason=None``.
+        if row.terminal_failure_reason is not None:
+            terminal_tags: dict[str, typing.Any] = {**common, "reason": row.terminal_failure_reason}
+            if row.last_exception is not None:
+                terminal_tags["exception_type"] = type(row.last_exception).__name__
+            self._emit_metric("nacked_terminal", terminal_tags)
         elif row.pending_delay_seconds is not None:
-            self._emit_metric(
-                "nacked_retried",
-                {
-                    **common,
-                    "next_delay_seconds": row.pending_delay_seconds,
-                    "exception_type": type(row.last_exception).__name__,
-                },
-            )
-        elif row.to_delete:
-            self._emit_metric(
-                "nacked_terminal",
-                {
-                    **common,
-                    "reason": "retry_terminal",
-                    "exception_type": type(row.last_exception).__name__,
-                },
-            )
+            retry_tags: dict[str, typing.Any] = {**common, "next_delay_seconds": row.pending_delay_seconds}
+            if row.last_exception is not None:
+                retry_tags["exception_type"] = type(row.last_exception).__name__
+            self._emit_metric("nacked_retried", retry_tags)
+        else:
+            self._emit_metric("acked", common)
         await self._safe_flush(row, terminal=row.to_delete, writer_conn=writer_conn)
 
     async def _safe_flush(
@@ -548,7 +566,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         if row.terminal_failure_reason is not None and self._outer_config.dlq_table is not None:
             dlq_payload = {
                 "failure_reason": row.terminal_failure_reason,
-                "last_exception": repr(row.last_exception) if row.last_exception is not None else None,
+                "last_exception": _truncate_exception(row.last_exception),
             }
         deleted = await self._client.delete_with_lease(
             writer_conn,

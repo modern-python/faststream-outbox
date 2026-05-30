@@ -15,9 +15,19 @@ Event vocabulary (stable, additive):
 * ``acked`` — handler returned cleanly. Tags include ``duration_seconds``.
 * ``nacked_retried`` — handler raised, retry scheduled.
   Tags include ``duration_seconds, next_delay_seconds, exception_type``.
-* ``nacked_terminal`` — terminal failure. Tags include ``reason`` (``max_deliveries`` | ``retry_terminal``);
-  ``duration_seconds`` is present only for ``retry_terminal``.
+* ``nacked_terminal`` — terminal failure. Tags include ``reason`` (``max_deliveries`` |
+  ``retry_terminal`` | ``rejected``). ``duration_seconds`` is present for the post-handler
+  reasons (``retry_terminal``, ``rejected``) and absent for ``max_deliveries`` (no handler
+  ran). ``exception_type`` is present when ``last_exception`` was set (post-handler raises;
+  manual ``msg.reject()`` may omit it).
 * ``lease_lost`` — terminal flush found a foreign lease. Tags include ``phase`` (``terminal`` | ``retry``).
+* ``dlq_written`` — emitted from ``_flush_terminal`` after the DELETE+INSERT CTE commits.
+  Fires only when ``OutboxBroker`` was constructed with ``dlq_table=...`` AND the row was
+  terminal-by-failure (any ``nacked_terminal`` reason). Skipped on lease-lost. Tags:
+  ``queue, subscriber, deliveries_count, failure_reason`` (same value set as
+  ``nacked_terminal``'s ``reason`` tag), and ``exception_type`` when ``last_exception`` was
+  set. Pair with ``nacked_terminal`` to alert on "row failed but audit didn't land"
+  (``nacked_terminal`` rate > ``dlq_written`` rate).
 * ``published`` — producer-side insert. Tags include ``status`` (``success`` | ``error``),
   ``count, size_bytes, duration_seconds``. No ``subscriber`` tag.
   ``count`` is **messages landed**, not publish attempts — errors and ``timer_id``

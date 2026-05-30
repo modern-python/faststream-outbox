@@ -134,7 +134,9 @@ def make_dlq_table(metadata: "MetaData", table_name: str = "outbox_dlq") -> Tabl
         Column("deliveries_count", BigInteger, nullable=False),
         Column("created_at", DateTime(timezone=True), nullable=False),
         Column("failed_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-        Column("failure_reason", String(32), nullable=False),
+        # 64 gives breathing room past the current 14-byte max ("retry_terminal") so the
+        # canonical set can grow without a migration that rewrites every audit row.
+        Column("failure_reason", String(64), nullable=False),
         Column("last_exception", String, nullable=True),
     )
     Index(f"{table_name}_queue_failed_idx", table.c.queue, table.c.failed_at)
