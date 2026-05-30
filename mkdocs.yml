@@ -9,6 +9,7 @@ nav:
   - Usage:
       - Basic usage: usage/basic.md
       - Subscriber: usage/subscriber.md
+      - Dead-letter queue: usage/dlq.md
       - Publisher: usage/publisher.md
       - Router: usage/router.md
       - FastAPI integration: usage/fastapi.md
