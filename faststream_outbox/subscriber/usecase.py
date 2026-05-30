@@ -124,6 +124,10 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         # wakeup. When LISTEN is unavailable the event simply never fires and the
         # loop sleeps the full adaptive interval.
         self._notify_event: asyncio.Event = asyncio.Event()
+        # Set by stop() to halt _fetch_inner before tasks are cancelled. Distinct
+        # from self.running: running must stay True during drain so FastStream's
+        # SubscriberUsecase.consume() doesn't early-exit on rows already in _inflight.
+        self._stopping: bool = False
 
     @property
     def _client(self) -> "AbstractOutboxClient":
@@ -168,8 +172,32 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
 
     @typing.override
     async def stop(self) -> None:
+        # Strict-bound drain. We intentionally DON'T call super().stop() because
+        # SubscriberUsecase.stop's MultiLock.wait_release(graceful_timeout) would
+        # either return instantly (healthy path; we already waited via
+        # _inflight.join, which is a stricter wait — it covers the whole
+        # dispatch_one including the handler that holds the MultiLock entry) or
+        # re-wait the same stuck handlers for another full budget (wedged path;
+        # 2x regression vs today). Inline TasksMixin's cleanup instead.
+        #
+        # Why two flags: flipping running=False first would defeat drain via
+        # SubscriberUsecase.consume()'s early-exit (queued rows would skip the
+        # handler). Halt fetch with _stopping, kick idle sleep with _notify_event,
+        # drain _inflight within graceful budget, then flip running and cancel
+        # any stragglers.
+        #
+        # Upstream equivalent (replaced):
+        #   TasksMixin.stop -> faststream/_internal/endpoint/subscriber/mixins.py
+        #   SubscriberUsecase.stop -> faststream/_internal/endpoint/subscriber/usecase.py
+        self._stopping = True
+        self._notify_event.set()
         with anyio.move_on_after(self._outer_config.graceful_timeout):
-            await super().stop()
+            await self._inflight.join()
+        self.running = False
+        for task in self.tasks:
+            if not task.done():
+                task.cancel()
+        self.tasks.clear()
 
     @property
     def _notify_channel(self) -> str:
@@ -230,7 +258,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         max_idle = self._config.max_fetch_interval
         idle_count = 0
         last_listen_check = time.monotonic()
-        while self.running:
+        while self.running and not self._stopping:
             if listen_conn is not None:
                 now = time.monotonic()
                 if now - last_listen_check >= _LISTEN_HEALTH_CHECK_INTERVAL:
