@@ -60,6 +60,11 @@ class OutboxInnerMessage:
     # Set by ``_nack`` when the strategy schedules a retry; consumed by the
     # subscriber's ``_flush_retry`` to drive ``mark_pending_with_lease``.
     pending_delay_seconds: float | None = field(default=None, init=False)
+    # Set on terminal-failure paths (``allow_delivery`` False, ``_nack`` exhausted,
+    # ``_reject``). ``_flush_terminal`` reads it to decide whether to build a DLQ
+    # payload. Stays ``None`` on the success (``_ack``) path so handler-success
+    # never touches the DLQ.
+    terminal_failure_reason: str | None = field(default=None, init=False)
 
     async def ack(self) -> None:
         await self._update_state_if_not_set(self._ack)
@@ -94,12 +99,14 @@ class OutboxInnerMessage:
         )
         if delay is None:
             self.to_delete = True
+            self.terminal_failure_reason = "retry_terminal"
         else:
             self.pending_delay_seconds = delay
 
     async def _reject(self) -> None:
         self._record_attempt()
         self.to_delete = True
+        self.terminal_failure_reason = "rejected"
 
     def _record_attempt(self) -> None:
         self.attempts_count += 1
@@ -113,6 +120,7 @@ class OutboxInnerMessage:
         if max_deliveries is not None and self.deliveries_count > max_deliveries:
             self.to_delete = True
             self.state_set = True
+            self.terminal_failure_reason = "max_deliveries"
             if logger is not None:
                 logger.log(
                     logging.ERROR,

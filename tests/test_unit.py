@@ -27,6 +27,7 @@ from faststream_outbox import (
     OutboxPublisher,
     OutboxRouter,
     TestOutboxBroker,
+    make_dlq_table,
     make_outbox_table,
 )
 from faststream_outbox.client import OutboxClient, _validate_schema_sync
@@ -1547,7 +1548,7 @@ async def test_dispatch_one_propagates_flush_error_when_writer_conn_set() -> Non
     """A flush error against a cached writer conn must propagate so _worker_loop can reconnect."""
 
     class RaisingFake(FakeOutboxClient):
-        async def delete_with_lease(self, conn: object, message_id: int, acquired_token: uuid.UUID) -> bool:  # noqa: ARG002
+        async def delete_with_lease(self, *args: object, **kwargs: object) -> bool:  # noqa: ARG002
             msg = "writer conn poisoned"
             raise RuntimeError(msg)
 
@@ -1564,7 +1565,7 @@ async def test_dispatch_one_swallows_flush_error_when_writer_conn_none() -> None
     """Legacy behavior: without a writer_conn, a raising delete is logged and swallowed."""
 
     class RaisingFake(FakeOutboxClient):
-        async def delete_with_lease(self, conn: object, message_id: int, acquired_token: uuid.UUID) -> bool:  # noqa: ARG002
+        async def delete_with_lease(self, *args: object, **kwargs: object) -> bool:  # noqa: ARG002
             msg = "delete blew up"
             raise RuntimeError(msg)
 
@@ -2415,3 +2416,243 @@ async def test_producer_emit_metric_swallows_recorder_exceptions(caplog: pytest.
     assert row_id == 99
     matching = [r for r in caplog.records if "metrics recorder raised" in r.getMessage() and r.exc_info is not None]
     assert matching, "expected DEBUG log 'metrics recorder raised' with exc_info"
+
+
+# --- make_dlq_table -----------------------------------------------------------
+
+
+def test_make_dlq_table_columns_present() -> None:
+    metadata = MetaData()
+    t = make_dlq_table(metadata, table_name="my_dlq")
+    expected = {
+        "id",
+        "original_id",
+        "queue",
+        "payload",
+        "headers",
+        "deliveries_count",
+        "created_at",
+        "failed_at",
+        "failure_reason",
+        "last_exception",
+    }
+    assert {c.name for c in t.columns} == expected
+    assert t.name == "my_dlq"
+
+
+def test_make_dlq_table_declares_queue_failed_index() -> None:
+    metadata = MetaData()
+    t = make_dlq_table(metadata, table_name="my_dlq")
+    idx = next(idx for idx in t.indexes if idx.name == "my_dlq_queue_failed_idx")
+    assert idx.unique is False
+    assert [c.name for c in idx.columns] == ["queue", "failed_at"]
+
+
+def test_make_dlq_table_attaches_to_metadata() -> None:
+    metadata = MetaData()
+    make_dlq_table(metadata, table_name="audit_dlq")
+    assert "audit_dlq" in metadata.tables
+
+
+def test_make_dlq_table_accepts_long_name_no_notify_check() -> None:
+    """Unlike ``make_outbox_table``, the DLQ has no NOTIFY channel — long names are allowed."""
+    metadata = MetaData()
+    long_name = "x" * 80  # would exceed 63 bytes if a NOTIFY channel were derived
+    t = make_dlq_table(metadata, table_name=long_name)
+    assert t.name == long_name
+
+
+# --- terminal_failure_reason wiring on OutboxInnerMessage ---------------------
+
+
+async def test_terminal_failure_reason_set_on_max_deliveries() -> None:
+    msg = _make_msg(deliveries_count=10)
+    assert msg.allow_delivery(max_deliveries=5, logger=None) is False
+    assert msg.terminal_failure_reason == "max_deliveries"
+
+
+async def test_terminal_failure_reason_set_on_retry_terminal_without_strategy() -> None:
+    msg = _make_msg()
+    await msg.nack()
+    assert msg.to_delete
+    assert msg.terminal_failure_reason == "retry_terminal"
+
+
+async def test_terminal_failure_reason_set_on_retry_strategy_returning_none() -> None:
+    msg = _make_msg(retry_strategy=NoRetry())
+    await msg.nack()
+    assert msg.terminal_failure_reason == "retry_terminal"
+
+
+async def test_terminal_failure_reason_unset_when_retry_scheduled() -> None:
+    msg = _make_msg(retry_strategy=ConstantRetry(delay_seconds=60))
+    await msg.nack()
+    assert msg.pending_delay_seconds == 60.0
+    assert msg.terminal_failure_reason is None
+
+
+async def test_terminal_failure_reason_set_on_reject() -> None:
+    msg = _make_msg()
+    await msg.reject()
+    assert msg.to_delete
+    assert msg.terminal_failure_reason == "rejected"
+
+
+async def test_terminal_failure_reason_unset_on_ack() -> None:
+    msg = _make_msg()
+    await msg.ack()
+    assert msg.to_delete
+    assert msg.terminal_failure_reason is None
+
+
+# --- _flush_terminal DLQ wiring -----------------------------------------------
+
+
+def _make_broker_with_dlq(recorder: typing.Any = None) -> tuple[OutboxBroker, TestOutboxBroker]:
+    metadata = MetaData()
+    table = make_outbox_table(metadata, table_name="outbox")
+    dlq = make_dlq_table(metadata, table_name="outbox_dlq")
+    kwargs: dict[str, typing.Any] = {"outbox_table": table, "dlq_table": dlq}
+    if recorder is not None:
+        kwargs["metrics_recorder"] = recorder
+    broker = OutboxBroker(**kwargs)
+
+    @broker.subscriber("orders", max_deliveries=1)
+    async def handle(body: dict) -> None: ...
+
+    test_broker = TestOutboxBroker(broker)
+    return broker, test_broker
+
+
+async def test_flush_terminal_builds_dlq_payload_when_failure_reason_set() -> None:
+    """A terminal failure with ``dlq_table`` configured threads dlq_payload through."""
+    broker, test_broker = _make_broker_with_dlq()
+    fake = FakeOutboxClient()
+    test_broker.fake_client = fake
+    msg = _make_msg(id=7, queue="orders", deliveries_count=3)
+    msg.terminal_failure_reason = "max_deliveries"
+    msg.last_exception = RuntimeError("boom")
+
+    with patch.object(fake, "delete_with_lease", new=AsyncMock(return_value=True)) as spy:
+        async with test_broker:
+            sub = next(iter(broker._subscribers))  # noqa: SLF001
+            await sub._flush_terminal(msg, writer_conn=None)  # noqa: SLF001
+
+    spy.assert_awaited_once()
+    assert spy.await_args is not None
+    kwargs = spy.await_args.kwargs
+    assert kwargs["dlq_payload"]["failure_reason"] == "max_deliveries"
+    assert "RuntimeError" in kwargs["dlq_payload"]["last_exception"]
+
+
+async def test_flush_terminal_no_dlq_payload_on_ack_path() -> None:
+    """Success-by-ack reaches _flush_terminal too (via to_delete) but reason stays None → no DLQ."""
+    broker, test_broker = _make_broker_with_dlq()
+    fake = FakeOutboxClient()
+    test_broker.fake_client = fake
+    msg = _make_msg(id=8, queue="orders")
+    # terminal_failure_reason stays None (handler succeeded).
+
+    with patch.object(fake, "delete_with_lease", new=AsyncMock(return_value=True)) as spy:
+        async with test_broker:
+            sub = next(iter(broker._subscribers))  # noqa: SLF001
+            await sub._flush_terminal(msg, writer_conn=None)  # noqa: SLF001
+
+    spy.assert_awaited_once()
+    assert spy.await_args is not None
+    assert spy.await_args.kwargs["dlq_payload"] is None
+
+
+async def test_flush_terminal_no_dlq_payload_when_dlq_unconfigured() -> None:
+    """Broker without ``dlq_table`` never builds dlq_payload, even on terminal failure."""
+    fake = FakeOutboxClient()
+    broker, test_broker = _make_broker_for_dispatch(fake)
+    msg = _make_msg(id=9, queue="orders", deliveries_count=3)
+    msg.terminal_failure_reason = "max_deliveries"
+
+    with patch.object(fake, "delete_with_lease", new=AsyncMock(return_value=True)) as spy:
+        async with test_broker:
+            sub = next(iter(broker._subscribers))  # noqa: SLF001
+            await sub._flush_terminal(msg, writer_conn=None)  # noqa: SLF001
+
+    spy.assert_awaited_once()
+    assert spy.await_args is not None
+    assert spy.await_args.kwargs["dlq_payload"] is None
+
+
+async def test_flush_terminal_emits_dlq_written_metric_after_successful_delete() -> None:
+    events, recorder = _events_recorder()
+    broker, test_broker = _make_broker_with_dlq(recorder)
+    fake = FakeOutboxClient()
+    test_broker.fake_client = fake
+    msg = _make_msg(id=10, queue="orders", deliveries_count=3)
+    msg.terminal_failure_reason = "retry_terminal"
+    msg.last_exception = RuntimeError("boom")
+
+    with patch.object(fake, "delete_with_lease", new=AsyncMock(return_value=True)):
+        async with test_broker:
+            sub = next(iter(broker._subscribers))  # noqa: SLF001
+            await sub._flush_terminal(msg, writer_conn=None)  # noqa: SLF001
+
+    dlq_events = [t for e, t in events if e == "dlq_written"]
+    assert len(dlq_events) == 1
+    assert dlq_events[0]["failure_reason"] == "retry_terminal"
+    assert dlq_events[0]["exception_type"] == "RuntimeError"
+    assert dlq_events[0]["queue"] == "orders"
+
+
+async def test_flush_terminal_does_not_emit_dlq_written_on_lease_lost() -> None:
+    """Lease-lost path (delete returned False) must skip the dlq_written emission."""
+    events, recorder = _events_recorder()
+    broker, test_broker = _make_broker_with_dlq(recorder)
+    fake = FakeOutboxClient()
+    test_broker.fake_client = fake
+    msg = _make_msg(id=11, queue="orders", deliveries_count=3)
+    msg.terminal_failure_reason = "max_deliveries"
+
+    with patch.object(fake, "delete_with_lease", new=AsyncMock(return_value=False)):
+        async with test_broker:
+            sub = next(iter(broker._subscribers))  # noqa: SLF001
+            await sub._flush_terminal(msg, writer_conn=None)  # noqa: SLF001
+
+    assert not any(e == "dlq_written" for e, _ in events)
+    assert [e for e, _ in events if e == "lease_lost"]
+
+
+async def test_flush_terminal_dlq_payload_includes_repr_of_exception() -> None:
+    """``last_exception`` is serialized via ``repr()`` — compact, type-aware."""
+    broker, test_broker = _make_broker_with_dlq()
+    fake = FakeOutboxClient()
+    test_broker.fake_client = fake
+    msg = _make_msg(id=12, queue="orders")
+    msg.terminal_failure_reason = "rejected"
+    msg.last_exception = ValueError("invalid payload")
+
+    with patch.object(fake, "delete_with_lease", new=AsyncMock(return_value=True)) as spy:
+        async with test_broker:
+            sub = next(iter(broker._subscribers))  # noqa: SLF001
+            await sub._flush_terminal(msg, writer_conn=None)  # noqa: SLF001
+
+    assert spy.await_args is not None
+    payload = spy.await_args.kwargs["dlq_payload"]
+    assert payload["last_exception"] == repr(ValueError("invalid payload"))
+
+
+async def test_flush_terminal_dlq_payload_last_exception_none_when_no_exc() -> None:
+    """Manual ``reject()`` without an exception → DLQ row with ``last_exception=None``."""
+    broker, test_broker = _make_broker_with_dlq()
+    fake = FakeOutboxClient()
+    test_broker.fake_client = fake
+    msg = _make_msg(id=13, queue="orders")
+    msg.terminal_failure_reason = "rejected"
+    # last_exception is None — operator chose to drop, no exception context.
+
+    with patch.object(fake, "delete_with_lease", new=AsyncMock(return_value=True)) as spy:
+        async with test_broker:
+            sub = next(iter(broker._subscribers))  # noqa: SLF001
+            await sub._flush_terminal(msg, writer_conn=None)  # noqa: SLF001
+
+    assert spy.await_args is not None
+    payload = spy.await_args.kwargs["dlq_payload"]
+    assert payload["failure_reason"] == "rejected"
+    assert payload["last_exception"] is None

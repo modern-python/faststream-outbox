@@ -540,7 +540,22 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
     ) -> None:
         if row.acquired_token is None:
             return
-        deleted = await self._client.delete_with_lease(writer_conn, row.id, row.acquired_token)
+        # Build the DLQ payload only when this row is terminal-by-failure AND the
+        # broker is configured with a DLQ table. Success-by-ack rows reach this
+        # method too (terminal=True via to_delete) but carry
+        # ``terminal_failure_reason is None`` and must not land in the DLQ.
+        dlq_payload: dict[str, typing.Any] | None = None
+        if row.terminal_failure_reason is not None and self._outer_config.dlq_table is not None:
+            dlq_payload = {
+                "failure_reason": row.terminal_failure_reason,
+                "last_exception": repr(row.last_exception) if row.last_exception is not None else None,
+            }
+        deleted = await self._client.delete_with_lease(
+            writer_conn,
+            row.id,
+            row.acquired_token,
+            dlq_payload=dlq_payload,
+        )
         if not deleted:
             self._log(
                 log_level=logging.WARNING,
@@ -560,6 +575,17 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                     "phase": "terminal",
                     "row_id": row.id,
                     "deliveries_count": row.deliveries_count,
+                },
+            )
+            return
+        if dlq_payload is not None:
+            self._emit_metric(
+                "dlq_written",
+                {
+                    **self._base_tags(row.queue),
+                    "deliveries_count": row.deliveries_count,
+                    "failure_reason": row.terminal_failure_reason,
+                    "exception_type": (type(row.last_exception).__name__ if row.last_exception is not None else None),
                 },
             )
 

@@ -119,11 +119,12 @@ class OutboxBroker(
 
     _subscribers: list["OutboxSubscriber"]
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         engine: "AsyncEngine | None" = None,
         *,
         outbox_table: "Table",
+        dlq_table: "Table | None" = None,
         decoder: CustomCallable | None = None,
         parser: CustomCallable | None = None,
         dependencies: Iterable["Dependant"] = (),
@@ -143,7 +144,8 @@ class OutboxBroker(
         tags: Iterable[Tag | TagDict] = (),
     ) -> None:
         self._outbox_table = outbox_table
-        client = OutboxClient(engine, outbox_table) if engine is not None else None
+        self._dlq_table = dlq_table
+        client = OutboxClient(engine, outbox_table, dlq_table=dlq_table) if engine is not None else None
         fd_config = FastDependsConfig(use_fastdepends=apply_types, serializer=serializer)
         recorder: MetricsRecorder = metrics_recorder or _noop_recorder
         producer = OutboxProducer(
@@ -156,6 +158,7 @@ class OutboxBroker(
             engine=engine,
             client=client,
             metrics_recorder=recorder,
+            dlq_table=dlq_table,
             broker_middlewares=(_CaptureExceptionMiddleware, *middlewares),
             broker_parser=parser,
             broker_decoder=decoder,

@@ -105,3 +105,37 @@ def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table
         postgresql_where=table.c.acquired_token.is_not(None),
     )
     return table
+
+
+def make_dlq_table(metadata: "MetaData", table_name: str = "outbox_dlq") -> Table:
+    """
+    Build the dead-letter-queue ``Table`` and attach it to *metadata*.
+
+    Opt-in companion to :func:`make_outbox_table`. Pass the returned table to
+    ``OutboxBroker(..., dlq_table=...)`` to enable archive-on-terminal-failure: the
+    broker copies ``payload`` / ``headers`` / failure context into this table in the
+    same Postgres statement as the outbox ``DELETE`` (atomic via CTE), so audit data
+    survives even if the worker crashes between the DELETE and a follow-up insert.
+
+    No FK to the outbox table — the row is gone in the same transaction, so the
+    constraint would be unsatisfiable. ``original_id`` is a plain BigInteger for
+    operator forensics; not unique (re-delivered ``timer_id`` rows could legitimately
+    fail twice). No LISTEN/NOTIFY channel — nobody polls the DLQ, so the 63-byte
+    identifier check in :func:`make_outbox_table` does not apply here.
+    """
+    table = Table(
+        table_name,
+        metadata,
+        Column("id", BigInteger, primary_key=True, autoincrement=True),
+        Column("original_id", BigInteger, nullable=False),
+        Column("queue", String(255), nullable=False),
+        Column("payload", LargeBinary, nullable=False),
+        Column("headers", JSONB, nullable=True),
+        Column("deliveries_count", BigInteger, nullable=False),
+        Column("created_at", DateTime(timezone=True), nullable=False),
+        Column("failed_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+        Column("failure_reason", String(32), nullable=False),
+        Column("last_exception", String, nullable=True),
+    )
+    Index(f"{table_name}_queue_failed_idx", table.c.queue, table.c.failed_at)
+    return table

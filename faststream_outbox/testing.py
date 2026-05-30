@@ -66,6 +66,10 @@ class FakeOutboxClient(AbstractOutboxClient):
     def __init__(self) -> None:
         self._rows: list[_FakeRow] = []
         self._next_id = 1
+        # Populated when ``delete_with_lease`` receives a ``dlq_payload``. Mirrors
+        # the real client's CTE side-effect: outbox row gone + DLQ row created in
+        # the same call. Tests assert against ``broker.fake_client.dlq_rows``.
+        self._dlq_rows: list[dict[str, typing.Any]] = []
 
     def feed(
         self,
@@ -95,6 +99,11 @@ class FakeOutboxClient(AbstractOutboxClient):
     @property
     def rows(self) -> list[_FakeRow]:
         return self._rows
+
+    @property
+    def dlq_rows(self) -> list[dict[str, typing.Any]]:
+        """Audit copies produced by ``delete_with_lease(..., dlq_payload=...)``."""
+        return self._dlq_rows
 
     @property
     def table(self) -> typing.Any:
@@ -141,9 +150,27 @@ class FakeOutboxClient(AbstractOutboxClient):
         conn: typing.Any,  # noqa: ARG002
         message_id: int,
         acquired_token: uuid.UUID,
+        *,
+        dlq_payload: "typing.Mapping[str, typing.Any] | None" = None,
     ) -> bool:
         for i, row in enumerate(self._rows):
             if row.id == message_id and row.acquired_token == acquired_token:
+                if dlq_payload is not None:
+                    # Mirror the real CTE side-effect: DLQ row materializes in the
+                    # same call as the DELETE, before the row is removed.
+                    self._dlq_rows.append(
+                        {
+                            "original_id": row.id,
+                            "queue": row.queue,
+                            "payload": row.payload,
+                            "headers": row.headers,
+                            "deliveries_count": row.deliveries_count,
+                            "created_at": row.created_at,
+                            "failed_at": _utcnow(),
+                            "failure_reason": dlq_payload["failure_reason"],
+                            "last_exception": dlq_payload["last_exception"],
+                        },
+                    )
                 del self._rows[i]
                 return True
         return False

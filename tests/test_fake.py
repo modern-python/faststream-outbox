@@ -21,6 +21,7 @@ from faststream_outbox import (
     OutboxRouter,
     RetryStrategyProto,
     TestOutboxBroker,
+    make_dlq_table,
     make_outbox_table,
 )
 from faststream_outbox.annotations import (
@@ -460,7 +461,7 @@ async def test_fake_broker_publish_invokes_flush_terminal_when_lease_lost() -> N
     """``delete_with_lease`` returning False is logged and skipped, not raised."""
 
     class LeaseLostClient(FakeOutboxClient):
-        async def delete_with_lease(self, conn: object, message_id: int, acquired_token: uuid.UUID) -> bool:  # noqa: ARG002
+        async def delete_with_lease(self, *args: object, **kwargs: object) -> bool:  # noqa: ARG002
             return False
 
     broker = _make_broker()
@@ -510,12 +511,19 @@ async def test_fake_broker_publish_swallows_post_consume_failure() -> None:
             super().__init__()
             self.calls = 0
 
-        async def delete_with_lease(self, conn: object, message_id: int, acquired_token: uuid.UUID) -> bool:
+        async def delete_with_lease(
+            self,
+            conn: object,
+            message_id: int,
+            acquired_token: uuid.UUID,
+            *,
+            dlq_payload: "typing.Mapping[str, typing.Any] | None" = None,
+        ) -> bool:
             self.calls += 1
             if self.calls == 1:
                 msg = "delete blew up"
                 raise RuntimeError(msg)
-            return await super().delete_with_lease(conn, message_id, acquired_token)
+            return await super().delete_with_lease(conn, message_id, acquired_token, dlq_payload=dlq_payload)
 
     broker = _make_broker()
     received: list[str] = []
@@ -1285,3 +1293,163 @@ async def test_annotations_inject_message_broker_producer_client() -> None:
     assert isinstance(captured["producer"], FakeOutboxProducer)
     assert isinstance(captured["client"], AbstractOutboxClient)
     assert captured["client"] is test_broker.fake_client
+
+
+# --- DLQ end-to-end through TestOutboxBroker -----------------------------------
+
+
+def _make_broker_with_dlq(
+    *,
+    recorder: typing.Any = None,
+    max_deliveries: int | None = None,
+    retry_strategy: RetryStrategyProto | None = None,
+    ack_policy: AckPolicy | None = None,
+) -> tuple[OutboxBroker, list[str], list[Exception]]:
+    """Build a broker with DLQ wired in. Returns (broker, received_payloads, raised)."""
+    metadata = MetaData()
+    table = make_outbox_table(metadata, table_name=f"dlq_test_{uuid.uuid4().hex[:8]}")
+    dlq = make_dlq_table(metadata, table_name=f"dlq_dlq_{uuid.uuid4().hex[:8]}")
+    kwargs: dict[str, typing.Any] = {"outbox_table": table, "dlq_table": dlq}
+    if recorder is not None:
+        kwargs["metrics_recorder"] = recorder
+    broker = OutboxBroker(**kwargs)
+
+    received: list[str] = []
+    raised: list[Exception] = []
+
+    sub_kwargs: dict[str, typing.Any] = {}
+    if max_deliveries is not None:
+        sub_kwargs["max_deliveries"] = max_deliveries
+    if retry_strategy is not None:
+        sub_kwargs["retry_strategy"] = retry_strategy
+    if ack_policy is not None:
+        sub_kwargs["ack_policy"] = ack_policy
+
+    @broker.subscriber("orders", **sub_kwargs)
+    async def handle(body: str) -> None:
+        received.append(body)
+        if raised:
+            raise raised[0]
+
+    return broker, received, raised
+
+
+async def test_fake_dlq_captures_retry_terminal_failure() -> None:
+    broker, _received, raised = _make_broker_with_dlq(retry_strategy=NoRetry())
+    raised.append(RuntimeError("boom"))
+    test_broker = TestOutboxBroker(broker)
+
+    async with test_broker:
+        await broker.publish("audit-me", queue="orders")  # ty: ignore[missing-argument]
+
+    assert test_broker.fake_client.rows == []
+    assert len(test_broker.fake_client.dlq_rows) == 1
+    row = test_broker.fake_client.dlq_rows[0]
+    assert row["queue"] == "orders"
+    assert row["failure_reason"] == "retry_terminal"
+    assert "RuntimeError" in row["last_exception"]
+    assert row["payload"]  # encoded body present
+    assert row["original_id"] is not None
+
+
+async def test_fake_dlq_captures_rejected_failure() -> None:
+    """``REJECT_ON_ERROR`` ack policy + raising handler → DLQ row with reason ``rejected``."""
+    with _warnings.catch_warnings():
+        # REJECT_ON_ERROR + a retry strategy triggers a misconfig warning at registration
+        # (the retry strategy is ignored). Pass NoRetry() to match the policy and ignore
+        # the warning — the runtime semantics we care about (single attempt → DLQ) hold.
+        _warnings.simplefilter("ignore", UserWarning)
+        broker, _received, raised = _make_broker_with_dlq(
+            ack_policy=AckPolicy.REJECT_ON_ERROR,
+            retry_strategy=NoRetry(),
+        )
+    raised.append(ValueError("poison message"))
+    test_broker = TestOutboxBroker(broker)
+
+    async with test_broker:
+        await broker.publish("poison", queue="orders")  # ty: ignore[missing-argument]
+
+    assert test_broker.fake_client.rows == []
+    assert len(test_broker.fake_client.dlq_rows) == 1
+    row = test_broker.fake_client.dlq_rows[0]
+    assert row["failure_reason"] == "rejected"
+    assert "ValueError" in row["last_exception"]
+
+
+async def test_fake_dlq_captures_max_deliveries_failure() -> None:
+    """A pre-seeded row over the max_deliveries cap routes through allow_delivery to DLQ."""
+    broker, _received, _raised = _make_broker_with_dlq(max_deliveries=1)
+    test_broker = TestOutboxBroker(broker)
+
+    async with test_broker:
+        # Seed the row directly with deliveries_count past the cap so dispatch_one's
+        # allow_delivery check fires immediately instead of running the handler.
+        test_broker.fake_client.feed(queue="orders", payload=b'"x"')
+        row = test_broker.fake_client.rows[0]
+        row.deliveries_count = 5
+        row.acquired_token = uuid.uuid4()
+        row.acquired_at = _dt.datetime.now(tz=_dt.UTC)
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        from faststream_outbox.testing import _to_inner  # noqa: PLC0415
+
+        await sub.dispatch_one(_to_inner(row), writer_conn=None)
+
+    assert test_broker.fake_client.rows == []
+    assert len(test_broker.fake_client.dlq_rows) == 1
+    assert test_broker.fake_client.dlq_rows[0]["failure_reason"] == "max_deliveries"
+
+
+async def test_fake_dlq_unconfigured_silently_deletes() -> None:
+    """Without ``dlq_table=...``, terminal failures DELETE and leave no audit trail."""
+    broker = _make_broker()
+
+    @broker.subscriber("orders", retry_strategy=NoRetry())
+    async def handle(body: str) -> None:
+        del body
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish("x", queue="orders")  # ty: ignore[missing-argument]
+
+    assert test_broker.fake_client.rows == []
+    assert test_broker.fake_client.dlq_rows == []
+
+
+async def test_fake_dlq_emits_dlq_written_metric() -> None:
+    events: list[tuple[str, dict]] = []
+
+    def recorder(event: str, tags: typing.Any) -> None:
+        events.append((event, dict(tags)))
+
+    broker, _received, raised = _make_broker_with_dlq(retry_strategy=NoRetry(), recorder=recorder)
+    raised.append(RuntimeError("metric-boom"))
+    test_broker = TestOutboxBroker(broker)
+
+    async with test_broker:
+        await broker.publish("x", queue="orders")  # ty: ignore[missing-argument]
+
+    dlq_events = [t for e, t in events if e == "dlq_written"]
+    assert len(dlq_events) == 1
+    assert dlq_events[0]["failure_reason"] == "retry_terminal"
+    assert dlq_events[0]["exception_type"] == "RuntimeError"
+    assert dlq_events[0]["queue"] == "orders"
+
+
+async def test_fake_dlq_not_emitted_on_handler_success() -> None:
+    events: list[tuple[str, dict]] = []
+
+    def recorder(event: str, tags: typing.Any) -> None:
+        events.append((event, dict(tags)))
+
+    broker, _received, _raised = _make_broker_with_dlq(recorder=recorder)
+    test_broker = TestOutboxBroker(broker)
+
+    async with test_broker:
+        await broker.publish("happy", queue="orders")  # ty: ignore[missing-argument]
+
+    assert not any(e == "dlq_written" for e, _ in events)
+    assert test_broker.fake_client.dlq_rows == []
+    # And the row should be deleted (handler succeeded).
+    assert test_broker.fake_client.rows == []
