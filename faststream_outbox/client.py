@@ -38,12 +38,12 @@ from sqlalchemy import (
 # don't call validate_schema() never trigger the runtime import path.
 from faststream_outbox._import_checker import is_alembic_installed
 from faststream_outbox.message import OutboxInnerMessage
-from faststream_outbox.schema import make_outbox_table
+from faststream_outbox.schema import make_dlq_table, make_outbox_table
 
 
 if TYPE_CHECKING:
     import typing
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from alembic.autogenerate import compare_metadata as _alembic_compare_metadata
     from alembic.migration import MigrationContext as _AlembicMigrationContext
@@ -95,6 +95,8 @@ class AbstractOutboxClient(abc.ABC):
         conn: "AsyncConnection | None",
         message_id: int,
         acquired_token: uuid.UUID,
+        *,
+        dlq_payload: "Mapping[str, typing.Any] | None" = None,
     ) -> bool: ...
 
     @abc.abstractmethod
@@ -118,9 +120,16 @@ class AbstractOutboxClient(abc.ABC):
 
 
 class OutboxClient(AbstractOutboxClient):
-    def __init__(self, engine: "AsyncEngine", outbox_table: "Table") -> None:
+    def __init__(
+        self,
+        engine: "AsyncEngine",
+        outbox_table: "Table",
+        *,
+        dlq_table: "Table | None" = None,
+    ) -> None:
         self._engine = engine
         self._table = outbox_table
+        self._dlq_table = dlq_table
 
     @property
     def table(self) -> "Table":
@@ -211,6 +220,8 @@ class OutboxClient(AbstractOutboxClient):
         conn: "AsyncConnection | None",
         message_id: int,
         acquired_token: uuid.UUID,
+        *,
+        dlq_payload: "Mapping[str, typing.Any] | None" = None,
     ) -> bool:
         """
         Delete *message_id* iff it still holds *acquired_token*. Returns True if deleted.
@@ -223,14 +234,88 @@ class OutboxClient(AbstractOutboxClient):
         ``rowcount == 0`` and is silently dropped, whether *conn* is in autocommit
         (production path) or in an outer transaction (tests). See :meth:`fetch` for why
         *conn* is ``AsyncConnection | None`` instead of ``AsyncConnection``.
+
+        When *dlq_payload* is provided **and** the client was constructed with a
+        ``dlq_table``, the statement becomes a single CTE that DELETEs the outbox row
+        and INSERTs the audit copy into the DLQ atomically:
+
+            WITH deleted AS (
+                DELETE FROM <outbox> WHERE id=:id AND acquired_token=:token
+                RETURNING id, queue, payload, headers, deliveries_count, created_at
+            )
+            INSERT INTO <dlq> (original_id, queue, payload, headers, deliveries_count,
+                               created_at, failure_reason, last_exception)
+            SELECT id, queue, payload, headers, deliveries_count, created_at,
+                   :failure_reason, :last_exception
+            FROM deleted;
+
+        Lease-lost ⇒ ``deleted`` is empty ⇒ INSERT inserts nothing ⇒ ``rowcount == 0``,
+        same observable as the no-DLQ path. A DLQ-write failure (schema mismatch,
+        disk full) rolls back the whole statement, so the outbox row stays leased
+        and is reclaimed when the lease expires — DLQ misconfiguration surfaces as
+        outbox growth + ``lease_lost`` spikes rather than silently dropping audit
+        data. ``dlq_payload`` carries ``{"failure_reason": str, "last_exception":
+        str | None}``; the keys are required.
         """
         if conn is None:
             msg = "OutboxClient.delete_with_lease requires a live AsyncConnection (got None)"
             raise TypeError(msg)
+        if dlq_payload is not None and self._dlq_table is not None:
+            stmt, params = self._build_dlq_cte_stmt(message_id, acquired_token, dlq_payload)
+            result = await conn.execute(stmt, params)
+            return (result.rowcount or 0) > 0
         t = self._table
-        stmt = delete(t).where(t.c.id == message_id, t.c.acquired_token == acquired_token)
-        result = await conn.execute(stmt)
+        del_stmt = delete(t).where(t.c.id == message_id, t.c.acquired_token == acquired_token)
+        result = await conn.execute(del_stmt)
         return (result.rowcount or 0) > 0
+
+    def _build_dlq_cte_stmt(
+        self,
+        message_id: int,
+        acquired_token: uuid.UUID,
+        dlq_payload: "Mapping[str, typing.Any]",
+    ) -> "tuple[typing.Any, dict[str, typing.Any]]":
+        """
+        Compose the single-statement DLQ CTE plus the parameter dict.
+
+        Identifiers are quoted via the dialect's identifier preparer so reserved words
+        and odd characters survive interpolation. The outbox/DLQ table names are
+        application-controlled (from the user's ``MetaData``), not request-derived
+        input, so the quoting is a robustness/correctness safeguard not a security
+        boundary.
+        """
+        # ``self._dlq_table`` is guaranteed non-None at the only call site (the guard
+        # in ``delete_with_lease``); local alias narrows the type for the formatting.
+        dlq_table = self._dlq_table
+        assert dlq_table is not None  # noqa: S101
+        preparer = self._engine.dialect.identifier_preparer
+        outbox_name = preparer.quote(self._table.name)
+        dlq_name = preparer.quote(dlq_table.name)
+        # S608: outbox_name / dlq_name come from application-defined SQLAlchemy
+        # Table objects (not request input) and are quoted via the dialect's
+        # identifier preparer — values flow through :bindparam placeholders.
+        cte_sql = (
+            f"WITH deleted AS ("  # noqa: S608
+            f"DELETE FROM {outbox_name} "
+            f"WHERE id = :message_id AND acquired_token = :acquired_token "
+            f"RETURNING id, queue, payload, headers, deliveries_count, created_at"
+            f") "
+            f"INSERT INTO {dlq_name} ("
+            f"original_id, queue, payload, headers, deliveries_count, created_at, "
+            f"failure_reason, last_exception"
+            f") "
+            f"SELECT id, queue, payload, headers, deliveries_count, created_at, "
+            f":failure_reason, :last_exception "
+            f"FROM deleted"
+        )
+        sql = text(cte_sql)
+        params = {
+            "message_id": message_id,
+            "acquired_token": acquired_token,
+            "failure_reason": dlq_payload["failure_reason"],
+            "last_exception": dlq_payload["last_exception"],
+        }
+        return sql, params
 
     async def mark_pending_with_lease(
         self,
@@ -277,14 +362,17 @@ class OutboxClient(AbstractOutboxClient):
 
     async def validate_schema(self) -> None:
         """
-        Validate that the database table matches the package's expected columns.
+        Validate that the database table(s) match the package's expected columns.
 
-        Raises ``RuntimeError`` listing every mismatch. Opt-in: call from your startup
-        hook or ``/health`` endpoint, not from ``broker.start()`` (so Alembic can run
+        Raises ``RuntimeError`` listing every mismatch across the outbox table and,
+        when configured, the DLQ table. Opt-in: call from your startup hook or
+        ``/health`` endpoint, not from ``broker.start()`` (so Alembic can run
         migrations against the same DB without blocking startup).
         """
         async with self._engine.connect() as conn:
             errors = await conn.run_sync(_validate_schema_sync, self._table)
+            if self._dlq_table is not None:
+                errors.extend(await conn.run_sync(_validate_dlq_schema_sync, self._dlq_table))
         if errors:
             msg = "Outbox schema mismatch: " + "; ".join(errors)
             raise RuntimeError(msg)
@@ -316,13 +404,28 @@ def _row_to_message(row: dict) -> OutboxInnerMessage:
 
 
 def _validate_schema_sync(connection: "Connection", table: "Table") -> list[str]:
+    """Run the outbox-table validation pass; see :func:`_run_validate` for the diff machinery."""
+    return _run_validate(connection, table, make_outbox_table)
+
+
+def _validate_dlq_schema_sync(connection: "Connection", table: "Table") -> list[str]:
+    """Run the DLQ-table validation pass; see :func:`_run_validate` for the diff machinery."""
+    return _run_validate(connection, table, make_dlq_table)
+
+
+def _run_validate(
+    connection: "Connection",
+    table: "Table",
+    canonical_factory: "Callable[[MetaData, str], Table]",
+) -> list[str]:
     """
     Run Alembic's autogenerate diff against the live DB and surface any "missing schema" drift.
 
-    The canonical schema is whatever ``make_outbox_table`` produces — the same Table the user
-    attaches to their own ``MetaData``. Delegating to Alembic avoids re-implementing column /
-    index comparison logic (which would diverge from the declaration over time) and keeps the
-    package out of the schema-management business that Alembic already owns.
+    The canonical schema is whatever ``canonical_factory`` produces — the same Table the user
+    attaches to their own ``MetaData`` via ``make_outbox_table`` / ``make_dlq_table``. Delegating
+    to Alembic avoids re-implementing column / index comparison logic (which would diverge from
+    the declaration over time) and keeps the package out of the schema-management business that
+    Alembic already owns.
 
     ``add_*`` and ``modify_*`` ops fail validation (the DB is missing or has the wrong shape for
     something the broker needs). ``remove_*`` ops are ignored — the user may have extra columns
@@ -341,10 +444,10 @@ def _validate_schema_sync(connection: "Connection", table: "Table") -> list[str]
         msg = "validate_schema() requires alembic. Install with `pip install faststream-outbox[validate]`."
         raise ImportError(msg)
 
-    # Isolated MetaData containing ONLY the canonical outbox table, so the user's
+    # Isolated MetaData containing ONLY the canonical table, so the user's
     # domain tables (in their own MetaData) don't show up in the diff.
     canonical_metadata = MetaData()
-    make_outbox_table(canonical_metadata, table_name=table.name)
+    canonical_factory(canonical_metadata, table.name)
 
     def _include_name(name: str | None, type_: str, parent_names: "Mapping[str, str | None]") -> bool:
         if type_ == "schema":

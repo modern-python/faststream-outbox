@@ -12,6 +12,7 @@ A producer writes a domain entity and an outbox row in the *same* SQLAlchemy tra
 - [How it works](introduction/how-it-works.md)
 - [Basic usage](usage/basic.md)
 - [Subscriber](usage/subscriber.md)
+- [Dead-letter queue](usage/dlq.md)
 - [Publisher](usage/publisher.md)
 - [Router](usage/router.md)
 - [FastAPI integration](usage/fastapi.md)

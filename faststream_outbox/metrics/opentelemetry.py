@@ -65,6 +65,7 @@ _ATTR_HANDLER = "messaging.outbox.handler"
 _ATTR_STATUS = "messaging.outbox.status"  # acked | nacked | error
 _ATTR_TERMINAL_REASON = "messaging.outbox.terminal_reason"
 _ATTR_LEASE_PHASE = "messaging.outbox.lease_phase"
+_ATTR_DLQ_REASON = "messaging.outbox.dlq_reason"
 
 
 class OpenTelemetryRecorder:
@@ -140,6 +141,14 @@ class OpenTelemetryRecorder:
             unit="event",
             description="Lease-token mismatches on terminal write",
         )
+        # Pairs with the ``nacked_terminal`` event so dashboards can compare
+        # "row failed terminally" against "audit landed" to detect DLQ
+        # misconfiguration (schema mismatch, etc.) without silent data loss.
+        self._dlq_written = self._meter.create_counter(
+            name="messaging.outbox.dlq_written",
+            unit="event",
+            description="DLQ audit rows written by terminal flush, broken down by reason",
+        )
 
     def _attrs(self, tags: Mapping[str, typing.Any], *, operation: str) -> dict[str, typing.Any]:
         attrs: dict[str, typing.Any] = {
@@ -184,6 +193,15 @@ class OpenTelemetryRecorder:
             attrs[_ATTR_LEASE_PHASE] = tags["phase"]
             attrs[_ATTR_ERROR_TYPE] = "lease_lost"
             self._lease_lost.add(1, attrs)
+            return
+
+        if event == "dlq_written":
+            attrs = self._attrs(tags, operation="process")
+            attrs[_ATTR_DLQ_REASON] = tags["failure_reason"]
+            exc = tags.get("exception_type")
+            if exc is not None:
+                attrs[_ATTR_ERROR_TYPE] = exc
+            self._dlq_written.add(1, attrs)
             return
 
         if event == "published":

@@ -14,7 +14,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from faststream.message.message import StreamMessage
 
@@ -23,6 +23,13 @@ if TYPE_CHECKING:
     from faststream._internal.basic_types import LoggerProto
 
     from faststream_outbox.retry import RetryStrategyProto
+
+
+# Public contract for the DLQ ``failure_reason`` column and the ``reason`` tag on
+# ``nacked_terminal`` / ``dlq_written`` metric events. Operators query against these
+# literals (and dashboards key labels off them) — adding a new value is a public
+# API change. The DLQ column is sized to accommodate growth; see ``schema.py``.
+DLQFailureReason = Literal["max_deliveries", "retry_terminal", "rejected"]
 
 
 def _utcnow() -> _dt.datetime:
@@ -60,6 +67,12 @@ class OutboxInnerMessage:
     # Set by ``_nack`` when the strategy schedules a retry; consumed by the
     # subscriber's ``_flush_retry`` to drive ``mark_pending_with_lease``.
     pending_delay_seconds: float | None = field(default=None, init=False)
+    # Set on terminal-failure paths (``allow_delivery`` False, ``_nack`` exhausted,
+    # ``_reject``). ``_flush_terminal`` reads it to decide whether to build a DLQ
+    # payload; ``dispatch_one`` reads it to pick the ``nacked_terminal`` reason
+    # tag. Stays ``None`` on the success (``_ack``) path so handler-success
+    # never touches the DLQ.
+    terminal_failure_reason: "DLQFailureReason | None" = field(default=None, init=False)
 
     async def ack(self) -> None:
         await self._update_state_if_not_set(self._ack)
@@ -94,12 +107,14 @@ class OutboxInnerMessage:
         )
         if delay is None:
             self.to_delete = True
+            self.terminal_failure_reason = "retry_terminal"
         else:
             self.pending_delay_seconds = delay
 
     async def _reject(self) -> None:
         self._record_attempt()
         self.to_delete = True
+        self.terminal_failure_reason = "rejected"
 
     def _record_attempt(self) -> None:
         self.attempts_count += 1
@@ -113,6 +128,7 @@ class OutboxInnerMessage:
         if max_deliveries is not None and self.deliveries_count > max_deliveries:
             self.to_delete = True
             self.state_set = True
+            self.terminal_failure_reason = "max_deliveries"
             if logger is not None:
                 logger.log(
                     logging.ERROR,

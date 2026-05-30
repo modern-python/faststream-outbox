@@ -161,7 +161,30 @@ def test_prometheus_published_exception_uses_destination_label() -> None:
 
 def test_prometheus_unknown_event_is_silently_ignored() -> None:
     _, rec = _make_recorder()
-    rec("dlq_written", {"queue": "q", "subscriber": "h"})  # forward-compat
+    rec("future_event_not_yet_added", {"queue": "q", "subscriber": "h"})  # forward-compat
+
+
+def test_prometheus_dlq_written_records_reason_label() -> None:
+    reg, rec = _make_recorder()
+    rec(
+        "dlq_written",
+        {
+            "queue": "q",
+            "subscriber": "h",
+            "deliveries_count": 3,
+            "failure_reason": "retry_terminal",
+            "exception_type": "RuntimeError",
+        },
+    )
+    assert _sample(reg, "faststream_outbox_dlq_written_total", {**_base_labels(), "reason": "retry_terminal"}) == 1.0
+
+
+def test_prometheus_dlq_written_supports_all_failure_reasons() -> None:
+    reg, rec = _make_recorder()
+    for reason in ("max_deliveries", "retry_terminal", "rejected"):
+        rec("dlq_written", {"queue": "q", "subscriber": "h", "failure_reason": reason})
+    for reason in ("max_deliveries", "retry_terminal", "rejected"):
+        assert _sample(reg, "faststream_outbox_dlq_written_total", {**_base_labels(), "reason": reason}) == 1.0
 
 
 def test_prometheus_app_name_label_is_applied() -> None:

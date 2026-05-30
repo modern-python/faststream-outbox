@@ -12,7 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 
 from faststream_outbox import (
     ConstantRetry,
+    NoRetry,
     OutboxBroker,
+    make_dlq_table,
     make_outbox_table,
 )
 from faststream_outbox.client import OutboxClient
@@ -1219,3 +1221,130 @@ async def test_broker_stop_runs_subscribers_concurrently(
     # Three 0.3s handlers in parallel ~ 0.3s + slack. Sequential would be >= 0.9s.
     # 0.7s upper guard catches a regression to sequential broker.stop.
     assert elapsed < 0.7, f"broker.stop() took {elapsed:.3f}s — looks sequential"
+
+
+# --- DLQ (issue #26) -----------------------------------------------------------
+
+
+async def _dlq_rows(engine: AsyncEngine, table: Table) -> list[dict]:
+    async with engine.connect() as conn:
+        result = await conn.execute(select(table).order_by(table.c.id))
+        return [dict(row) for row in result.mappings().all()]
+
+
+async def test_validate_schema_passes_for_correct_dlq_table(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+    dlq_table: Table,
+) -> None:
+    client = OutboxClient(pg_engine, outbox_table, dlq_table=dlq_table)
+    await client.validate_schema()
+
+
+async def test_validate_schema_fails_for_missing_dlq_table(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+) -> None:
+    """When ``dlq_table`` is configured, validate_schema also checks the DLQ table."""
+    metadata = MetaData()
+    missing_dlq = make_dlq_table(metadata, table_name="does_not_exist_dlq_xyz")
+    client = OutboxClient(pg_engine, outbox_table, dlq_table=missing_dlq)
+    with pytest.raises(RuntimeError, match="does_not_exist_dlq_xyz"):
+        await client.validate_schema()
+
+
+async def test_dlq_atomic_insert_with_delete(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+    dlq_table: Table,
+) -> None:
+    """End-to-end: a terminal-failure handler triggers DELETE+INSERT in one CTE."""
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table, dlq_table=dlq_table)
+    handled = asyncio.Event()
+
+    @broker.subscriber("orders", retry_strategy=NoRetry(), min_fetch_interval=0.02)
+    async def handle(body: dict) -> None:
+        del body
+        handled.set()
+        msg = "always fails"
+        raise RuntimeError(msg)
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with broker:
+        async with session_factory() as session, session.begin():
+            await broker.publish({"audit": True}, queue="orders", session=session, correlation_id="trace-dlq")
+        await asyncio.wait_for(handled.wait(), timeout=5.0)
+        # Exit ``async with broker`` triggers stop() → graceful drain, so the
+        # worker's terminal flush (the CTE) has fully committed before we assert.
+
+    assert await _row_count(pg_engine, outbox_table) == 0
+    rows = await _dlq_rows(pg_engine, dlq_table)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["queue"] == "orders"
+    assert row["failure_reason"] == "retry_terminal"
+    assert row["last_exception"] is not None
+    assert "RuntimeError" in row["last_exception"]
+    assert row["headers"] is not None
+    assert row["headers"].get("correlation_id") == "trace-dlq"
+    assert row["original_id"] is not None
+    assert row["payload"] is not None
+
+
+async def test_dlq_insert_failure_rolls_back_delete(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+) -> None:
+    """A DLQ-write failure rolls back the whole CTE — the outbox row stays leased."""
+    # Configure the broker with a DLQ table that doesn't actually exist in the DB
+    # (we create the canonical schema but skip create_all so the INSERT fails).
+    metadata = MetaData()
+    missing_dlq = make_dlq_table(metadata, table_name=f"does_not_exist_dlq_{uuid.uuid4().hex[:8]}")
+    client = OutboxClient(pg_engine, outbox_table, dlq_table=missing_dlq)
+
+    # Seed an outbox row and acquire its lease so we can drive ``delete_with_lease``.
+    async with pg_engine.begin() as conn:
+        await conn.execute(insert(outbox_table).values(queue="orders", payload=b"poison"))
+    async with pg_engine.connect() as fetch_conn:
+        rows = await client.fetch(fetch_conn, ["orders"], limit=1, lease_ttl_seconds=60.0)
+    assert len(rows) == 1
+    row = rows[0]
+
+    async with pg_engine.connect() as raw_conn:
+        writer_conn = await raw_conn.execution_options(isolation_level="AUTOCOMMIT")
+        with pytest.raises(Exception, match="does_not_exist_dlq"):
+            await client.delete_with_lease(
+                writer_conn,
+                row.id,
+                row.acquired_token,  # ty: ignore[invalid-argument-type]
+                dlq_payload={"failure_reason": "retry_terminal", "last_exception": "RuntimeError('x')"},
+            )
+
+    # Outbox row still present — the CTE was atomic, INSERT failure rolled back DELETE.
+    assert await _row_count(pg_engine, outbox_table) == 1
+
+
+async def test_dlq_cte_returns_false_when_lease_already_lost(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+    dlq_table: Table,
+) -> None:
+    """When the lease was reclaimed by another worker, the CTE deletes nothing AND writes no DLQ row."""
+    client = OutboxClient(pg_engine, outbox_table, dlq_table=dlq_table)
+    async with pg_engine.begin() as conn:
+        await conn.execute(insert(outbox_table).values(queue="orders", payload=b"x"))
+    async with pg_engine.connect() as fetch_conn:
+        rows = await client.fetch(fetch_conn, ["orders"], limit=1, lease_ttl_seconds=60.0)
+
+    async with pg_engine.connect() as raw_conn:
+        writer_conn = await raw_conn.execution_options(isolation_level="AUTOCOMMIT")
+        # Wrong token = lease lost.
+        deleted = await client.delete_with_lease(
+            writer_conn,
+            rows[0].id,
+            uuid.uuid4(),
+            dlq_payload={"failure_reason": "retry_terminal", "last_exception": "RuntimeError('x')"},
+        )
+    assert deleted is False
+    assert await _row_count(pg_engine, outbox_table) == 1  # outbox row still leased
+    assert await _row_count(pg_engine, dlq_table) == 0  # no DLQ row from a no-op CTE

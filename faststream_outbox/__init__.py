@@ -18,7 +18,7 @@ from faststream_outbox.retry import (
     RetryStrategyProto,
 )
 from faststream_outbox.router import OutboxRouter
-from faststream_outbox.schema import make_outbox_table
+from faststream_outbox.schema import make_dlq_table, make_outbox_table
 from faststream_outbox.testing import TestOutboxBroker
 
 
@@ -35,6 +35,7 @@ __all__ = [
     "OutboxRouter",
     "RetryStrategyProto",
     "TestOutboxBroker",
+    "make_dlq_table",
     "make_outbox_table",
 ]
 
