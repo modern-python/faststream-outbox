@@ -6,6 +6,7 @@ own SQLAlchemy transaction; the row commits with their domain writes. The broker
 owns subscribers on the consumer side.
 """
 
+import asyncio
 import datetime as _dt
 import logging
 import typing
@@ -207,6 +208,41 @@ class OutboxBroker(
     async def start(self) -> None:
         await self.connect()
         await super().start()
+
+    @typing.override
+    async def stop(self, *_args: object, **_kwargs: object) -> None:
+        # Concurrent subscriber stop. Sequential parent stop (BrokerUsecase.stop's
+        # ``for sub in subscribers: await sub.stop()``) would give a total bound of
+        # N x graceful_timeout, exceeding K8s default terminationGracePeriodSeconds=30s
+        # for N>=2 subscribers under the default 15s budget. Gather collapses that
+        # to ~max(per-sub) ~ graceful_timeout.
+        #
+        # return_exceptions=True so one stuck subscriber doesn't block the others
+        # from draining; failures are logged but never re-raised — shutdown must
+        # complete even if individual subscribers misbehave.
+        #
+        # Upstream equivalent (replaced):
+        #   BrokerUsecase.stop -> faststream/_internal/broker/broker.py
+        results = await asyncio.gather(
+            *(sub.stop() for sub in self.subscribers),
+            return_exceptions=True,
+        )
+        for sub, result in zip(self.subscribers, results, strict=True):
+            if isinstance(result, BaseException):
+                self._log_subscriber_stop_error(sub, result)
+        self.running = False
+
+    def _log_subscriber_stop_error(self, sub: object, exc: BaseException) -> None:
+        logger_state = self.config.broker_config.logger
+        log = logger_state.logger.logger if logger_state is not None else None
+        if log is not None:
+            log.log(
+                logging.ERROR,
+                "Outbox subscriber %s stop raised: %r",
+                sub,
+                exc,
+                exc_info=exc,
+            )
 
     @typing.override
     async def ping(self, timeout: float | None = None) -> bool:

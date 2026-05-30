@@ -1103,3 +1103,119 @@ async def test_end_to_end_metrics_recorder_retry_then_terminal(pg_engine, outbox
     assert len(retried) >= 1
     assert any(t["reason"] == "retry_terminal" for t in terminals)
     assert all(t["exception_type"] == "RuntimeError" for t in retried)
+
+
+async def _wait_until_claimed(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+    *,
+    timeout: float,  # noqa: ASYNC109
+) -> None:
+    deadline = asyncio.get_event_loop().time() + timeout
+    stmt = select(outbox_table.c.id).where(outbox_table.c.acquired_token.is_(None))
+    while asyncio.get_event_loop().time() < deadline:
+        async with pg_engine.connect() as conn:
+            unclaimed = (await conn.execute(stmt)).fetchall()
+        if not unclaimed:
+            return
+        await asyncio.sleep(0.02)
+    msg = "fetch never claimed every row"  # pragma: no cover
+    raise AssertionError(msg)  # pragma: no cover
+
+
+async def test_drain_finishes_inflight_rows_before_returning(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+) -> None:
+    """Rows claimed by fetch must run to completion when broker.stop() is called."""
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table, graceful_timeout=5.0)
+    handled: list[int] = []
+
+    @broker.subscriber(
+        "orders",
+        min_fetch_interval=0.02,
+        max_fetch_interval=0.05,
+        max_workers=4,
+        fetch_batch_size=20,
+    )
+    async def handle(body: dict) -> None:
+        await asyncio.sleep(0.1)
+        handled.append(body["i"])
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with broker:
+        async with session_factory() as session, session.begin():
+            for i in range(20):
+                await broker.publish({"i": i}, queue="orders", session=session)
+        await _wait_until_claimed(pg_engine, outbox_table, timeout=3.0)
+        await broker.stop()
+
+    assert sorted(handled) == list(range(20))
+    assert await _row_count(pg_engine, outbox_table) == 0
+
+
+async def test_drain_returns_within_graceful_timeout_when_handler_wedges(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+) -> None:
+    """Wedged handlers must be cancelled within graceful_timeout (no 2x wait)."""
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table, graceful_timeout=0.3)
+    started = asyncio.Event()
+
+    @broker.subscriber("orders", min_fetch_interval=0.02, max_fetch_interval=0.05)
+    async def handle(body: dict) -> None:
+        del body
+        started.set()
+        await asyncio.sleep(60.0)  # never returns voluntarily
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with broker:
+        async with session_factory() as session, session.begin():
+            await broker.publish({"i": 0}, queue="orders", session=session)
+        await asyncio.wait_for(started.wait(), timeout=3.0)
+        start = asyncio.get_event_loop().time()
+        await broker.stop()
+        elapsed = asyncio.get_event_loop().time() - start
+
+    # Strict bound: ~graceful_timeout for drain + cancellation propagation slack.
+    # The 2x-regression failure mode (re-waiting MultiLock inside super().stop())
+    # would push this past 0.6s; 0.7s is the safe upper guard.
+    assert elapsed < 0.7, f"broker.stop() took {elapsed:.3f}s — strict-bound regression"
+    # Row preserved with lease set: another replica reclaims after lease_ttl.
+    assert await _row_count(pg_engine, outbox_table) == 1
+
+
+async def test_broker_stop_runs_subscribers_concurrently(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+) -> None:
+    """``OutboxBroker.stop``'s gather collapses N x graceful_timeout to ~max(per-sub)."""
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table, graceful_timeout=2.0)
+    started = [asyncio.Event() for _ in range(3)]
+    finished: list[str] = []
+
+    def register(queue: str, idx: int) -> None:
+        @broker.subscriber(queue, min_fetch_interval=0.02, max_fetch_interval=0.05)
+        async def handle(body: dict) -> None:
+            del body
+            started[idx].set()
+            await asyncio.sleep(0.3)
+            finished.append(queue)
+
+    for idx, queue in enumerate(("q-a", "q-b", "q-c")):
+        register(queue, idx)
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with broker:
+        async with session_factory() as session, session.begin():
+            for queue in ("q-a", "q-b", "q-c"):
+                await broker.publish({"q": queue}, queue=queue, session=session)
+        await asyncio.gather(*(asyncio.wait_for(e.wait(), timeout=3.0) for e in started))
+        start = asyncio.get_event_loop().time()
+        await broker.stop()
+        elapsed = asyncio.get_event_loop().time() - start
+
+    assert sorted(finished) == ["q-a", "q-b", "q-c"]
+    # Three 0.3s handlers in parallel ~ 0.3s + slack. Sequential would be >= 0.9s.
+    # 0.7s upper guard catches a regression to sequential broker.stop.
+    assert elapsed < 0.7, f"broker.stop() took {elapsed:.3f}s — looks sequential"

@@ -479,6 +479,46 @@ async def test_broker_ping_when_engine_query_fails() -> None:
     assert await broker.ping() is False
 
 
+async def test_broker_stop_logs_subscriber_failure_and_completes() -> None:
+    """A raising sub.stop must be logged via the helper, swallowed, and not re-raised."""
+    broker = _make_broker()
+
+    async def noop(body: dict) -> None: ...
+
+    broker.subscriber("orders")(noop)
+
+    async def raising_stop() -> None:
+        msg = "subscriber boom"
+        raise RuntimeError(msg)
+
+    sub = next(iter(broker.subscribers))
+    with (
+        patch.object(sub, "stop", new=raising_stop),
+        patch.object(broker, "_log_subscriber_stop_error") as log_spy,
+    ):
+        await broker.stop()  # must not re-raise
+
+    log_spy.assert_called_once()
+    logged_sub, logged_exc = log_spy.call_args.args
+    assert logged_sub is sub
+    assert isinstance(logged_exc, RuntimeError)
+    assert broker.running is False
+
+
+async def test_broker_log_subscriber_stop_error_emits_error_via_configured_logger() -> None:
+    """``_log_subscriber_stop_error`` routes through the configured logger at ERROR."""
+    broker = _make_broker()
+    mock_logger = MagicMock()
+    broker.config.broker_config.logger.logger.logger = mock_logger
+    err = RuntimeError("boom")
+    broker._log_subscriber_stop_error("sub-x", err)  # noqa: SLF001
+
+    mock_logger.log.assert_called_once()
+    args, kwargs = mock_logger.log.call_args
+    assert args[0] == logging.ERROR
+    assert kwargs["exc_info"] is err
+
+
 # --- registrator validation ---
 
 
