@@ -128,18 +128,43 @@ worker crashed before the terminal `DELETE` landed.
 The trade-off: handlers must be **idempotent**. A handler that succeeded
 but whose `DELETE` failed to land will be retried.
 
-## No archive, no DLQ
+## Opt-in DLQ on terminal failure
 
-Terminal failures `DELETE` the row. There is no archive table and no
-dead-letter queue. If you need to preserve failed messages, log them from
-the handler before the terminal failure propagates, or attach an audit
-column to the outbox table (the schema validator ignores extras you add).
+By default, terminal failures `DELETE` the row — no archive table, no
+dead-letter queue. Pass `dlq_table=make_dlq_table(metadata)` to the broker
+and terminal-by-failure rows are copied into a sibling audit table in the
+same Postgres statement as the `DELETE`:
+
+```python
+from faststream_outbox import OutboxBroker, make_dlq_table, make_outbox_table
+
+metadata = MetaData()
+outbox_table = make_outbox_table(metadata, table_name="outbox")
+dlq_table = make_dlq_table(metadata, table_name="outbox_dlq")
+broker = OutboxBroker(engine, outbox_table=outbox_table, dlq_table=dlq_table)
+```
+
+Successful rows are never archived — the success path stays a plain
+`DELETE`. Three failure paths land in the DLQ with a `failure_reason`
+column: `max_deliveries`, `retry_terminal`, `rejected`. Atomicity is via a
+single CTE (`DELETE … RETURNING` → `INSERT INTO <dlq>`), so DLQ-write
+failures roll back the `DELETE` — misconfiguration surfaces as outbox
+growth plus `lease_lost` spikes rather than silent audit loss. When
+`dlq_table` is configured, `broker.validate_schema()` checks both tables
+in one call and reports drift on either one. See the
+[Dead-letter queue](../usage/dlq.md) page for the schema, atomicity, and
+retention story.
+
+If you don't want a DLQ, you can still preserve failed messages by logging
+from the handler before the terminal failure propagates, or by attaching
+an audit column to the outbox table (the schema validator ignores extras
+you add).
 
 ## Failure modes
 
 - **Handlers must be idempotent.** Crash between commit-of-handler-side-effects and the broker's `DELETE` re-delivers the message.
 - **Best-effort ordering only.** `FOR UPDATE SKIP LOCKED` does not preserve strict order under concurrent workers. If you need strict per-aggregate ordering, route to a single subscriber and run a single worker.
-- **No DLQ / archive.** Terminal failures `DELETE` the row.
+- **DLQ is opt-in.** Without `dlq_table=`, terminal failures `DELETE` the row.
 
 ## Acknowledgements
 
@@ -149,7 +174,8 @@ broker`) on upstream FastStream — the FastStream broker/registrator/subscriber
 wiring, the `SELECT … FOR UPDATE SKIP LOCKED` fetch-and-claim CTE, the retry
 strategy hierarchy, and the in-transaction publish contract all originate
 from there. This package is a Postgres-only reimplementation that diverges in
-storage model (lease tokens instead of an explicit state column, no archive
-table), loop structure (two loops instead of four), wake-up mechanism
-(`LISTEN/NOTIFY`), and adds timer mechanics. Credit for the original design
+storage model (lease tokens instead of an explicit state column, opt-in
+DLQ instead of a mandatory archive table), loop structure (two loops
+instead of four), wake-up mechanism (`LISTEN/NOTIFY`), and adds timer
+mechanics. Credit for the original design
 belongs to Arseniy.
