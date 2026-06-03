@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING
 
 from faststream._internal.basic_types import SendableMessage
 from faststream._internal.broker.router import BrokerRouter, SubscriberRoute
-from faststream._internal.types import BrokerMiddleware, CustomCallable, SubscriberMiddleware
+from faststream._internal.types import BrokerMiddleware, CustomCallable
 from faststream.middlewares import AckPolicy
 
 from faststream_outbox.configs import OutboxBrokerConfig
@@ -36,7 +36,6 @@ class OutboxRoute(SubscriberRoute):
         dependencies: Iterable["Dependant"] = (),
         parser: CustomCallable | None = None,
         decoder: CustomCallable | None = None,
-        middlewares: Sequence[SubscriberMiddleware[OutboxInnerMessage]] = (),
         title_: str | None = None,
         description_: str | None = None,
         include_in_schema: bool = True,
@@ -55,7 +54,6 @@ class OutboxRoute(SubscriberRoute):
             dependencies=dependencies,
             parser=parser,
             decoder=decoder,
-            middlewares=middlewares,
             title_=title_,
             description_=description_,
             include_in_schema=include_in_schema,

@@ -25,7 +25,7 @@ from fastapi.routing import APIRoute
 from fastapi.utils import generate_unique_id
 from faststream._internal.constants import EMPTY
 from faststream._internal.fastapi import StreamRouter
-from faststream._internal.types import BrokerMiddleware, CustomCallable, SubscriberMiddleware
+from faststream._internal.types import BrokerMiddleware, CustomCallable
 from faststream.middlewares import AckPolicy
 from starlette.responses import JSONResponse
 
@@ -39,7 +39,6 @@ if typing.TYPE_CHECKING:
     from fastapi.types import IncEx
     from faststream._internal.basic_types import LoggerProto
     from faststream._internal.context import ContextRepo
-    from faststream._internal.types import PublisherMiddleware
     from faststream.middlewares import BaseMiddleware
     from faststream.specification.base import SpecificationFactory
     from faststream.specification.schema.extra import Tag, TagDict
@@ -49,7 +48,6 @@ if typing.TYPE_CHECKING:
     from starlette.types import ASGIApp, Lifespan
 
     from faststream_outbox.publisher.usecase import OutboxPublisher
-    from faststream_outbox.response import OutboxPublishCommand
     from faststream_outbox.retry import RetryStrategyProto
     from faststream_outbox.subscriber.usecase import OutboxSubscriber
 
@@ -167,7 +165,6 @@ class OutboxRouter(StreamRouter[OutboxInnerMessage]):
         dependencies: Iterable["params.Depends"] = (),
         parser: CustomCallable | None = None,
         decoder: CustomCallable | None = None,
-        middlewares: Sequence[SubscriberMiddleware[OutboxInnerMessage]] = (),
         title_: str | None = None,
         description_: str | None = None,
         include_in_schema: bool = True,
@@ -198,7 +195,6 @@ class OutboxRouter(StreamRouter[OutboxInnerMessage]):
                 dependencies=dependencies,
                 parser=parser,
                 decoder=decoder,
-                middlewares=middlewares,
                 title_=title_,
                 description_=description_,
                 include_in_schema=include_in_schema,
@@ -217,7 +213,6 @@ class OutboxRouter(StreamRouter[OutboxInnerMessage]):
         queue: str,
         *,
         headers: dict[str, str] | None = None,
-        middlewares: Sequence["PublisherMiddleware[OutboxPublishCommand]"] = (),
         title: str | None = None,
         description: str | None = None,
         schema: typing.Any | None = None,
@@ -228,7 +223,6 @@ class OutboxRouter(StreamRouter[OutboxInnerMessage]):
         return self.broker.publisher(
             queue,
             headers=headers,
-            middlewares=middlewares,
             title=title,
             description=description,
             schema=schema,

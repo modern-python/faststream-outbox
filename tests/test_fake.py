@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from faststream import Context as _Context
+from faststream._internal.producer import ProducerProto
 from faststream.middlewares import AckPolicy
 from sqlalchemy import MetaData
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -70,6 +71,16 @@ async def _wait_until(predicate: Callable[[], object], *, timeout: float = 2.0) 
         await asyncio.sleep(0.05)
     msg = "timed out waiting for predicate"  # pragma: no cover
     raise AssertionError(msg)  # pragma: no cover
+
+
+def test_fake_outbox_producer_satisfies_producer_proto() -> None:
+    """FakeOutboxProducer satisfies ProducerProto: codec attribute present, no missing structural members."""
+    broker = _make_broker()
+    fc = FakeOutboxClient()
+    fp = FakeOutboxProducer(fc, broker, serializer=None, run_loops=False)
+    missing = typing.get_protocol_members(ProducerProto) - set(dir(fp))
+    assert not missing, f"FakeOutboxProducer missing ProducerProto attrs: {missing}"
+    assert fp.codec is None
 
 
 # --- Sync-mode tests (default TestOutboxBroker) ---------------------------------------
@@ -401,26 +412,6 @@ async def test_fake_broker_router_subscriber_receives_publish() -> None:
         await broker.publish("via-router", queue="orders")  # ty: ignore[missing-argument]
 
     assert received == ["via-router"]
-
-
-async def test_publisher_accepts_middlewares_kwarg() -> None:
-    """B3: ``broker.publisher(..., middlewares=...)`` threads the middleware through to publish."""
-    broker = _make_broker()
-    seen: list[str] = []
-
-    async def record_middleware(call_next: typing.Callable, cmd: typing.Any) -> typing.Any:
-        seen.append(f"before:{cmd.destination}")
-        result = await call_next(cmd)
-        seen.append(f"after:{cmd.destination}")
-        return result
-
-    publisher = broker.publisher("orders", middlewares=(record_middleware,))
-
-    test_broker = TestOutboxBroker(broker)
-    async with test_broker:
-        await publisher.publish({"x": 1}, session=_fake_session())
-
-    assert seen == ["before:orders", "after:orders"]
 
 
 async def test_outbox_route_accepts_ack_policy() -> None:

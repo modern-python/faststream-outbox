@@ -1,9 +1,9 @@
 import warnings
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, override
 
 from faststream._internal.broker.registrator import Registrator
-from faststream._internal.types import CustomCallable, SubscriberMiddleware
+from faststream._internal.types import CustomCallable
 from faststream.middlewares import AckPolicy
 
 from faststream_outbox.message import OutboxInnerMessage
@@ -15,9 +15,7 @@ from faststream_outbox.subscriber.factory import create_subscriber
 
 if TYPE_CHECKING:
     from fast_depends.dependencies import Dependant
-    from faststream._internal.types import PublisherMiddleware
 
-    from faststream_outbox.response import OutboxPublishCommand
     from faststream_outbox.retry import RetryStrategyProto
     from faststream_outbox.subscriber.usecase import OutboxSubscriber
 
@@ -57,7 +55,6 @@ class OutboxRegistrator(Registrator[OutboxInnerMessage, "OutboxBrokerConfig"]): 
         dependencies: Iterable["Dependant"] = (),
         parser: CustomCallable | None = None,
         decoder: CustomCallable | None = None,
-        middlewares: Sequence[SubscriberMiddleware[OutboxInnerMessage]] = (),
         title_: str | None = None,
         description_: str | None = None,
         include_in_schema: bool = True,
@@ -96,7 +93,6 @@ class OutboxRegistrator(Registrator[OutboxInnerMessage, "OutboxBrokerConfig"]): 
             parser_=parser or self._parser,
             decoder_=decoder or self._decoder,
             dependencies_=dependencies,
-            middlewares_=middlewares,
         )
 
     @override
@@ -105,7 +101,6 @@ class OutboxRegistrator(Registrator[OutboxInnerMessage, "OutboxBrokerConfig"]): 
         queue: str,
         *,
         headers: dict[str, str] | None = None,
-        middlewares: Sequence["PublisherMiddleware[OutboxPublishCommand]"] = (),
         title: str | None = None,
         description: str | None = None,
         schema: Any | None = None,
@@ -119,14 +114,10 @@ class OutboxRegistrator(Registrator[OutboxInnerMessage, "OutboxBrokerConfig"]): 
         subscriber raises ``NotImplementedError`` at decoration time, since the dispatch
         loop has no reachable ``AsyncSession`` without breaking the outbox transactional
         contract.
-
-        *middlewares* run around every ``publisher.publish(...)`` call (and around
-        ``broker.publish(...)`` when this publisher is used as the response publisher).
         """
         publisher = create_publisher(
             queue=queue,
             headers=headers,
-            middlewares=middlewares,
             broker_config=self.config,  # ty: ignore[invalid-argument-type]
             title_=title,
             description_=description,
