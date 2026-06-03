@@ -16,6 +16,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `tests/test_unit.py` and `tests/test_fake.py` need no Postgres — runnable with `uv run pytest tests/test_unit.py` directly. `tests/test_integration.py` requires Postgres at `POSTGRES_DSN` (default `postgresql+asyncpg://outbox:outbox@localhost:5432/outbox`); the `pg_engine` fixture skips if unreachable. Coverage is on by default (`pyproject.toml` `addopts`) with a strict `--cov-fail-under=100` ratchet — partial runs (`pytest -k name`, a single test file, etc.) will fail that gate. Pass `--no-cov` or `--cov-fail-under=0` when iterating locally on a subset; the full `just test` run satisfies the gate.
 
+## Workflow
+
+Per-feature workflow: brainstorming → spec in `planning/specs/YYYY-MM-DD-<slug>-design.md` → writing-plans → plan in `planning/plans/YYYY-MM-DD-<slug>-plan.md` → executing-plans / subagent-driven-development → requesting-code-review → finishing-a-development-branch.
+
+Topic slugs are kebab-case descriptions (e.g. `dlq-on-terminal-failure`), not story IDs.
+
 ## Architecture
 
 The package wires a FastStream `Broker`/`Registrator`/`Subscriber` trio whose transport is Postgres rows, not a message bus.
