@@ -8,19 +8,13 @@ from faststream_outbox.publisher.usecase import OutboxPublisher
 
 
 if typing.TYPE_CHECKING:
-    from collections.abc import Sequence
-
-    from faststream._internal.types import PublisherMiddleware
-
     from faststream_outbox.configs import OutboxBrokerConfig
-    from faststream_outbox.response import OutboxPublishCommand
 
 
 def create_publisher(
     *,
     queue: str,
     headers: dict[str, str] | None,
-    middlewares: "Sequence[PublisherMiddleware[OutboxPublishCommand]]",
     broker_config: "OutboxBrokerConfig",
     title_: str | None,
     description_: str | None,
@@ -31,7 +25,6 @@ def create_publisher(
         _outer_config=broker_config,
         queue=queue,
         headers=headers,
-        middlewares=middlewares,
     )
     specification = OutboxPublisherSpecification(
         _outer_config=broker_config,

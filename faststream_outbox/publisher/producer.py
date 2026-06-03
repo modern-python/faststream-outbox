@@ -14,6 +14,7 @@ import time
 import typing
 
 from faststream._internal.endpoint.utils import ParserComposition
+from faststream._internal.parser import DefaultCodec
 from sqlalchemy import Float, Table, bindparam, func, insert, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -30,6 +31,7 @@ if typing.TYPE_CHECKING:
     from collections.abc import Mapping
 
     from fast_depends.library.serializer import SerializerProto
+    from faststream._internal.parser import CodecProto
     from faststream._internal.types import AsyncCallable, CustomCallable
 
 
@@ -50,6 +52,10 @@ class OutboxProducer:
         self._table = table
         self._channel = f"outbox_{table.name}"
         self.serializer: SerializerProto | None = None
+        # ProducerProto[0.7] requires a `codec` attribute. The outbox owns its
+        # own encoding pipeline (_encode_payload) and never reads this attribute
+        # at runtime — it exists solely to satisfy the protocol.
+        self.codec: CodecProto = DefaultCodec()
         default = OutboxParser()
         self._parser = ParserComposition(parser, default.parse_message)
         self._decoder = ParserComposition(decoder, default.decode_message)

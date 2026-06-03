@@ -280,6 +280,9 @@ class FakeOutboxProducer:
 
     _parser: typing.Any = None
     _decoder: typing.Any = None
+    # ProducerProto[0.7] requires `codec`. The fake producer ignores it at
+    # runtime, same as OutboxProducer.
+    codec: typing.Any = None
 
     def __init__(
         self,
@@ -601,8 +604,8 @@ class TestOutboxBroker(TestBroker[OutboxBroker]):  # ty: ignore[invalid-type-arg
         finally:
             broker.config.broker_config.client = original_client
 
-    @staticmethod
     def create_publisher_fake_subscriber(  # pragma: no cover
+        self,
         broker: OutboxBroker,
         publisher: typing.Any,
     ) -> tuple["OutboxSubscriber", bool]:
@@ -611,7 +614,7 @@ class TestOutboxBroker(TestBroker[OutboxBroker]):  # ty: ignore[invalid-type-arg
         # ``FakeOutboxProducer`` already lands rows in the fake client AND drives
         # the real subscriber via ``_sync_dispatch``. The FastStream
         # publisher-spy infrastructure would mock the real handler and break that.
-        del broker, publisher
+        del self, broker, publisher
         msg = "TestOutboxBroker handles publisher dispatch via FakeOutboxProducer; this is unreachable."
         raise NotImplementedError(msg)
 

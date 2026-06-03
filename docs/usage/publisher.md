@@ -100,9 +100,7 @@ async def checkout(order: Order, session: AsyncSession) -> None:
 ```
 
 Per-call `headers` are merged with the decorator's static headers
-(per-call wins). Per-publisher `middlewares=` wrap every
-`publisher.publish(...)` call — useful for tracing spans, metrics
-counters, or audit-log writes scoped to a single queue.
+(per-call wins).
 
 The publisher exists primarily for AsyncAPI spec coverage and to
 encapsulate per-queue config (static headers, etc.).

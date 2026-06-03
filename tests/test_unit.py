@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import faststream.asgi.factories.asyncapi.try_it_out
 import pytest
+from faststream._internal.parser import DefaultCodec
+from faststream._internal.producer import ProducerProto
 from faststream.exceptions import IncorrectState
 from faststream.middlewares import AckPolicy
 from faststream.response.publish_type import PublishType
@@ -904,6 +906,17 @@ def test_broker_exposes_outbox_producer() -> None:
     broker = _make_broker()
     producer = broker.config.broker_config.producer
     assert isinstance(producer, OutboxProducer)
+
+
+def test_outbox_producer_satisfies_producer_proto() -> None:
+    """OutboxProducer satisfies ProducerProto: codec attribute present, no missing structural members."""
+    table = make_outbox_table(MetaData())
+    producer = OutboxProducer(table=table, parser=None, decoder=None)
+    # Verify all ProducerProto structural members are present (Protocol is not
+    # @runtime_checkable so isinstance() raises TypeError; check attrs directly).
+    missing = typing.get_protocol_members(ProducerProto) - set(dir(producer))
+    assert not missing, f"OutboxProducer missing ProducerProto attrs: {missing}"
+    assert isinstance(producer.codec, DefaultCodec)
 
 
 # --- Publisher / producer / spec coverage edges ---

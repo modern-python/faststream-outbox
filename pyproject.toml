@@ -9,7 +9,7 @@ readme = "README.md"
 requires-python = ">=3.13,<4"
 license = "MIT"
 dependencies = [
-    "faststream>=0.6,<0.7",
+    "faststream>=0.7,<0.8",
     "sqlalchemy[asyncio]>=2.0",
 ]
 
