@@ -626,6 +626,7 @@ class TestOutboxBroker(TestBroker[OutboxBroker, OutboxBroker]):  # ty: ignore[in
         patch_broker_calls(broker)  # ty: ignore[invalid-argument-type]
         for subscriber in broker.subscribers:
             subscriber._post_start()  # noqa: SLF001
+        broker._warn_on_unstarted_foreign_publishers()  # noqa: SLF001
         # In sync mode, publish drives dispatch directly — don't spawn the loops.
         if not self.run_loops:
             return

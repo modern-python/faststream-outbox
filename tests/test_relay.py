@@ -1,3 +1,4 @@
+import logging
 from typing import Any
 from unittest import mock
 
@@ -186,3 +187,33 @@ async def test_outbox_response_with_foreign_publisher_raises() -> None:
     async with TestKafkaBroker(broker_kafka), TestOutboxBroker(broker_outbox, run_loops=False) as outbox:
         with pytest.raises(RuntimeError, match="OutboxResponse"):
             await outbox.publish({"x": 1}, queue="relay_queue", session=None)  # ty: ignore[invalid-argument-type]
+
+
+async def test_unstarted_foreign_broker_warns_on_start(caplog: pytest.LogCaptureFixture) -> None:
+    """
+    Log one WARNING per unstarted foreign broker at start() time.
+
+    If a foreign-publisher decorator is on an outbox subscriber but the
+    foreign broker has not been started, start(broker_outbox) logs a single
+    WARNING per unstarted foreign broker.
+    """
+    metadata = MetaData()
+    outbox_table = make_outbox_table(metadata)
+    broker_outbox = OutboxBroker(outbox_table=outbox_table)
+    broker_kafka = KafkaBroker("kafka://test:9092")
+    publisher_kafka = broker_kafka.publisher("relay_topic")
+
+    @publisher_kafka
+    @broker_outbox.subscriber("relay_queue")
+    async def relay(body: dict[str, Any]) -> dict[str, Any]:
+        return body
+
+    with caplog.at_level(logging.WARNING, logger="faststream_outbox"):
+        async with TestOutboxBroker(broker_outbox, run_loops=False):
+            pass  # start triggered inside __aenter__
+
+    matching = [r for r in caplog.records if r.levelno == logging.WARNING and "relay_queue" in r.getMessage()]
+    assert len(matching) == 1, (
+        f"Expected exactly one WARNING referencing relay_queue, got {len(matching)}: "
+        f"{[r.getMessage() for r in caplog.records]}"
+    )
