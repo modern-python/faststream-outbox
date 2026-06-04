@@ -4,6 +4,7 @@ from unittest import mock
 
 import pytest
 from faststream.kafka import KafkaBroker, KafkaRouter, TestKafkaBroker
+from faststream.response import Response
 from sqlalchemy import MetaData
 
 from faststream_outbox import OutboxBroker, OutboxResponse, OutboxRouter, make_outbox_table
@@ -163,6 +164,45 @@ async def test_propagate_inbound_headers_false_drops_inbound_headers() -> None:
             )
 
     assert len(captured) == 1
+    assert "x-trace-id" not in captured[0]
+
+
+async def test_propagate_inbound_headers_true_does_not_override_explicit_response_headers() -> None:
+    """
+    Even with propagate_inbound_headers=True, explicit user-set Response headers win.
+
+    The subscriber only fills headers when ``result_msg.headers`` is empty;
+    a handler that returns ``Response(value, headers=...)`` keeps its choice.
+    """
+    metadata = MetaData()
+    outbox_table = make_outbox_table(metadata)
+    broker_outbox = OutboxBroker(outbox_table=outbox_table)
+    broker_kafka = KafkaBroker("kafka://test:9092")
+    publisher_kafka = broker_kafka.publisher("relay_topic")
+
+    @publisher_kafka
+    @broker_outbox.subscriber("relay_queue", propagate_inbound_headers=True)
+    async def relay(body: dict[str, Any]) -> Response:
+        return Response(body, headers={"x-explicit": "set-by-handler"})
+
+    captured: list[dict[str, str]] = []
+    original_publish = publisher_kafka._publish  # noqa: SLF001
+
+    async def capture_publish(cmd: Any, **kwargs: Any) -> Any:
+        captured.append(dict(cmd.headers))
+        return await original_publish(cmd, **kwargs)
+
+    async with TestKafkaBroker(broker_kafka), TestOutboxBroker(broker_outbox, run_loops=False) as outbox:
+        with mock.patch.object(publisher_kafka, "_publish", side_effect=capture_publish):
+            await outbox.publish(
+                {"hi": 1},
+                queue="relay_queue",
+                session=None,  # ty: ignore[invalid-argument-type]
+                headers={"x-trace-id": "should-not-clobber"},
+            )
+
+    assert len(captured) == 1
+    assert captured[0].get("x-explicit") == "set-by-handler"
     assert "x-trace-id" not in captured[0]
 
 
