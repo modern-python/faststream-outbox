@@ -518,7 +518,7 @@ def _build_fake_fetch_unprocessed(
     return fake_fetch_unprocessed
 
 
-class TestOutboxBroker(TestBroker[OutboxBroker]):  # ty: ignore[invalid-type-arguments]
+class TestOutboxBroker(TestBroker[OutboxBroker, OutboxBroker]):  # ty: ignore[invalid-type-arguments]
     """
     Test harness for ``OutboxBroker``. Two dispatch modes.
 

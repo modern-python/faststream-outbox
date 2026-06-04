@@ -1442,3 +1442,16 @@ async def test_fake_dlq_not_emitted_on_handler_success() -> None:
     assert test_broker.fake_client.dlq_rows == []
     # And the row should be deleted (handler succeeded).
     assert test_broker.fake_client.rows == []
+
+
+async def test_test_broker_aenter_returns_single_outbox_broker() -> None:
+    """
+    0.7.1's EnterType binding means TestOutboxBroker yields a single OutboxBroker, not a list/tuple.
+
+    Guards the contract through the upstream typing refactor: even if the base
+    class signature changes again, our single-broker subclass must always hand
+    back a single broker instance.
+    """
+    broker = _make_broker()
+    async with TestOutboxBroker(broker) as br:
+        assert isinstance(br, OutboxBroker)
