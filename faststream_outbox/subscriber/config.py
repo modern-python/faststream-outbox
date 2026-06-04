@@ -22,6 +22,7 @@ class OutboxSubscriberConfig(SubscriberUsecaseConfig):
     max_fetch_interval: float
     lease_ttl_seconds: float
     max_deliveries: int | None
+    propagate_inbound_headers: bool
 
     @property
     def ack_policy(self) -> AckPolicy:

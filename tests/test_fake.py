@@ -1112,6 +1112,7 @@ async def test_subscriber_config_ack_policy_returns_explicit_value() -> None:
         max_fetch_interval=10.0,
         lease_ttl_seconds=60.0,
         max_deliveries=None,
+        propagate_inbound_headers=False,
     )
     assert cfg.ack_policy is AckPolicy.REJECT_ON_ERROR
 

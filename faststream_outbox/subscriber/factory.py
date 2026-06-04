@@ -27,6 +27,7 @@ def create_subscriber(
     max_deliveries: int | None,
     config: "OutboxBrokerConfig",
     ack_policy: AckPolicy | None = None,
+    propagate_inbound_headers: bool = False,
     title_: str | None = None,
     description_: str | None = None,
     include_in_schema: bool = True,
@@ -52,6 +53,7 @@ def create_subscriber(
         max_fetch_interval=max_fetch_interval,
         lease_ttl_seconds=lease_ttl_seconds,
         max_deliveries=max_deliveries,
+        propagate_inbound_headers=propagate_inbound_headers,
     )
     specification_config = OutboxSubscriberSpecificationConfig(
         queues=queues,

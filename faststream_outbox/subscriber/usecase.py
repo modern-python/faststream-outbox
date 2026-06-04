@@ -27,11 +27,14 @@ import random
 import time
 import typing
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager, suppress
+from itertools import chain
 
 import anyio
 from faststream._internal.endpoint.subscriber import SubscriberSpecification, SubscriberUsecase
 from faststream._internal.endpoint.subscriber.mixins import TasksMixin
+from faststream.exceptions import SubscriberNotFound
+from faststream.response.utils import ensure_response
 from faststream.specification.asyncapi.utils import resolve_payloads
 from faststream.specification.schema import Message, Operation, SubscriberSpec
 
@@ -95,6 +98,7 @@ if typing.TYPE_CHECKING:
     from faststream._internal.endpoint.publisher import PublisherProto
     from faststream._internal.endpoint.subscriber.call_item import CallsCollection
     from faststream.message import StreamMessage
+    from faststream.response.response import Response
     from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
     from faststream_outbox.client import AbstractOutboxClient
@@ -672,6 +676,93 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         # the ``publish``/``request`` boilerplate from the native FakePublisher base.
         # Safe to ignore — those methods are unreachable for response publishers.
         return (OutboxFakePublisher(producer=self._outer_config.producer),)  # ty: ignore[invalid-return-type]
+
+    @typing.override
+    async def process_message(self, msg: OutboxInnerMessage) -> "Response":  # type: ignore[override]  # noqa: C901
+        """
+        Outbox-specific process_message — header propagation (G3) hook.
+
+        Optionally fills empty Response headers with the inbound message's
+        headers when ``propagate_inbound_headers=True``. Task 5 adds the
+        OutboxResponse + foreign-publisher dual-fire guard (G1) here too.
+
+        # Upstream equivalent (replaced):
+        #   SubscriberUsecase.process_message
+        #   -> faststream/_internal/endpoint/subscriber/usecase.py
+
+        Divergence from upstream is strictly additive — the chain composition,
+        middleware ordering, parsing-error rethrow, and AckPolicy semantics are
+        preserved verbatim. Any new cleanup added upstream to process_message
+        must be mirrored here.
+        """
+        context = self._outer_config.fd_config.context
+        logger_state = self._outer_config.logger
+
+        async with AsyncExitStack() as stack:
+            stack.enter_context(self.lock)
+            stack.enter_context(context.scope("handler_", self))
+            stack.enter_context(context.scope("logger", logger_state.logger.logger))
+            for k, v in self._outer_config.extra_context.items():
+                stack.enter_context(context.scope(k, v))
+
+            middlewares: list[typing.Any] = []
+            for base_m in self._SubscriberUsecase__build__middlewares_stack():  # ty: ignore[unresolved-attribute]
+                middleware = base_m(msg, context=context)
+                middlewares.append(middleware)
+                await middleware.__aenter__()
+
+            cache: dict[typing.Any, typing.Any] = {}
+            parsing_error: Exception | None = None
+            for h in self.calls:
+                try:
+                    message = await h.is_suitable(msg, cache)
+                except Exception as e:  # noqa: BLE001
+                    parsing_error = e
+                    break
+
+                if message is not None:
+                    stack.enter_context(
+                        context.scope("log_context", self.get_log_context(message)),
+                    )
+                    stack.enter_context(context.scope("message", message))
+
+                    for m in middlewares:
+                        stack.push_async_exit(m.__aexit__)
+
+                    result_msg = ensure_response(
+                        await h.call(
+                            message=message,
+                            _extra_middlewares=(m.consume_scope for m in middlewares[::-1]),
+                        ),
+                    )
+
+                    if not result_msg.correlation_id:
+                        result_msg.correlation_id = message.correlation_id
+
+                    if self._config.propagate_inbound_headers and not result_msg.headers:
+                        result_msg.headers = dict(message.headers)
+
+                    for p in chain(
+                        self._SubscriberUsecase__get_response_publisher(message),  # ty: ignore[unresolved-attribute]
+                        h.handler._publishers,  # noqa: SLF001
+                    ):
+                        await p._publish(  # noqa: SLF001
+                            result_msg.as_publish_command(),
+                            _extra_middlewares=(m.publish_scope for m in middlewares[::-1]),
+                        )
+
+                    return result_msg
+
+            for m in middlewares:
+                stack.push_async_exit(m.__aexit__)
+
+            if parsing_error:
+                raise parsing_error
+
+            error_msg = f"There is no suitable handler for {msg=}"
+            raise SubscriberNotFound(error_msg)
+
+        return ensure_response(None)
 
     def get_log_context(
         self,
