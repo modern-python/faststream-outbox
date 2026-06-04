@@ -4,9 +4,11 @@ import asyncio
 import datetime as _dt
 import json
 import uuid
+from typing import Any
 from unittest import mock
 
 import pytest
+from faststream.kafka import KafkaBroker, TestKafkaBroker
 from sqlalchemy import MetaData, Table, event, insert, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
@@ -1348,3 +1350,59 @@ async def test_dlq_cte_returns_false_when_lease_already_lost(
     assert deleted is False
     assert await _row_count(pg_engine, outbox_table) == 1  # outbox row still leased
     assert await _row_count(pg_engine, dlq_table) == 0  # no DLQ row from a no-op CTE
+
+
+async def test_relay_at_least_once_under_foreign_publish_failure(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+) -> None:
+    """
+    Assert at-least-once delivery to a foreign broker under simulated publish failure.
+
+    Foreign publish that fails on the first attempt is retried via the
+    outbox's retry_strategy; the row eventually clears after a successful
+    second attempt.
+    """
+    broker_outbox = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    broker_kafka = KafkaBroker("kafka://test:9092")
+    publisher_kafka = broker_kafka.publisher("relay_topic")
+
+    call_count = 0
+    original_publish = publisher_kafka._publish  # noqa: SLF001
+
+    async def flaky_publish(cmd: Any, **kwargs: Any) -> Any:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            msg = "simulated foreign-publish failure"
+            raise RuntimeError(msg)
+        return await original_publish(cmd, **kwargs)
+
+    @publisher_kafka
+    @broker_outbox.subscriber(
+        "relay_queue",
+        max_workers=1,
+        min_fetch_interval=0.05,
+        max_fetch_interval=0.2,
+        lease_ttl_seconds=2.0,
+        retry_strategy=ConstantRetry(delay_seconds=0.1, max_attempts=5),
+    )
+    async def relay(body: dict[str, Any]) -> dict[str, Any]:
+        return body
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+
+    with mock.patch.object(publisher_kafka, "_publish", side_effect=flaky_publish):
+        async with TestKafkaBroker(broker_kafka), broker_outbox:
+            async with session_factory() as session, session.begin():
+                await broker_outbox.publish(
+                    {"body": "first"},
+                    queue="relay_queue",
+                    session=session,
+                )
+            await _wait_until(lambda: call_count >= 2, timeout=10.0)
+
+    assert call_count >= 2, (
+        f"Expected at-least-once delivery via retry, but foreign _publish was called {call_count} time(s)."
+    )
+    assert await _row_count(pg_engine, outbox_table) == 0, "Row should be deleted after successful retry."
