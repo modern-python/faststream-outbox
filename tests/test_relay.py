@@ -1,8 +1,8 @@
 from typing import Any
 
 import pytest
-from sqlalchemy import MetaData
 from faststream.kafka import KafkaBroker, TestKafkaBroker
+from sqlalchemy import MetaData
 
 from faststream_outbox import OutboxBroker, make_outbox_table
 from faststream_outbox.testing import TestOutboxBroker
@@ -12,8 +12,11 @@ pytestmark = pytest.mark.asyncio
 
 
 async def test_naked_decorator_chain_relays_plain_return_to_kafka() -> None:
-    """A handler decorated `@kafka_pub @outbox.subscriber(...)` returning a plain
-    value publishes the value through the Kafka publisher chain."""
+    """
+    A handler decorated `@kafka_pub @outbox.subscriber(...)` returning plain value.
+
+    This publishes the value through the Kafka publisher chain.
+    """
     metadata = MetaData()
     outbox_table = make_outbox_table(metadata)
     broker_outbox = OutboxBroker(outbox_table=outbox_table)
@@ -30,5 +33,5 @@ async def test_naked_decorator_chain_relays_plain_return_to_kafka() -> None:
     # must be wired before our subscriber starts (Task 6 introduces a startup
     # warning that probes foreign producers).
     async with TestKafkaBroker(broker_kafka), TestOutboxBroker(broker_outbox, run_loops=False) as outbox:
-        await outbox.publish({"hello": "world"}, queue="relay_queue", session=None)
+        await outbox.publish({"hello": "world"}, queue="relay_queue", session=None)  # ty: ignore[invalid-argument-type]
         publisher_kafka.mock.assert_called_once_with({"hello": "world"})
