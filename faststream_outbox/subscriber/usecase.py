@@ -678,7 +678,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         return (OutboxFakePublisher(producer=self._outer_config.producer),)  # ty: ignore[invalid-return-type]
 
     @typing.override
-    async def process_message(self, msg: OutboxInnerMessage) -> "Response":  # type: ignore[override]  # noqa: C901
+    async def process_message(self, msg: OutboxInnerMessage) -> "Response":  # noqa: C901
         """
         Outbox-specific process_message — header propagation (G3) hook.
 

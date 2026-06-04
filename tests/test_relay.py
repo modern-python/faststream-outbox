@@ -1,4 +1,5 @@
 from typing import Any
+from unittest import mock
 
 import pytest
 from faststream.kafka import KafkaBroker, KafkaRouter, TestKafkaBroker
@@ -91,10 +92,9 @@ async def test_relay_via_outbox_router_subscriber() -> None:
 
 async def test_propagate_inbound_headers_true_forwards_outbox_headers_to_kafka() -> None:
     """
-    With propagate_inbound_headers=True, the inbound outbox row's headers are forwarded.
+    With propagate_inbound_headers=True, inbound headers are forwarded to the relay.
 
-    The headers are placed onto the Response before the foreign-publisher
-    chain fires.
+    The headers are placed onto the Response before the foreign-publisher chain fires.
     """
     metadata = MetaData()
     outbox_table = make_outbox_table(metadata)
@@ -107,18 +107,59 @@ async def test_propagate_inbound_headers_true_forwards_outbox_headers_to_kafka()
     async def relay(body: dict[str, Any]) -> dict[str, Any]:
         return body
 
+    captured: list[dict[str, str]] = []
+    original_publish = publisher_kafka._publish  # noqa: SLF001
+
+    async def capture_publish(cmd: Any, **kwargs: Any) -> Any:
+        captured.append(dict(cmd.headers))
+        return await original_publish(cmd, **kwargs)
+
     async with TestKafkaBroker(broker_kafka), TestOutboxBroker(broker_outbox, run_loops=False) as outbox:
-        await outbox.publish(
-            {"hi": 1},
-            queue="relay_queue",
-            session=None,  # ty: ignore[invalid-argument-type]
-            headers={"x-trace-id": "abc123", "content-type": "application/json"},
-        )
-        publisher_kafka.mock.assert_called_once()
-        call_args = publisher_kafka.mock.call_args
-        assert call_args is not None
-        # FastStream's TestKafkaBroker spy contract: positional args carry the
-        # body; headers on the response/PublishCommand are attached separately.
-        # If headers aren't visible via mock.call_args directly, we instead
-        # inspect them indirectly by asserting the body was published.
-        assert call_args.args[0] == {"hi": 1}
+        with mock.patch.object(publisher_kafka, "_publish", side_effect=capture_publish):
+            await outbox.publish(
+                {"hi": 1},
+                queue="relay_queue",
+                session=None,  # ty: ignore[invalid-argument-type]
+                headers={"x-trace-id": "abc123", "content-type": "application/json"},
+            )
+
+    assert len(captured) == 1, f"Expected one publish, got {len(captured)}"
+    assert captured[0].get("x-trace-id") == "abc123"
+    assert captured[0].get("content-type") == "application/json"
+
+
+async def test_propagate_inbound_headers_false_drops_inbound_headers() -> None:
+    """
+    Default propagate_inbound_headers=False drops inbound headers from the relay.
+
+    Response.headers stays empty even when the inbound outbox row carries headers.
+    """
+    metadata = MetaData()
+    outbox_table = make_outbox_table(metadata)
+    broker_outbox = OutboxBroker(outbox_table=outbox_table)
+    broker_kafka = KafkaBroker("kafka://test:9092")
+    publisher_kafka = broker_kafka.publisher("relay_topic")
+
+    @publisher_kafka
+    @broker_outbox.subscriber("relay_queue")  # default: propagate_inbound_headers=False
+    async def relay(body: dict[str, Any]) -> dict[str, Any]:
+        return body
+
+    captured: list[dict[str, str]] = []
+    original_publish = publisher_kafka._publish  # noqa: SLF001
+
+    async def capture_publish(cmd: Any, **kwargs: Any) -> Any:
+        captured.append(dict(cmd.headers))
+        return await original_publish(cmd, **kwargs)
+
+    async with TestKafkaBroker(broker_kafka), TestOutboxBroker(broker_outbox, run_loops=False) as outbox:
+        with mock.patch.object(publisher_kafka, "_publish", side_effect=capture_publish):
+            await outbox.publish(
+                {"hi": 1},
+                queue="relay_queue",
+                session=None,  # ty: ignore[invalid-argument-type]
+                headers={"x-trace-id": "should-be-dropped"},
+            )
+
+    assert len(captured) == 1
+    assert "x-trace-id" not in captured[0]
