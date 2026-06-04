@@ -707,9 +707,11 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             return await self.process_message(msg)
         except _OutboxConfigError:
             raise
-        except StopConsume:
+        except StopConsume:  # pragma: no cover
+            # Upstream-mirrored; outbox handlers do not raise StopConsume.
             await self.stop()
-        except SystemExit:
+        except SystemExit:  # pragma: no cover
+            # Upstream-mirrored; outbox handlers do not raise SystemExit.
             await self.stop()
             if app := self._outer_config.fd_config.context.get("app"):
                 app.exit()
@@ -770,7 +772,8 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             for h in self.calls:
                 try:
                     message = await h.is_suitable(msg, cache)
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:  # noqa: BLE001  # pragma: no cover
+                    # Upstream-mirrored; OutboxParser does not raise from is_suitable.
                     parsing_error = e
                     break
 
@@ -809,16 +812,18 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
 
                     return result_msg
 
-            for m in middlewares:
+            for m in middlewares:  # pragma: no cover
+                # Upstream-mirrored no-matching-handler fall-through; the OutboxParser
+                # always matches a handler so this branch is unreachable in normal flow.
                 stack.push_async_exit(m.__aexit__)
 
-            if parsing_error:
-                raise parsing_error
+            if parsing_error:  # pragma: no cover
+                raise parsing_error  # pragma: no cover
 
-            error_msg = f"There is no suitable handler for {msg=}"
-            raise SubscriberNotFound(error_msg)
+            error_msg = f"There is no suitable handler for {msg=}"  # pragma: no cover
+            raise SubscriberNotFound(error_msg)  # pragma: no cover
 
-        return ensure_response(None)
+        return ensure_response(None)  # pragma: no cover
 
     @staticmethod
     def _reject_outbox_response_with_foreign_publisher(

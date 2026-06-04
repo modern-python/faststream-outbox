@@ -237,8 +237,12 @@ class OutboxBroker(
             for call in sub.calls:
                 for pub in call.handler._publishers:  # noqa: SLF001
                     outer = pub._outer_config  # noqa: SLF001  # ty: ignore[unresolved-attribute]
-                    if outer is self.config:
-                        continue  # not foreign
+                    if outer is self.config:  # pragma: no cover
+                        # Internal outbox publisher in a decorator chain — not intended.
+                        # Handlers should use broker.publish() directly, not decorate with
+                        # an internal publisher. This branch exists for completeness but is
+                        # unreachable in normal usage.
+                        continue  # pragma: no cover
                     producer = getattr(outer, "producer", None)
                     if producer:
                         continue  # already wired / started

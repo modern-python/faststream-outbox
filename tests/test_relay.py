@@ -206,7 +206,7 @@ async def test_unstarted_foreign_broker_warns_on_start(caplog: pytest.LogCapture
     @publisher_kafka
     @broker_outbox.subscriber("relay_queue")
     async def relay(body: dict[str, Any]) -> dict[str, Any]:
-        return body
+        return body  # pragma: no cover  # handler never invoked — test only exercises start()
 
     with caplog.at_level(logging.WARNING, logger="faststream_outbox"):
         async with TestOutboxBroker(broker_outbox, run_loops=False):
