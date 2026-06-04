@@ -52,6 +52,7 @@ class OutboxRegistrator(Registrator[OutboxInnerMessage, "OutboxBrokerConfig"]): 
         lease_ttl_seconds: float = 60.0,
         max_deliveries: int | None = None,
         ack_policy: AckPolicy | None = None,
+        propagate_inbound_headers: bool = False,
         dependencies: Iterable["Dependant"] = (),
         parser: CustomCallable | None = None,
         decoder: CustomCallable | None = None,
@@ -74,6 +75,7 @@ class OutboxRegistrator(Registrator[OutboxInnerMessage, "OutboxBrokerConfig"]): 
             lease_ttl_seconds=lease_ttl_seconds,
             max_deliveries=max_deliveries,
             ack_policy=ack_policy,
+            propagate_inbound_headers=propagate_inbound_headers,
             config=self.config,  # ty: ignore[invalid-argument-type]
             title_=title_,
             description_=description_,

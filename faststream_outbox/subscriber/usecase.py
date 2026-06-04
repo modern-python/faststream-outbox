@@ -27,17 +27,21 @@ import random
 import time
 import typing
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager, suppress
+from itertools import chain
 
 import anyio
 from faststream._internal.endpoint.subscriber import SubscriberSpecification, SubscriberUsecase
 from faststream._internal.endpoint.subscriber.mixins import TasksMixin
+from faststream.exceptions import StopConsume, SubscriberNotFound
+from faststream.response.utils import ensure_response
 from faststream.specification.asyncapi.utils import resolve_payloads
 from faststream.specification.schema import Message, Operation, SubscriberSpec
 
 from faststream_outbox.message import OutboxInnerMessage
 from faststream_outbox.parser.parser import OutboxParser
 from faststream_outbox.publisher.fake import OutboxFakePublisher
+from faststream_outbox.response import OutboxResponse
 from faststream_outbox.subscriber.config import OutboxSubscriberConfig, OutboxSubscriberSpecificationConfig
 
 
@@ -49,6 +53,15 @@ except ImportError:  # pragma: no cover
 
 _BACKOFF_EXP_CAP = 30
 _BACKOFF_MAX_SECONDS = 30.0
+
+
+# Marker exception raised by programming guards inside ``process_message`` (e.g.
+# the OutboxResponse + foreign-publisher dual-fire guard). Inherits from
+# ``RuntimeError`` so ``pytest.raises(RuntimeError, ...)`` in tests catches it, but
+# is a distinct subclass so ``consume()`` and ``dispatch_one`` can re-raise it while
+# still swallowing plain handler-raised ``RuntimeError``s.
+class _OutboxConfigError(RuntimeError): ...
+
 
 # Cap for the ``last_exception`` string written to the DLQ. Some exceptions carry
 # huge payloads (validation errors with the full request body, asyncpg ``DataError``
@@ -95,6 +108,7 @@ if typing.TYPE_CHECKING:
     from faststream._internal.endpoint.publisher import PublisherProto
     from faststream._internal.endpoint.subscriber.call_item import CallsCollection
     from faststream.message import StreamMessage
+    from faststream.response.response import Response
     from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
     from faststream_outbox.client import AbstractOutboxClient
@@ -488,6 +502,14 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         start_perf = time.perf_counter()
         try:
             await self.consume(row)
+        except _OutboxConfigError:
+            # _OutboxConfigError escaping consume() is a programming guard (e.g.
+            # the OutboxResponse + foreign-publisher dual-fire guard). Re-raise so
+            # callers see the error immediately — sync test dispatch surfaces it
+            # from outbox.publish; the worker loop's outer except re-raises it via
+            # _run_with_reconnect so it's logged at ERROR level with a reconnect
+            # backoff rather than silently ignored.
+            raise
         except Exception as e:  # noqa: BLE001
             # No metric emitted here intentionally: the row was never marked
             # terminal/retry, so its state is undefined — flushing or emitting an
@@ -660,6 +682,44 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         # the override stays a coroutine returning AsyncIterator (not an async generator).
         raise NotImplementedError(_UNSUPPORTED_PEEK_MSG)
 
+    @typing.override
+    async def consume(self, msg: OutboxInnerMessage) -> typing.Any:
+        """
+        Override to propagate ``_OutboxConfigError`` from programming guards.
+
+        ``SubscriberUsecase.consume`` swallows all ``Exception`` subclasses except
+        ``StopConsume`` / ``SystemExit``. Programming guards (e.g. the
+        ``OutboxResponse + foreign-publisher`` dual-fire check in
+        ``process_message``) raise ``_OutboxConfigError`` (a ``RuntimeError``
+        subclass) so the guard is distinguishable from handler-raised
+        ``RuntimeError``s. Re-raising here lets ``dispatch_one`` surface it to
+        the caller (sync test dispatch exposes it from ``outbox.publish``; the
+        worker loop re-raises so the error is logged and the lease expires rather
+        than silently swallowing a configuration mistake).
+
+        # Upstream equivalent (extended):
+        #   SubscriberUsecase.consume
+        #   -> faststream/_internal/endpoint/subscriber/usecase.py
+        """
+        if not self.running:
+            return None
+        try:
+            return await self.process_message(msg)
+        except _OutboxConfigError:
+            raise
+        except StopConsume:  # pragma: no cover
+            # Upstream-mirrored; outbox handlers do not raise StopConsume.
+            await self.stop()
+        except SystemExit:  # pragma: no cover
+            # Upstream-mirrored; outbox handlers do not raise SystemExit.
+            await self.stop()
+            if app := self._outer_config.fd_config.context.get("app"):
+                app.exit()
+        except Exception:  # noqa: BLE001, S110
+            # All other exceptions were logged by CriticalLogMiddleware
+            pass
+        return None
+
     def _make_response_publisher(
         self,
         message: "StreamMessage[OutboxInnerMessage]",  # noqa: ARG002
@@ -672,6 +732,129 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         # the ``publish``/``request`` boilerplate from the native FakePublisher base.
         # Safe to ignore — those methods are unreachable for response publishers.
         return (OutboxFakePublisher(producer=self._outer_config.producer),)  # ty: ignore[invalid-return-type]
+
+    @typing.override
+    async def process_message(self, msg: OutboxInnerMessage) -> "Response":  # noqa: C901
+        """
+        Outbox-specific process_message — header propagation (G3) hook.
+
+        Optionally fills empty Response headers with the inbound message's
+        headers when ``propagate_inbound_headers=True``. Task 5 adds the
+        OutboxResponse + foreign-publisher dual-fire guard (G1) here too.
+
+        # Upstream equivalent (replaced):
+        #   SubscriberUsecase.process_message
+        #   -> faststream/_internal/endpoint/subscriber/usecase.py
+
+        Divergence from upstream is strictly additive — the chain composition,
+        middleware ordering, parsing-error rethrow, and AckPolicy semantics are
+        preserved verbatim. Any new cleanup added upstream to process_message
+        must be mirrored here.
+        """
+        context = self._outer_config.fd_config.context
+        logger_state = self._outer_config.logger
+
+        async with AsyncExitStack() as stack:
+            stack.enter_context(self.lock)
+            stack.enter_context(context.scope("handler_", self))
+            stack.enter_context(context.scope("logger", logger_state.logger.logger))
+            for k, v in self._outer_config.extra_context.items():
+                stack.enter_context(context.scope(k, v))
+
+            middlewares: list[typing.Any] = []
+            for base_m in self._SubscriberUsecase__build__middlewares_stack():  # ty: ignore[unresolved-attribute]
+                middleware = base_m(msg, context=context)
+                middlewares.append(middleware)
+                await middleware.__aenter__()
+
+            cache: dict[typing.Any, typing.Any] = {}
+            parsing_error: Exception | None = None
+            for h in self.calls:
+                try:
+                    message = await h.is_suitable(msg, cache)
+                except Exception as e:  # noqa: BLE001  # pragma: no cover
+                    # Upstream-mirrored; OutboxParser does not raise from is_suitable.
+                    parsing_error = e
+                    break
+
+                if message is not None:
+                    stack.enter_context(
+                        context.scope("log_context", self.get_log_context(message)),
+                    )
+                    stack.enter_context(context.scope("message", message))
+
+                    for m in middlewares:
+                        stack.push_async_exit(m.__aexit__)
+
+                    result_msg = ensure_response(
+                        await h.call(
+                            message=message,
+                            _extra_middlewares=(m.consume_scope for m in middlewares[::-1]),
+                        ),
+                    )
+
+                    if not result_msg.correlation_id:
+                        result_msg.correlation_id = message.correlation_id
+
+                    if self._config.propagate_inbound_headers and not result_msg.headers:
+                        result_msg.headers = dict(message.headers)
+
+                    self._reject_outbox_response_with_foreign_publisher(result_msg, h.handler)
+
+                    for p in chain(
+                        self._SubscriberUsecase__get_response_publisher(message),  # ty: ignore[unresolved-attribute]
+                        h.handler._publishers,  # noqa: SLF001
+                    ):
+                        await p._publish(  # noqa: SLF001
+                            result_msg.as_publish_command(),
+                            _extra_middlewares=(m.publish_scope for m in middlewares[::-1]),
+                        )
+
+                    return result_msg
+
+            for m in middlewares:  # pragma: no cover
+                # Upstream-mirrored no-matching-handler fall-through; the OutboxParser
+                # always matches a handler so this branch is unreachable in normal flow.
+                stack.push_async_exit(m.__aexit__)
+
+            if parsing_error:  # pragma: no cover
+                raise parsing_error  # pragma: no cover
+
+            error_msg = f"There is no suitable handler for {msg=}"  # pragma: no cover
+            raise SubscriberNotFound(error_msg)  # pragma: no cover
+
+        return ensure_response(None)  # pragma: no cover
+
+    @staticmethod
+    def _reject_outbox_response_with_foreign_publisher(
+        result_msg: "Response",
+        handler: typing.Any,
+    ) -> None:
+        """
+        Refuse the dual-fire combination: OutboxResponse + foreign publisher.
+
+        OutboxResponse(body=..., queue=..., session=...) writes to the outbox in
+        the caller's transaction; a foreign-publisher decorator also publishes
+        the relayed body. Both would fire from the chain. That is almost
+        certainly not intended — pick one.
+        """
+        if not isinstance(result_msg, OutboxResponse):
+            return
+        foreign = [
+            p
+            for p in handler._publishers  # noqa: SLF001
+            if not isinstance(p, OutboxFakePublisher)
+        ]
+        if not foreign:
+            return
+        msg = (
+            "Handler returned OutboxResponse and is also decorated by a foreign-broker "
+            "publisher — this would dual-fire (insert a row into the outbox AND publish "
+            "to the foreign broker). Pick one: return a plain value to use the foreign "
+            "publisher as a relay, or remove the foreign publisher decorator and keep "
+            "OutboxResponse for outbox fan-out."
+        )
+        raise _OutboxConfigError(msg)
 
     def get_log_context(
         self,

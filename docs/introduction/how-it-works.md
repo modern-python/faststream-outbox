@@ -166,6 +166,10 @@ you add).
 - **Best-effort ordering only.** `FOR UPDATE SKIP LOCKED` does not preserve strict order under concurrent workers. If you need strict per-aggregate ordering, route to a single subscriber and run a single worker.
 - **DLQ is opt-in.** Without `dlq_table=`, terminal failures `DELETE` the row.
 
+## Relay to Kafka / RabbitMQ / NATS / Redis
+
+> **Relay outbox rows to Kafka / RabbitMQ / NATS / Redis with a single decorator → [Relay tutorial](../usage/relay.md).**
+
 ## Acknowledgements
 
 The architecture of this package is heavily informed by Arseniy Popov's

@@ -161,6 +161,7 @@ class OutboxRouter(StreamRouter[OutboxInnerMessage]):
         lease_ttl_seconds: float = 60.0,
         max_deliveries: int | None = None,
         ack_policy: AckPolicy | None = None,
+        propagate_inbound_headers: bool = False,
         # FastStream subscriber-level knobs
         dependencies: Iterable["params.Depends"] = (),
         parser: CustomCallable | None = None,
@@ -192,6 +193,7 @@ class OutboxRouter(StreamRouter[OutboxInnerMessage]):
                 lease_ttl_seconds=lease_ttl_seconds,
                 max_deliveries=max_deliveries,
                 ack_policy=ack_policy,
+                propagate_inbound_headers=propagate_inbound_headers,
                 dependencies=dependencies,
                 parser=parser,
                 decoder=decoder,

@@ -37,6 +37,9 @@ from faststream_outbox.registrator import OutboxRegistrator
 from faststream_outbox.response import OutboxPublishCommand
 
 
+_logger = logging.getLogger(__name__)
+
+
 if typing.TYPE_CHECKING:
     from fast_depends.dependencies import Dependant
     from fast_depends.library.serializer import SerializerProto
@@ -185,6 +188,10 @@ class OutboxBroker(
             security=None,
         )
         super().__init__(config=broker_config, specification=specification, routers=routers)  # ty: ignore[unknown-argument]
+        # Track which foreign-broker config ids we've already warned about so
+        # repeated start() calls (e.g. the test harness calls start() twice) each
+        # only emit the warning once.
+        self._warned_foreign_config_ids: set[int] = set()
 
     @property
     def client(self) -> AbstractOutboxClient:
@@ -211,6 +218,48 @@ class OutboxBroker(
     async def start(self) -> None:
         await self.connect()
         await super().start()
+        self._warn_on_unstarted_foreign_publishers()
+
+    def _warn_on_unstarted_foreign_publishers(self) -> None:
+        """
+        Emit one WARNING per foreign-publisher broker that has not been started.
+
+        Foreign-publisher decorators stacked on outbox subscribers only work if
+        the foreign broker's producer is wired. When it is not, the first
+        relayed row fails deep inside the foreign publisher with an opaque
+        AttributeError; this preflight pushes the diagnostic up to start() so
+        operators see the cause immediately.
+
+        The broker-level ``_warned_foreign_config_ids`` set deduplicates across
+        repeated start() calls (the test harness calls start() twice).
+        """
+        for sub in self.subscribers:
+            for call in sub.calls:
+                for pub in call.handler._publishers:  # noqa: SLF001
+                    outer = pub._outer_config  # noqa: SLF001  # ty: ignore[unresolved-attribute]
+                    if outer is self.config:  # pragma: no cover
+                        # Internal outbox publisher in a decorator chain — not intended.
+                        # Handlers should use broker.publish() directly, not decorate with
+                        # an internal publisher. This branch exists for completeness but is
+                        # unreachable in normal usage.
+                        continue  # pragma: no cover
+                    producer = getattr(outer, "producer", None)
+                    if producer:
+                        continue  # already wired / started
+                    key = id(outer)
+                    if key in self._warned_foreign_config_ids:
+                        continue
+                    self._warned_foreign_config_ids.add(key)
+                    queues = sorted({q for s in self.subscribers for q in getattr(s, "_queues", [])})
+                    _logger.warning(
+                        "Foreign publisher %r is decorated on outbox subscriber(s) for "
+                        "queue(s) %s, but its broker has not been started yet. The first "
+                        "relay attempt will fail and the row will retry until the broker "
+                        "starts. Call `await foreign_broker.start()` or "
+                        "`foreign_broker.connect` in your app's startup hook.",
+                        pub,
+                        queues,
+                    )
 
     @typing.override
     async def stop(self, *_args: object, **_kwargs: object) -> None:

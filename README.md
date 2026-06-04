@@ -6,7 +6,54 @@ faststream-outbox
 
 `faststream-outbox` is a [FastStream](https://faststream.airt.ai) broker integration for the **transactional outbox pattern** — a Postgres table is the message queue.
 
-A producer writes a domain entity and an outbox row in the *same* SQLAlchemy transaction by calling `broker.publish(body, queue=..., session=session)`. A subscriber polls the table directly with `FOR UPDATE SKIP LOCKED`, runs the handler, and deletes the row on success. No downstream broker, no separate relay process — the table *is* the queue.
+A producer writes a domain entity and an outbox row in the *same* SQLAlchemy transaction by calling `broker.publish(body, queue=..., session=session)`. A separate subscriber polls the table and relays each row to a real message bus (Kafka, RabbitMQ, NATS, Redis…) with a single decorator — or processes the rows in-place if you don't have a downstream broker.
+
+## Quickstart — outbox relay to Kafka
+
+Write the outbox row in your domain transaction; relay rows to Kafka with a stacked decorator.
+
+```python
+from sqlalchemy import MetaData
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from faststream import FastStream
+from faststream.kafka import KafkaBroker
+from faststream_outbox import OutboxBroker, make_outbox_table
+
+metadata = MetaData()
+outbox_table = make_outbox_table(metadata, table_name="outbox")
+engine = create_async_engine("postgresql+asyncpg://localhost/app")
+
+broker_outbox = OutboxBroker(engine, outbox_table=outbox_table)
+broker_kafka = KafkaBroker("127.0.0.1:9092")
+publisher_kafka = broker_kafka.publisher("orders")
+
+
+@publisher_kafka
+@broker_outbox.subscriber("orders_outbox")
+async def relay(body: dict) -> dict:
+    return body
+
+
+app = FastStream(broker_outbox, on_startup=[broker_kafka.connect])
+
+# Producer side — share the caller's open transaction; on commit both the
+# domain row and the outbox row land atomically. The relay subscriber picks
+# the outbox row up and publishes it to Kafka with at-least-once delivery.
+session_factory = async_sessionmaker(engine, expire_on_commit=False)
+async with session_factory() as session, session.begin():
+    session.add(Order(id=1))
+    await broker_outbox.publish(
+        {"order_id": 1},
+        queue="orders_outbox",
+        session=session,
+    )
+```
+
+The same one-decorator pattern works for RabbitMQ, NATS, Redis, and Confluent. See the [relay tutorial](https://faststream-outbox.readthedocs.io/en/latest/usage/relay/) for the FastAPI lifecycle, header propagation, router shapes, and the at-least-once contract.
+
+## Quickstart — standalone outbox queue
+
+If you don't have a downstream broker, the same broker can process outbox rows in-place — the table *is* the queue.
 
 ```python
 from sqlalchemy import MetaData
