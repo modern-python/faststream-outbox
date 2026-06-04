@@ -5,7 +5,7 @@ import pytest
 from faststream.kafka import KafkaBroker, KafkaRouter, TestKafkaBroker
 from sqlalchemy import MetaData
 
-from faststream_outbox import OutboxBroker, OutboxRouter, make_outbox_table
+from faststream_outbox import OutboxBroker, OutboxResponse, OutboxRouter, make_outbox_table
 from faststream_outbox.testing import TestOutboxBroker
 
 
@@ -163,3 +163,26 @@ async def test_propagate_inbound_headers_false_drops_inbound_headers() -> None:
 
     assert len(captured) == 1
     assert "x-trace-id" not in captured[0]
+
+
+async def test_outbox_response_with_foreign_publisher_raises() -> None:
+    """
+    A handler that returns OutboxResponse and is decorated by a foreign publisher raises.
+
+    The guard fires at dispatch time so the user does not silently
+    dual-fire (row in outbox + Kafka publish).
+    """
+    metadata = MetaData()
+    outbox_table = make_outbox_table(metadata)
+    broker_outbox = OutboxBroker(outbox_table=outbox_table)
+    broker_kafka = KafkaBroker("kafka://test:9092")
+    publisher_kafka = broker_kafka.publisher("relay_topic")
+
+    @publisher_kafka
+    @broker_outbox.subscriber("relay_queue")
+    async def relay(body: dict[str, Any]) -> OutboxResponse:
+        return OutboxResponse(body=body, queue="next_queue", session=None)  # ty: ignore[invalid-argument-type]
+
+    async with TestKafkaBroker(broker_kafka), TestOutboxBroker(broker_outbox, run_loops=False) as outbox:
+        with pytest.raises(RuntimeError, match="OutboxResponse"):
+            await outbox.publish({"x": 1}, queue="relay_queue", session=None)  # ty: ignore[invalid-argument-type]
