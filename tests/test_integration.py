@@ -4,6 +4,7 @@ import asyncio
 import datetime as _dt
 import json
 import uuid
+from collections.abc import Mapping
 from typing import Any
 from unittest import mock
 
@@ -1109,30 +1110,24 @@ async def test_end_to_end_metrics_recorder_retry_then_terminal(pg_engine, outbox
     assert all(t["exception_type"] == "RuntimeError" for t in retried)
 
 
-async def _wait_until_claimed(
-    pg_engine: AsyncEngine,
-    outbox_table: Table,
-    *,
-    timeout: float,  # noqa: ASYNC109
-) -> None:
-    deadline = asyncio.get_event_loop().time() + timeout
-    stmt = select(outbox_table.c.id).where(outbox_table.c.acquired_token.is_(None))
-    while asyncio.get_event_loop().time() < deadline:
-        async with pg_engine.connect() as conn:
-            unclaimed = (await conn.execute(stmt)).fetchall()
-        if not unclaimed:
-            return
-        await asyncio.sleep(0.02)
-    msg = "fetch never claimed every row"  # pragma: no cover
-    raise AssertionError(msg)  # pragma: no cover
-
-
 async def test_drain_finishes_inflight_rows_before_returning(
     pg_engine: AsyncEngine,
     outbox_table: Table,
 ) -> None:
     """Rows claimed by fetch must run to completion when broker.stop() is called."""
-    broker = OutboxBroker(pg_engine, outbox_table=outbox_table, graceful_timeout=5.0)
+    fetched_total = 0
+
+    def recorder(event: str, fields: Mapping[str, Any]) -> None:
+        nonlocal fetched_total
+        if event == "fetched":
+            fetched_total += fields["count"]
+
+    broker = OutboxBroker(
+        pg_engine,
+        outbox_table=outbox_table,
+        graceful_timeout=5.0,
+        metrics_recorder=recorder,
+    )
     handled: list[int] = []
 
     @broker.subscriber(
@@ -1151,7 +1146,7 @@ async def test_drain_finishes_inflight_rows_before_returning(
         async with session_factory() as session, session.begin():
             for i in range(20):
                 await broker.publish({"i": i}, queue="orders", session=session)
-        await _wait_until_claimed(pg_engine, outbox_table, timeout=3.0)
+        await _wait_until(lambda: fetched_total >= 20, timeout=3.0)
         await broker.stop()
 
     assert sorted(handled) == list(range(20))
