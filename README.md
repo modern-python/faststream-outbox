@@ -49,7 +49,7 @@ async with session_factory() as session, session.begin():
     )
 ```
 
-The same one-decorator pattern works for RabbitMQ, NATS, Redis, and Confluent. See the [relay tutorial](https://faststream-outbox.readthedocs.io/en/latest/usage/relay/) for the FastAPI lifecycle, header propagation, router shapes, and the at-least-once contract.
+The same one-decorator pattern works for RabbitMQ, NATS, Redis, and Confluent. See the [relay tutorial](https://faststream-outbox.modern-python.org/usage/relay/) for the FastAPI lifecycle, header propagation, router shapes, and the at-least-once contract.
 
 ## Quickstart — standalone outbox queue
 
@@ -81,13 +81,13 @@ async with session_factory() as session, session.begin():
 
 ## How it works
 
-A subscriber owns two async loops: a **fetch** loop claims available rows via a single CTE (`SELECT … FOR UPDATE SKIP LOCKED → UPDATE acquired_token=:uuid, acquired_at=now() RETURNING *`), and `max_workers` **worker** loops dispatch to the handler. On success, `DELETE WHERE id=:id AND acquired_token=:token`; on failure, the retry strategy schedules another attempt or terminally drops the row. Terminal failures `DELETE` by default; pass `dlq_table=make_dlq_table(metadata)` to atomically archive them into a sibling audit table instead — see [Dead-letter queue](https://faststream-outbox.readthedocs.io/en/latest/usage/dlq/).
+A subscriber owns two async loops: a **fetch** loop claims available rows via a single CTE (`SELECT … FOR UPDATE SKIP LOCKED → UPDATE acquired_token=:uuid, acquired_at=now() RETURNING *`), and `max_workers` **worker** loops dispatch to the handler. On success, `DELETE WHERE id=:id AND acquired_token=:token`; on failure, the retry strategy schedules another attempt or terminally drops the row. Terminal failures `DELETE` by default; pass `dlq_table=make_dlq_table(metadata)` to atomically archive them into a sibling audit table instead — see [Dead-letter queue](https://faststream-outbox.modern-python.org/usage/dlq/).
 
 The `acquired_token` is the load-bearing invariant: a slow handler whose lease expired and was re-claimed by another worker finds its terminal `DELETE` to be a no-op (the token no longer matches), preventing it from clobbering the new lease holder.
 
 With the `asyncpg` driver, the fetch loop also `LISTEN`s on `outbox_<table>` and `publish` emits `pg_notify(...)`, so idle dispatch latency is sub-100ms instead of up to `max_fetch_interval`.
 
-See [How it works](https://faststream-outbox.readthedocs.io/en/latest/introduction/how-it-works/) for the full architecture.
+See [How it works](https://faststream-outbox.modern-python.org/introduction/how-it-works/) for the full architecture.
 
 ## Optional extras
 
@@ -107,7 +107,7 @@ Browse the full list of templates and libraries in
 [`modern-python`](https://github.com/modern-python) — see the org profile for the
 categorized index.
 
-## 📚 [Documentation](https://faststream-outbox.readthedocs.io)
+## 📚 [Documentation](https://faststream-outbox.modern-python.org)
 
 ## 📦 [PyPi](https://pypi.org/project/faststream-outbox)
 
