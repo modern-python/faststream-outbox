@@ -4,6 +4,7 @@ repo_url: https://github.com/modern-python/faststream-outbox
 docs_dir: docs
 edit_uri: edit/main/docs/
 nav:
+  - Overview: index.md
   - Introduction:
       - Installation: introduction/installation.md
       - How it works: introduction/how-it-works.md
