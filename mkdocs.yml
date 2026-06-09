@@ -1,4 +1,5 @@
 site_name: faststream-outbox
+site_url: https://faststream-outbox.modern-python.org/
 repo_url: https://github.com/modern-python/faststream-outbox
 docs_dir: docs
 edit_uri: edit/main/docs/
