@@ -12,6 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `just lint` — `eof-fixer`, `ruff format`, `ruff check --fix`, `ty check`. `just lint-ci` is the non-mutating variant.
 - `just install` — `uv lock --upgrade && uv sync --all-extras --all-groups --frozen`.
 - `just build` / `just down` / `just sh` — image build, teardown, shell into the app container.
+- `just docs-serve` / `just docs-build` — serve docs locally at `http://127.0.0.1:8000` with hot-reload, or one-shot `mkdocs build --strict`. `just docs-deploy` is reserved for CI (force-pushes to `gh-pages`).
 
 `tests/test_unit.py` and `tests/test_fake.py` need no Postgres — `uv run pytest tests/test_unit.py` works directly. `tests/test_integration.py` requires Postgres at `POSTGRES_DSN` (default `postgresql+asyncpg://outbox:outbox@localhost:5432/outbox`); `pg_engine` skips if unreachable. Coverage is on by default with `--cov-fail-under=100` — partial runs fail that gate; pass `--no-cov` or `--cov-fail-under=0` when iterating locally.
 

@@ -34,6 +34,14 @@ publish:
     uv build
     uv publish --token $PYPI_TOKEN
 
+# Serve docs at http://127.0.0.1:8000 with hot-reload on save.
+docs-serve:
+    uvx --with-requirements docs/requirements.txt mkdocs serve
+
+# One-shot strict build; fails on broken links or orphaned pages.
+docs-build:
+    uvx --with-requirements docs/requirements.txt mkdocs build --strict
+
 # Force-pushes built site to gh-pages; CI runs this on push to main.
 # Manual invocation from a stale checkout will roll the live site back.
 docs-deploy:
