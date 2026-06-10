@@ -6,6 +6,10 @@ those rows to a real bus (Kafka, RabbitMQ, NATS, Redis…). `faststream-outbox`
 supports this directly via FastStream's cross-broker chain — stack a
 foreign-broker publisher decorator on an outbox subscriber and you're done.
 
+*If you don't have a database write to atomically commit alongside, use
+the foreign broker directly — see
+[Comparison](../concepts/comparison.md).*
+
 ## Why an outbox relay
 
 When a request must (a) update your database and (b) emit an event onto a

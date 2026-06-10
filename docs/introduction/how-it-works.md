@@ -25,6 +25,9 @@ subscriber itself: the same Postgres table holds the queue, and the
 subscriber's polling loop *is* the consumer. No relay process, no Kafka, no
 Rabbit.
 
+*See [Comparison](../concepts/comparison.md) for when CDC or Kafka
+transactions are the better fit.*
+
 ## Producer side
 
 `broker.publish(body, *, queue, session, ...)` inserts an outbox row through
