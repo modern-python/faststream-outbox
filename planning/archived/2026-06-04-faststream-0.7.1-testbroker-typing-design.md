@@ -1,8 +1,14 @@
-# FastStream 0.7.1 TestBroker typing alignment — design
+---
+status: shipped
+date: 2026-06-04
+slug: faststream-0.7.1-testbroker-typing
+supersedes: null
+superseded_by: null
+pr: "43"
+outcome: merged 2026-06-04 as #43
+---
 
-**Status:** Draft
-**Date:** 2026-06-04
-**Slug:** `faststream-0.7.1-testbroker-typing`
+# FastStream 0.7.1 TestBroker typing alignment — design
 
 ## Goal
 

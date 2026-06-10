@@ -1,8 +1,14 @@
-# Design: Migrate docs hosting from Read the Docs to GitHub Pages
+---
+status: shipped
+date: 2026-06-09
+slug: mkdocs-github-pages
+supersedes: null
+superseded_by: null
+pr: "45"
+outcome: merged 2026-06-09 as #45
+---
 
-**Date:** 2026-06-09
-**Status:** Approved
-**Slug:** `mkdocs-github-pages`
+# Design: Migrate docs hosting from Read the Docs to GitHub Pages
 
 ## Summary
 

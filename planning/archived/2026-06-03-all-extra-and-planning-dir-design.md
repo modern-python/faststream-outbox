@@ -1,8 +1,14 @@
-# Design: `all` aggregate extra + `planning/` workflow directory
+---
+status: shipped
+date: 2026-06-03
+slug: all-extra-and-planning-dir
+supersedes: null
+superseded_by: null
+pr: "41"
+outcome: merged 2026-06-03 as #41
+---
 
-**Date:** 2026-06-03
-**Status:** Approved
-**Slug:** `all-extra-and-planning-dir`
+# Design: `all` aggregate extra + `planning/` workflow directory
 
 ## Summary
 

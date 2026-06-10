@@ -17,7 +17,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Workflow
 
-Per-feature: brainstorming → spec in `planning/specs/YYYY-MM-DD-<slug>-design.md` → writing-plans → plan in `planning/plans/YYYY-MM-DD-<slug>-plan.md` → executing-plans / subagent-driven-development → requesting-code-review → finishing-a-development-branch. Slugs are kebab-case descriptions, not story IDs.
+Per-feature: brainstorming → spec in `planning/active/YYYY-MM-DD-<slug>-design.md` → writing-plans → plan in `planning/active/YYYY-MM-DD-<slug>-plan.md` → executing-plans / subagent-driven-development → requesting-code-review → finishing-a-development-branch. Slugs are kebab-case descriptions, not story IDs. On merge, the pair moves to `planning/archived/` with `status: shipped`, `pr:`, and `outcome:` filled in the frontmatter. See [`planning/README.md`](planning/README.md) for the current index and [`planning/_templates/`](planning/_templates/) for copy-and-fill starting points.
+
+**Spec** captures the *thinking* — why we are doing this, what the design is, what trade-offs were considered, what is out of scope. Written before code; rarely revised after merge. **Plan** captures the *sequencing* — the ordered checklist of tasks an executor (human or agent) walks. References the spec for the "why"; never re-explains it. **`planning/architecture/`** captures the *invariants* of shipped systems by promoting the relevant parts of a spec after merge. A plan paragraph that would still read correctly with all task numbers and checkboxes removed is design content and belongs in the spec.
 
 ## Architecture
 

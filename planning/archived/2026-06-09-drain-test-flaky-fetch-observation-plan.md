@@ -1,3 +1,11 @@
+---
+status: shipped
+date: 2026-06-09
+slug: drain-test-flaky-fetch-observation
+spec: drain-test-flaky-fetch-observation
+pr: "48"
+---
+
 # Drain Test Flake Fix Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
