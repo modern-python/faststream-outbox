@@ -11,15 +11,16 @@ points.
 
 ## Active
 
-- **[docs-landing-and-comparison](active/2026-06-10-docs-landing-and-comparison-design.md)**
-  — Rewrite docs landing, reshape nav into Concepts/Guides/Reference,
-  add a Comparison page.
-- **[planning-conventions](active/2026-06-10-planning-conventions-design.md)**
-  — This restructure. Codify the spec/plan boundary, add
-  `active/`/`archived/`/`_templates/`, migrate the existing pairs.
+_None._
 
 ## Archived (shipped)
 
+- **[docs-landing-and-comparison](archived/2026-06-10-docs-landing-and-comparison-design.md)**
+  (#50, 2026-06-10) — Docs landing rewrite, four-section nav reshape,
+  new Comparison page.
+- **[planning-conventions](archived/2026-06-10-planning-conventions-design.md)**
+  (#49, 2026-06-10) — Spec/plan boundary, `active/`/`archived/`/`_templates/`
+  layout, frontmatter, migration of the existing pairs.
 - **[drain-test-flaky-fetch-observation](archived/2026-06-09-drain-test-flaky-fetch-observation-design.md)**
   (#48, 2026-06-10) — Drain test waits via the `fetched` recorder
   instead of an SQL poll, killing a 3.14 coverage flake.
