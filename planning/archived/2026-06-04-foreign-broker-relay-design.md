@@ -1,8 +1,14 @@
-# Foreign-broker relay from `OutboxSubscriber` — design
+---
+status: shipped
+date: 2026-06-04
+slug: foreign-broker-relay
+supersedes: null
+superseded_by: null
+pr: "44"
+outcome: merged 2026-06-05 as #44
+---
 
-**Status:** Draft
-**Date:** 2026-06-04
-**Slug:** `foreign-broker-relay`
+# Foreign-broker relay from `OutboxSubscriber` — design
 
 ## Goal
 

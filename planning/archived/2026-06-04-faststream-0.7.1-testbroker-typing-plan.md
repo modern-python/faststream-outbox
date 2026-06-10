@@ -1,3 +1,11 @@
+---
+status: shipped
+date: 2026-06-04
+slug: faststream-0.7.1-testbroker-typing
+spec: faststream-0.7.1-testbroker-typing
+pr: "43"
+---
+
 # FastStream 0.7.1 TestBroker typing alignment — implementation plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

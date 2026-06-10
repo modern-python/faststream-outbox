@@ -1,8 +1,14 @@
-# Design: FastStream 0.7 migration
+---
+status: shipped
+date: 2026-06-03
+slug: faststream-0.7-migration
+supersedes: null
+superseded_by: null
+pr: "42"
+outcome: merged 2026-06-03 as #42
+---
 
-**Date:** 2026-06-03
-**Status:** Approved
-**Slug:** `faststream-0.7-migration`
+# Design: FastStream 0.7 migration
 
 ## Summary
 
