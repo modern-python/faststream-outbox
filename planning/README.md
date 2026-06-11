@@ -46,7 +46,9 @@ points.
 
 ## Other
 
-- **[architecture/](architecture/)** — deep-dive reference for shipped
-  invariants (relay, timers, DLQ, drain, metrics, test broker).
+- **[`architecture/`](../architecture/)** at the repo root — deep-dive
+  reference for shipped invariants (relay, timers, DLQ, drain, metrics,
+  test broker). Lives outside `planning/` because it documents
+  *shipped* state, not pending work.
 - **[lint-suppressions.md](lint-suppressions.md)** — audit of `noqa` /
   `ty: ignore` directives and why each one stays.

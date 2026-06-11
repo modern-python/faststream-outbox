@@ -20,13 +20,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Per-feature: brainstorming → spec in `planning/active/YYYY-MM-DD-<slug>-design.md` → writing-plans → plan in `planning/active/YYYY-MM-DD-<slug>-plan.md` → executing-plans / subagent-driven-development → requesting-code-review → finishing-a-development-branch. Slugs are kebab-case descriptions, not story IDs. On merge, the pair moves to `planning/archived/` with `status: shipped`, `pr:`, and `outcome:` filled in the frontmatter. See [`planning/README.md`](planning/README.md) for the current index and [`planning/_templates/`](planning/_templates/) for copy-and-fill starting points.
 
-**Spec** captures the *thinking* — why we are doing this, what the design is, what trade-offs were considered, what is out of scope. Written before code; rarely revised after merge. **Plan** captures the *sequencing* — the ordered checklist of tasks an executor (human or agent) walks. References the spec for the "why"; never re-explains it. **`planning/architecture/`** captures the *invariants* of shipped systems by promoting the relevant parts of a spec after merge. A plan paragraph that would still read correctly with all task numbers and checkboxes removed is design content and belongs in the spec.
+**Spec** captures the *thinking* — why we are doing this, what the design is, what trade-offs were considered, what is out of scope. Written before code; rarely revised after merge. **Plan** captures the *sequencing* — the ordered checklist of tasks an executor (human or agent) walks. References the spec for the "why"; never re-explains it. **`architecture/`** captures the *invariants* of shipped systems by promoting the relevant parts of a spec after merge. A plan paragraph that would still read correctly with all task numbers and checkboxes removed is design content and belongs in the spec.
+
+**Tiny-change lane.** Skip the spec/plan pipeline for changes that are a typo fix, a dep bump, a small linter / formatter / CI tweak, renaming or moving artifacts to satisfy a just-landed convention, or a single-line config change with no design surface. The smell test: would writing a spec for it produce more bytes than the change itself? If yes, skip; commit directly with a descriptive conventional-commits subject. This lane is *not* for "small features" or "small bug fixes" that have a design — those still get specs.
 
 ## Architecture
 
 The package wires a FastStream `Broker`/`Registrator`/`Subscriber` trio whose transport is Postgres rows, not a message bus.
 
-Deep-dives live in `planning/architecture/`; this file holds the invariants Claude must not break, plus pointers.
+Deep-dives live in `architecture/`; this file holds the invariants Claude must not break, plus pointers.
 
 ### Producer side
 
@@ -48,7 +50,7 @@ For chained publishing, handlers can `return OutboxResponse(body=..., queue=...,
 - **WARNING for unstarted foreign brokers at `start()`** — one per broker, deduped via `_warned_foreign_config_ids: set[int]`.
 - **`propagate_inbound_headers: bool = False`** — when True, inbound headers fill `Response.headers` only if the handler returned a `Response` with empty headers (user-set wins). Default False matches FastStream convention.
 
-Deep dive: `planning/architecture/relay.md`. User-facing: `docs/usage/relay.md`.
+Deep dive: `architecture/relay.md`. User-facing: `docs/usage/relay.md`.
 
 ### Timers (delayed delivery)
 
@@ -58,7 +60,7 @@ Deep dive: `planning/architecture/relay.md`. User-facing: `docs/usage/relay.md`.
 
 `broker.cancel_timer(*, queue, timer_id, session)` issues `DELETE WHERE queue=? AND timer_id=? AND acquired_token IS NULL` — **the `acquired_token IS NULL` guard is load-bearing** (preserves the lease-token invariant; returns `False` if a handler is in flight).
 
-Deep dive: `planning/architecture/timers.md`. User-facing: `docs/usage/timers.md`.
+Deep dive: `architecture/timers.md`. User-facing: `docs/usage/timers.md`.
 
 ### User-owned schema
 
@@ -86,7 +88,7 @@ Atomicity: `delete_with_lease` switches to a single CTE `WITH deleted AS (DELETE
 
 `last_exception` is `repr()` bounded by `_LAST_EXCEPTION_MAX_CHARS=8192` (`subscriber/usecase.py`); truncation appends `…[truncated]`. DLQ `failure_reason` is `String(64)`. No built-in retention.
 
-Deep dive: `planning/architecture/dlq.md`. User-facing: `docs/usage/dlq.md`.
+Deep dive: `architecture/dlq.md`. User-facing: `docs/usage/dlq.md`.
 
 ### Two-loop subscriber (`subscriber/usecase.py`)
 
@@ -123,7 +125,7 @@ Both `OutboxSubscriber.stop()` and `OutboxBroker.stop()` override FastStream par
 - **Upstream divergence flag.** If FastStream adds cleanup to `BrokerUsecase.stop`, `SubscriberUsecase.stop`, or `TasksMixin.stop`, we silently miss it. **Re-check both overrides when touching shutdown.** Regression tests in `tests/test_fake.py` (`grep test_drain_timeout` / `test_broker_stop`).
 - **Test-broker gotcha.** `_fake_close` sets `sub.running = False` and bypasses `subscriber.stop()` / `broker.stop()` entirely — drain tests must `await broker.stop()` explicitly inside the `async with` block.
 
-Deep dive: `planning/architecture/drain.md`.
+Deep dive: `architecture/drain.md`.
 
 ### Test broker
 
@@ -138,7 +140,7 @@ Deep dive: `planning/architecture/drain.md`.
 
 **Gotcha:** subscribers registered via `OutboxRouter` (then `broker.include_router(router)`) live on the router, not `broker._subscribers`. Walk `broker.subscribers` (the property) for full introspection.
 
-Deep dive: `planning/architecture/test-broker.md`. User-facing: `docs/usage/testing.md`.
+Deep dive: `architecture/test-broker.md`. User-facing: `docs/usage/testing.md`.
 
 ### Annotations module (`annotations.py`)
 
@@ -169,7 +171,7 @@ Why two: middleware owns `consume_scope` / `publish_scope` (spans, durations, st
 
 Bundled adapters are optional extras (`[prometheus]` / `[opentelemetry]`). Canonical `messaging.system` / `broker` label is `"outbox"` (shared by both seams). Prometheus tags consume by `handler`, publish by `destination` (mirrors upstream). OTel adapter is meter-only; spans go via native middleware.
 
-Deep dive: `planning/architecture/metrics.md`. User-facing: `docs/usage/observability.md`.
+Deep dive: `architecture/metrics.md`. User-facing: `docs/usage/observability.md`.
 
 ### Retry strategies (`retry.py`)
 
