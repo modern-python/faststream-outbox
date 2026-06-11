@@ -8,15 +8,19 @@ nav:
   - Getting started:
       - Installation: introduction/installation.md
       - Basic usage: usage/basic.md
+      - 'Tutorial: Your first outbox app': tutorials/first-outbox-app.md
+      - 'Tutorial: Add a Kafka relay': tutorials/add-kafka-relay.md
   - Concepts:
       - How it works: introduction/how-it-works.md
       - Comparison: concepts/comparison.md
+      - Instrumentation seams: concepts/instrumentation-seams.md
   - Guides:
       - FastAPI integration: usage/fastapi.md
       - Relay to Kafka / RabbitMQ / NATS: usage/relay.md
       - Timers: usage/timers.md
       - Testing: usage/testing.md
       - Schema validation: usage/schema-validation.md
+      - Setup Prometheus and OpenTelemetry: usage/setup-prometheus-opentelemetry.md
   - Reference:
       - Subscriber: usage/subscriber.md
       - Publisher: usage/publisher.md
