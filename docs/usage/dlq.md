@@ -159,6 +159,8 @@ both are operator-actionable signals. See
 [Observability](./observability.md) for the broader recorder + middleware
 story.
 
+*Operator playbook: [Production checklist § DLQ](../operations/checklist.md#dlq).*
+
 ## Retention
 
 There is no built-in pruning. Operators are responsible for archival or
@@ -172,6 +174,8 @@ inflow.
 
 For low-volume DLQs a plain `DELETE FROM <dlq> WHERE failed_at < now() -
 interval '90 days'` from a daily cron is enough.
+
+*Step-by-step: [Alembic migrations § DLQ retention via partition drop](../operations/alembic.md#dlq-retention-via-partition-drop).*
 
 ## Test broker
 

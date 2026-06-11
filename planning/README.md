@@ -11,7 +11,10 @@ points.
 
 ## Active
 
-_None._
+- **[operator-pages](active/2026-06-11-operator-pages-design.md)**
+  — Three new pages under a new `docs/operations/` section: Production
+  checklist, Troubleshooting playbook, Alembic migrations. The B
+  follow-on from #50.
 
 ## Archived (shipped)
 

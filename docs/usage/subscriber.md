@@ -110,6 +110,8 @@ stuck-row reclaim fast; the tall TTL on the slow queue tolerates outliers
 without slowing reclaim of genuinely stuck rows elsewhere. Producers route
 to the appropriate queue at `publish` time.
 
+*See also [Troubleshooting § `event=lease_lost`](../operations/troubleshooting.md#event-lease_lost-recurring-in-logs).*
+
 ## Ack policy
 
 The default is `AckPolicy.NACK_ON_ERROR`: on a handler exception, the retry
@@ -205,6 +207,8 @@ The formula is **per process**. Each replica opens its own pool, so your
 Postgres `max_connections` needs to cover `replicas × Σ subscribers ×
 (max_workers + 1)` — otherwise additional replicas (or rolling deployments)
 will be refused at startup with `FATAL: too many connections`.
+
+*Operator-side: [Production checklist § Sizing](../operations/checklist.md#sizing).*
 
 ## Read-only inspection
 

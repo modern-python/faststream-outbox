@@ -23,6 +23,10 @@ nav:
       - Router: usage/router.md
       - Dead-letter queue: usage/dlq.md
       - Observability: usage/observability.md
+  - Operations:
+      - Production checklist: operations/checklist.md
+      - Troubleshooting: operations/troubleshooting.md
+      - Alembic migrations: operations/alembic.md
 theme:
   name: material
   features:
