@@ -75,6 +75,8 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+*CI recipe: [Alembic migrations § Drift detection in CI](../operations/alembic.md#drift-detection-in-ci).*
+
 ## In tests
 
 `FakeOutboxClient.validate_schema()` raises `NotImplementedError` — there
