@@ -1,9 +1,9 @@
 ---
-status: draft
+status: shipped
 date: 2026-06-11
 slug: operator-pages
 spec: operator-pages
-pr: null
+pr: "53"
 ---
 
 # operator-pages — implementation plan

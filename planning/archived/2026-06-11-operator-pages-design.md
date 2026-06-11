@@ -1,11 +1,11 @@
 ---
-status: draft
+status: shipped
 date: 2026-06-11
 slug: operator-pages
 supersedes: null
 superseded_by: null
-pr: null
-outcome: null
+pr: "53"
+outcome: merged 2026-06-11 as #53
 ---
 
 # Design: Operator pages — Production checklist, Troubleshooting, Alembic migrations

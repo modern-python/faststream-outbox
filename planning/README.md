@@ -11,13 +11,14 @@ points.
 
 ## Active
 
-- **[operator-pages](active/2026-06-11-operator-pages-design.md)**
-  — Three new pages under a new `docs/operations/` section: Production
-  checklist, Troubleshooting playbook, Alembic migrations. The B
-  follow-on from #50.
+_None._
 
 ## Archived (shipped)
 
+- **[operator-pages](archived/2026-06-11-operator-pages-design.md)**
+  (#53, 2026-06-11) — Three new pages under a new `docs/operations/`
+  section: Production checklist, Troubleshooting playbook, Alembic
+  migrations. The B follow-on from #50.
 - **[docs-landing-and-comparison](archived/2026-06-10-docs-landing-and-comparison-design.md)**
   (#50, 2026-06-10) — Docs landing rewrite, four-section nav reshape,
   new Comparison page.
