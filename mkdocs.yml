@@ -11,12 +11,14 @@ nav:
   - Concepts:
       - How it works: introduction/how-it-works.md
       - Comparison: concepts/comparison.md
+      - Instrumentation seams: concepts/instrumentation-seams.md
   - Guides:
       - FastAPI integration: usage/fastapi.md
       - Relay to Kafka / RabbitMQ / NATS: usage/relay.md
       - Timers: usage/timers.md
       - Testing: usage/testing.md
       - Schema validation: usage/schema-validation.md
+      - Setup Prometheus and OpenTelemetry: usage/setup-prometheus-opentelemetry.md
   - Reference:
       - Subscriber: usage/subscriber.md
       - Publisher: usage/publisher.md

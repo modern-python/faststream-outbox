@@ -11,7 +11,11 @@ points.
 
 ## Active
 
-_None._
+- **[docs-tutorials-and-observability-split](active/2026-06-11-docs-tutorials-and-observability-split-design.md)**
+  — Two new tutorials under `docs/tutorials/` plus a three-way split
+  of `docs/usage/observability.md` into Reference + How-to +
+  Explanation. F-min from the docs-landing-and-comparison
+  follow-ons.
 
 ## Archived (shipped)
 
