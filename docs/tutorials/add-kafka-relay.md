@@ -213,6 +213,18 @@ publisher decorator → Kafka topic. Press `Ctrl-C` to stop the consumer.
 
 ## What about Kafka downtime?
 
+<!--
+Maintainer note: the spec for this tutorial originally proposed a live
+"kill Kafka, watch the retry" step. We attempted it during authoring
+(Confluent cp-kafka 7.6.0, ~10s and ~20s outage windows) and could not
+get the outbox subscriber's retry log lines to surface — aiokafka's
+client-side reconnect absorbs short outages internally, so no outbox-
+level retry fires. The plan authorized falling back to a contract-
+focused callout in lieu of a fragile live demo. If you re-attempt this
+in the future and find a Kafka setup that reliably surfaces the retry,
+this callout can give way to a real Step 6 again.
+-->
+
 If Kafka were unavailable when the outbox subscriber dispatched a row,
 the foreign publish would raise, the outbox row would be nacked, and
 the configured `retry_strategy` would reschedule it. The next dispatch
