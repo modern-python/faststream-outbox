@@ -1,11 +1,11 @@
 ---
-status: draft
+status: shipped
 date: 2026-06-12
 slug: docs-tutorials
 supersedes: null
 superseded_by: null
-pr: null
-outcome: null
+pr: "58"
+outcome: merged 2026-06-12 as #58 (both tutorials, kill-Kafka step replaced by an at-least-once contract callout per spec authorization)
 ---
 
 # Design: Two new tutorials (Diátaxis F-min, part 2)

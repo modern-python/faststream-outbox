@@ -11,14 +11,17 @@ points.
 
 ## Active
 
-- **[docs-tutorials](active/2026-06-12-docs-tutorials-design.md)**
-  — The two tutorials deferred from #56: *Your first outbox app*
-  (10-minute walk-through) and *Add a Kafka relay* (extends the
-  first tutorial with a Kafka publisher + at-least-once
-  demonstration). New `docs/tutorials/` directory; two nav entries.
+_None._
 
 ## Archived (shipped)
 
+- **[docs-tutorials](archived/2026-06-12-docs-tutorials-design.md)**
+  (#58, 2026-06-12) — The two tutorials deferred from #56:
+  *Your first outbox app* (10-minute walk-through) and *Add a Kafka
+  relay* (stacked publisher decorator). Both authored from literal
+  end-to-end execution; the kill-Kafka step folded into an
+  at-least-once contract callout after `aiokafka` absorbed the
+  outage internally on both attempts (spec-authorized fallback).
 - **[docs-tutorials-and-observability-split](archived/2026-06-11-docs-tutorials-and-observability-split-design.md)**
   (#56, 2026-06-12) — Three-way split of `usage/observability.md`
   into Reference + How-to + Explanation. Tutorials §1 §2 from the

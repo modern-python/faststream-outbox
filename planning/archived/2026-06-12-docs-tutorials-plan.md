@@ -1,9 +1,9 @@
 ---
-status: draft
+status: shipped
 date: 2026-06-12
 slug: docs-tutorials
 spec: docs-tutorials
-pr: null
+pr: "58"
 ---
 
 # docs-tutorials — implementation plan
