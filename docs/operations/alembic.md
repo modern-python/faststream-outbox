@@ -20,7 +20,7 @@ op.create_table('outbox',
     sa.Column('id', sa.BigInteger(), autoincrement=True, nullable=False),
     sa.Column('queue', sa.String(length=255), nullable=False),
     sa.Column('payload', sa.LargeBinary(), nullable=False),
-    sa.Column('headers', postgresql.JSONB(astext_type=Text()), nullable=True),
+    sa.Column('headers', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
     sa.Column('attempts_count', sa.BigInteger(), server_default='0', nullable=False),
     sa.Column('deliveries_count', sa.BigInteger(), server_default='0', nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
@@ -66,8 +66,9 @@ maintained by the broker; no application code touches them.
 The `# please adjust!` comment from Alembic is misleading here —
 **don't adjust**. The column types, predicates, and indexes are
 exactly what the broker depends on. The
-[`validate_schema()`](../usage/schema-validation.md) check will refuse
-to start a service whose live DB drifts from this declaration.
+[`validate_schema()`](../usage/schema-validation.md) check — when you wire
+it into a `/health` probe or CI gate — fails when the live DB drifts from
+this declaration. (It is opt-in; it never runs at `broker.start()`.)
 
 ## Adding the DLQ after the fact
 
@@ -83,7 +84,7 @@ op.create_table('outbox_dlq',
     sa.Column('original_id', sa.BigInteger(), nullable=False),
     sa.Column('queue', sa.String(length=255), nullable=False),
     sa.Column('payload', sa.LargeBinary(), nullable=False),
-    sa.Column('headers', postgresql.JSONB(astext_type=Text()), nullable=True),
+    sa.Column('headers', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
     sa.Column('deliveries_count', sa.BigInteger(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
     sa.Column('failed_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),

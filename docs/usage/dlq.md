@@ -141,7 +141,7 @@ Tags:
 | `subscriber` | Subscriber handler name (`call_name`). |
 | `deliveries_count` | Attempt count at terminal flush. |
 | `failure_reason` | Same value set as the schema column. |
-| `exception_type` | Present only when `last_exception` was set (omitted for `max_deliveries` and manual `reject()` without an exception). |
+| `exception_type` | Always present; the exception class name, or `None` for terminals with no exception (`max_deliveries`, or a manual `reject()` without one). Custom recorders always see the key. |
 
 The bundled adapters surface the event without further wiring:
 
@@ -187,6 +187,8 @@ side-effect: the source row is removed from `fake_client.rows` and an
 audit dict is appended to `fake_client.dlq_rows` in the same call.
 
 ```python
+from sqlalchemy import MetaData
+
 from faststream_outbox import NoRetry, OutboxBroker, TestOutboxBroker, make_dlq_table, make_outbox_table
 
 

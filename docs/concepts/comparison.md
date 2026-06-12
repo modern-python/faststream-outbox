@@ -101,9 +101,8 @@ no replay, no persistence, no retry.
 
 `faststream-outbox` keeps the **outbox row** as the durability boundary
 and uses NOTIFY only as a wake-up short-circuit on top of polling. If
-the NOTIFY is lost — listener reconnecting, channel name too long
-(Postgres' 63-char limit), `LISTEN` setup failed at startup — the
-subscriber still finds the row on its next poll cycle. The worst case
+the NOTIFY is lost — listener reconnecting, or `LISTEN` setup failed at
+startup — the subscriber still finds the row on its next poll cycle. The worst case
 is one `max_fetch_interval` of idle latency (default 10 seconds), not
 data loss.
 

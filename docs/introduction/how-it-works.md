@@ -46,8 +46,9 @@ round-trip for many rows.
 
 The producer also emits `SELECT pg_notify('outbox_<table>', queue)` on the
 caller's session right after the INSERT, **except** when the row is
-future-dated (`activate_in` / `activate_at` set) or a `timer_id` conflict
-made the insert a no-op. NOTIFY is transactional, so listeners only see it
+genuinely future-dated (a future `activate_in` / `activate_at` — a *past*
+`activate_at`, e.g. a recovered idempotency token, still notifies) or a
+`timer_id` conflict made the insert a no-op. NOTIFY is transactional, so listeners only see it
 after the user's transaction commits — atomicity with the row insert is
 automatic.
 
@@ -68,14 +69,22 @@ WITH claimed AS (
         acquired_token IS NULL
         OR acquired_at < now() - make_interval(secs => :lease_ttl)
       )
-    ORDER BY id
+    ORDER BY next_attempt_at, id
     LIMIT :batch
     FOR UPDATE SKIP LOCKED
 )
-UPDATE outbox SET acquired_token = :uuid, acquired_at = now()
+UPDATE outbox
+SET acquired_token = :uuid, acquired_at = now(),
+    deliveries_count = deliveries_count + 1
 WHERE id IN (SELECT id FROM claimed)
 RETURNING *
 ```
+
+This is **simplified for illustration**. The real query writes each `OR`
+disjunct with its own partial-index predicate spelled out as a conjunct, so
+Postgres can use the `outbox_pending_idx` / `outbox_lease_idx` partial
+indexes instead of a seq-scan — the naive `OR` above is the exact shape the
+code avoids.
 
 The CTE reclaims both unleased rows AND rows whose lease has expired
 (`acquired_at < now() - lease_ttl_seconds`), so there is no separate stuck-row

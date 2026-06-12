@@ -123,12 +123,15 @@ Prometheus exposition format on `/metrics`; for OTLP push instead,
 swap the reader for `PeriodicExportingMetricReader(OTLPMetricExporter(...))`
 and drop the `/metrics` route.
 
-Instrument names (`messaging.process.duration`,
-`messaging.publish.duration`, `messaging.process.messages` when
-`include_messages_counters=True`), units, and constructor args
-(`meter_provider`, `meter`, `include_messages_counters`) match
-`faststream.opentelemetry.TelemetryMiddleware`. The
-`messaging.system="outbox"` attribute disambiguates outbox traffic
+Instrument names match `faststream.opentelemetry.TelemetryMiddleware` for
+the bus-scope metrics — `messaging.process.duration`,
+`messaging.publish.duration`, and (when `include_messages_counters=True`)
+`messaging.process.messages` / `messaging.publish.messages` — plus three
+outbox-specific counters the middleware can't emit:
+`messaging.outbox.fetch.batches`, `messaging.outbox.lease_lost`, and
+`messaging.outbox.dlq_written`. Units and constructor args
+(`meter_provider`, `meter`, `include_messages_counters`) follow upstream.
+The `messaging.system="outbox"` attribute disambiguates outbox traffic
 from Kafka / Rabbit data on the same instruments.
 
 **Tracing (spans) is not modelled by this adapter** — the callable
@@ -139,7 +142,7 @@ middleware](#native-middleware-spans--bus-parity) integration below.
 
 For OTel spans wrapping `consume_scope` / `publish_scope` and the
 exact upstream label / instrument schema, register the native
-middleware subclasses via `broker_middlewares=[...]` — same
+middleware subclasses via `middlewares=[...]` — same
 registration pattern as `KafkaPrometheusMiddleware` /
 `RabbitTelemetryMiddleware`.
 

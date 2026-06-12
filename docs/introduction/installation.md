@@ -40,12 +40,15 @@ docker run -d -p 5432:5432 \
 
 ## Optional extras
 
-The base install ships only the SQLAlchemy-driven polling broker. Each
-optional extra unlocks one feature; nothing else changes if you omit them.
+The base install ships only `faststream` + `sqlalchemy[asyncio]` — **no
+async Postgres driver**, so you must install one (the `asyncpg` extra below,
+or another async driver such as `psycopg`); the `postgresql+asyncpg://` DSNs
+in the examples need `asyncpg` specifically. Each optional extra unlocks one
+feature; nothing else changes if you omit them.
 
 | Extra | Install | What it enables |
 |---|---|---|
-| `asyncpg` | `pip install 'faststream-outbox[asyncpg]'` | The `asyncpg` SQLAlchemy driver. Required to get `LISTEN/NOTIFY` short-circuit wakeups in the subscriber's fetch loop — without it the loop falls back to plain polling, which adds up to `max_fetch_interval` (default 10s) of idle latency between an INSERT and a dispatch. |
+| `asyncpg` | `pip install 'faststream-outbox[asyncpg]'` | The `asyncpg` SQLAlchemy driver. Required to get `LISTEN/NOTIFY` short-circuit wakeups in the subscriber's fetch loop. With a *different* async driver (e.g. `psycopg`) but no `asyncpg`, the broker still works but the loop falls back to plain polling, which adds up to `max_fetch_interval` (default 10s) of idle latency between an INSERT and a dispatch; with no async driver at all the engine can't connect. |
 | `fastapi` | `pip install 'faststream-outbox[fastapi]'` | The `faststream_outbox.fastapi.OutboxRouter` — see [FastAPI integration](../usage/fastapi.md). |
 | `validate` | `pip install 'faststream-outbox[validate]'` | Alembic, for `broker.validate_schema()` — see [Schema validation](../usage/schema-validation.md). Calling `validate_schema()` without this extra raises `ImportError`; every other code path works. |
 | `prometheus` | `pip install 'faststream-outbox[prometheus]'` | The `PrometheusRecorder` metrics adapter and native `OutboxPrometheusMiddleware` — see [Observability](../usage/observability.md). |

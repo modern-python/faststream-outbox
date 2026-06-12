@@ -64,7 +64,7 @@ Per-subscriber knobs, passed to `@broker.subscriber("…", …)`:
 |---|---|---|
 | `max_workers` | `1` | Concurrent handlers per subscriber |
 | `fetch_batch_size` | `10` | Rows claimed per fetch cycle |
-| `min_fetch_interval` | `1.0` s | Base poll interval; the floor used when the queue has work |
+| `min_fetch_interval` | `1.0` s | Base for the adaptive idle backoff (jittered ±50%, so an actual wait can land below it) and the wait when the inflight queue is full; no sleep at all while fetches keep returning rows |
 | `max_fetch_interval` | `10.0` s | Ceiling for the adaptive idle backoff (with jitter) |
 | `lease_ttl_seconds` | `60.0` s | How long a claim is valid before another fetch may reclaim it. **Must exceed your handler's P99 with margin.** |
 | `max_deliveries` | `None` (unbounded) | Total claims (including lease-expiry re-claims) after which the row is dropped without invoking the handler. Defends against handlers that consistently wedge. |
@@ -199,15 +199,21 @@ Returning `None` from `get_next_attempt_delay` signals a terminal failure.
 
 Each subscriber holds `max_workers + 1` long-lived SQLAlchemy pool
 connections (one writer per worker + one fetch), plus one raw asyncpg
-connection for `LISTEN` when available. Size your engine for `Σ subscribers
-× (max_workers + 1)` or `broker.start()` will block on pool checkout.
-SQLAlchemy's default `pool_size=5, max_overflow=10` covers a handful of
-single-worker subscribers; raise it for larger fleets.
+connection for `LISTEN` when available. Size your **engine pool** for
+`Σ subscribers × (max_workers + 1)`. An undersized pool does **not** block
+`broker.start()` — `start()` only schedules the loop tasks and returns;
+instead the fetch/worker loops stall on pool checkout and surface as
+repeating reconnect ERROR logs with dispatch silently starved. SQLAlchemy's
+default `pool_size=5, max_overflow=10` covers a handful of single-worker
+subscribers; raise it for larger fleets.
 
-The formula is **per process**. Each replica opens its own pool, so your
-Postgres `max_connections` needs to cover `replicas × Σ subscribers ×
-(max_workers + 1)` — otherwise additional replicas (or rolling deployments)
-will be refused at startup with `FATAL: too many connections`.
+Server-side, the footprint is one larger: the raw asyncpg `LISTEN`
+connection lives **outside** the pool, so each subscriber consumes
+`max_workers + 2` Postgres connections. The budget is **per process** —
+each replica opens its own pool and LISTEN connections, so your Postgres
+`max_connections` needs to cover `replicas × Σ subscribers × (max_workers +
+2)`, otherwise additional replicas (or rolling deployments) are refused at
+startup with `FATAL: too many connections`.
 
 *Operator-side: [Production checklist § Sizing](../operations/checklist.md#sizing).*
 
