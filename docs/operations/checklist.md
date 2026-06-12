@@ -71,8 +71,8 @@ story.
 ## Observability
 
 - [ ] **`metrics_recorder` set, native middleware registered, or
-  both** — the recommended setup is both. See [Observability §
-  Layering](../usage/observability.md#layering-middleware-seam-vs-recorder-seam).
+  both** — the recommended setup is both. See [Instrumentation seams §
+  Layering](../concepts/instrumentation-seams.md#layering-middleware-seam-vs-recorder-seam).
 - [ ] **Alert on `lease_lost` rate** — non-zero means
   `lease_ttl_seconds < handler P99` for at least one subscriber. See
   [Troubleshooting § `event=lease_lost`](./troubleshooting.md#event-lease_lost-recurring-in-logs).
