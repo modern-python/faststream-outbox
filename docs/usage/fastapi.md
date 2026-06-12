@@ -122,9 +122,10 @@ intentionally **not exposed** on `OutboxRouter.__init__`:
   — the broker's FastStream `Dependant` list is the wrong shape for this
   flow.
 
-If you need broker-level FastStream middlewares or dependencies, set them
-on the broker before mounting the router and use the FastAPI `Depends(...)`
-mechanism in handlers.
+If you need broker-level FastStream middlewares, pass them to
+`OutboxRouter(middlewares=[...])` — the router builds the broker for you, so
+there is no separate broker to configure. Use the FastAPI `Depends(...)`
+mechanism in handlers for dependencies.
 
 ## Engine ownership
 

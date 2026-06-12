@@ -115,8 +115,10 @@ contract.
 
 For "consume from queue A → enqueue to queue B" relays, either call
 `broker.publish(value, queue="B", session=session)` directly inside your
-handler — on the same session that owns the inbound row's terminal write —
-or `return OutboxResponse(...)` (see below).
+handler — on the same session that holds your domain writes — or
+`return OutboxResponse(...)` (see below). (The inbound row's own terminal
+DELETE runs separately, on the worker's autocommit connection, not this
+session.)
 
 ## Chained publishing
 

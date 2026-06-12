@@ -11,9 +11,10 @@ story.
   writer per worker + one fetch) plus one raw asyncpg connection for
   `LISTEN`. Sub-budget formula in [Subscriber § Connection
   budget](../usage/subscriber.md#connection-budget).
-- [ ] **Postgres `max_connections` ≥ `replicas × Σ subs × (max_workers + 1)`**
-  — the formula is per-process; rolling deploys multiply it.
-  Failure mode: pods refuse with `FATAL: too many connections`.
+- [ ] **Postgres `max_connections` ≥ `replicas × Σ subs × (max_workers + 2)`**
+  — `max_workers + 1` pool connections **plus** the raw asyncpg `LISTEN`
+  connection per subscriber; the formula is per-process and rolling deploys
+  multiply it. Failure mode: pods refuse with `FATAL: too many connections`.
 
 ## Subscribers
 

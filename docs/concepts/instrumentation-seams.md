@@ -39,7 +39,7 @@ This is the "spans + bus parity" mode the native middleware
 
 ## What the middleware seam *can't* observe
 
-Four events fire **outside** the handler invocation, with no
+Three events fire **outside** the handler invocation, with no
 `StreamMessage` in scope:
 
 - **`fetched` ticks (including empty fetches).** Emitted by the fetch
@@ -57,11 +57,6 @@ Four events fire **outside** the handler invocation, with no
   the `max_deliveries` ceiling and was dropped *without invoking the
   handler*. No handler call = no `consume_scope`. The middleware has
   nothing to wrap.
-- **The empty-fetch idle counter.** Same shape as `fetched` ticks —
-  fires when the fetch loop went a round without finding anything to
-  claim. Useful for tuning `min_fetch_interval` and `max_fetch_interval`.
-  The middleware bus has no concept of "the broker checked and found
-  nothing."
 
 ## What the recorder seam observes naturally
 
@@ -69,7 +64,7 @@ The recorder is a `Callable[[str, Mapping[str, Any]], None]` invoked at
 six subscriber events and one producer event. Plus `dlq_written` when
 the DLQ is configured. It fires whether or not a handler is in scope:
 
-- All four bus-invisible events above.
+- All three bus-invisible events above.
 - Plus `acked` / `nacked_retried` / `nacked_terminal` / `dispatched` /
   `published` from inside the handler-execution paths, with explicit
   `subscriber` and `queue` tags.
@@ -90,7 +85,6 @@ physically cannot observe.
 | `fetched` ticks (including empty) | ❌ (no `StreamMessage` at fetch time) | ✅ |
 | `lease_lost` after `consume_scope` exits | ❌ | ✅ |
 | `nacked_terminal(reason="max_deliveries")` before consume opens | ❌ | ✅ |
-| Empty-fetch idle counter | ❌ | ✅ |
 
 ## Operator implication
 

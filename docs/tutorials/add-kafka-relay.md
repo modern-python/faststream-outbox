@@ -16,19 +16,25 @@ relay and seen the row arrive at a `kafka-console-consumer`.
 
 - You finished [Tutorial: Your first outbox app](./first-outbox-app.md).
   This tutorial extends that same `app.py`, the same `outbox-postgres`
-  container, and the same project directory.
+  container, and the same project directory. **If you ran Tutorial 1's
+  final cleanup**, its `--rm` Postgres container (and its data) is gone —
+  re-run Tutorial 1's Postgres-start and schema-creation steps first; this
+  tutorial assumes `outbox-postgres` is up with the `outbox` table.
 - Docker Compose (the `docker compose` CLI) for the Kafka container.
 - Another ten minutes.
 
 ## Step 1: Add Kafka via docker-compose
 
-Postgres is already running from Tutorial 1. Add Kafka via a small
-`docker-compose.yml`. Single-broker [KRaft
-mode](https://kafka.apache.org/documentation/#kraft) — no separate
+Postgres should still be running from Tutorial 1 (see the note above if you
+ran its cleanup). Add Kafka via a small `docker-compose.yml`. Single-broker
+[KRaft mode](https://kafka.apache.org/documentation/#kraft) — no separate
 ZooKeeper service, and Confluent's `cp-kafka:7.6.0` image is known to
-run well on Apple Silicon. Two listeners: one for clients on the host
-(your `faststream run` process) and one for clients inside the Docker
-network (the `kafka-console-consumer` we'll use in Step 5).
+run well on Apple Silicon. Two listeners: one on the host at `localhost:9092`
+(for your `faststream run` process) and one inside the Docker network at
+`kafka:29092` (inter-broker traffic). The Step 5 console consumer runs
+*inside* the broker container via `docker compose exec`, so it reaches the
+host listener at `kafka:9092` directly — no separate in-network client
+listener is needed for it.
 
 ```yaml title="docker-compose.yml"
 services:

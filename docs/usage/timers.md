@@ -73,9 +73,11 @@ second = await broker.publish(
 assert second is None
 ```
 
-NOTIFY is skipped when `activate_in` / `activate_at` is set OR the conflict
-path returned no row — both cases would either wake listeners that find
-nothing, or wake them prematurely.
+NOTIFY is skipped when the row is genuinely future-dated (a *future*
+`activate_in` / `activate_at`) OR the conflict path returned no row — both
+cases would either wake listeners that find nothing, or wake them
+prematurely. A *past* `activate_at` is already eligible, so it still
+notifies.
 
 `timer_id` is only available on single `publish`, not on `publish_batch`
 (per-row dedup makes no sense for a batch).

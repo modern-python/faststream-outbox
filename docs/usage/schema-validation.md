@@ -7,7 +7,9 @@ everything the broker needs at runtime.
 `broker.validate_schema()` delegates to Alembic's
 `autogenerate.compare_metadata` against a throwaway `MetaData` populated
 by `make_outbox_table(...)`. The canonical `Table` is the single source
-of truth; the validator never duplicates the schema declaration.
+of truth; the validator never duplicates the schema declaration. When the
+broker was constructed with a `dlq_table`, `validate_schema()` runs a
+second pass over the DLQ table the same way.
 
 ## Install
 
