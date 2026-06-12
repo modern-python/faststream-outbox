@@ -14,7 +14,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from faststream.message.message import StreamMessage
 
@@ -23,6 +23,9 @@ if TYPE_CHECKING:
     from faststream._internal.basic_types import LoggerProto
 
     from faststream_outbox.retry import RetryStrategyProto
+
+
+_logger = logging.getLogger("faststream_outbox.message")
 
 
 # Public contract for the DLQ ``failure_reason`` column and the ``reason`` tag on
@@ -74,13 +77,20 @@ class OutboxInnerMessage:
     # never touches the DLQ.
     terminal_failure_reason: "DLQFailureReason | None" = field(default=None, init=False)
 
-    async def ack(self) -> None:
+    # ``**_options`` are accepted-and-ignored: FastStream's AcknowledgementMiddleware
+    # forwards ``message.nack(**extra_options)`` for native idioms like
+    # ``raise NackMessage(delay=5)``. Those options map to broker-native ack
+    # semantics that don't apply to the outbox (reschedule timing is owned by the
+    # retry strategy, not a per-call delay). Rejecting them with a ``TypeError``
+    # here would be swallowed by the middleware and silently fall through to the
+    # destructive reject fallback — so we ignore them instead.
+    async def ack(self, **_options: Any) -> None:
         await self._update_state_if_not_set(self._ack)
 
-    async def nack(self) -> None:
+    async def nack(self, **_options: Any) -> None:
         await self._update_state_if_not_set(self._nack)
 
-    async def reject(self) -> None:
+    async def reject(self, **_options: Any) -> None:
         await self._update_state_if_not_set(self._reject)
 
     async def _update_state_if_not_set(self, fn: Callable[[], Awaitable[None]]) -> None:
@@ -95,16 +105,29 @@ class OutboxInnerMessage:
 
     async def _nack(self) -> None:
         self._record_attempt()
-        delay = (
-            self.retry_strategy.get_next_attempt_delay(
-                first_attempt_at=self.first_attempt_at or self.last_attempt_at,  # ty: ignore[invalid-argument-type]
-                last_attempt_at=self.last_attempt_at,  # ty: ignore[invalid-argument-type]
-                attempts_count=self.attempts_count,
-                exception=self.last_exception,
-            )
-            if self.retry_strategy is not None
-            else None
-        )
+        delay: float | None = None
+        if self.retry_strategy is not None:
+            try:
+                delay = self.retry_strategy.get_next_attempt_delay(
+                    first_attempt_at=self.first_attempt_at or self.last_attempt_at,  # ty: ignore[invalid-argument-type]
+                    last_attempt_at=self.last_attempt_at,  # ty: ignore[invalid-argument-type]
+                    attempts_count=self.attempts_count,
+                    exception=self.last_exception,
+                )
+            except Exception:
+                # A retry strategy that raises (a user bug, or an unclamped
+                # ExponentialRetry overflowing at very high attempt counts) must
+                # not destroy the row as ``"rejected"``. Degrade to terminal-by-
+                # retry so the row is deleted (and DLQ'd if configured) with a
+                # reason that reflects what happened, and surface the bug.
+                _logger.exception(
+                    "Retry strategy %r raised computing the next attempt delay for %r; treating delivery as terminal",
+                    self.retry_strategy,
+                    self,
+                )
+                self.to_delete = True
+                self.terminal_failure_reason = "retry_terminal"
+                return
         if delay is None:
             self.to_delete = True
             self.terminal_failure_reason = "retry_terminal"
@@ -138,14 +161,39 @@ class OutboxInnerMessage:
         return True
 
     async def assert_state_set(self, logger: "LoggerProto | None") -> None:
-        """Manual-ack fallback: if the handler returned without ack/nack/reject, reject."""
-        if not self.state_set:
+        """
+        Fallback when the consume pipeline returned without recording ack/nack/reject intent.
+
+        Two distinct shapes land here:
+
+        * **The handler raised but nothing recorded intent** — ``AckPolicy.MANUAL``
+          disables the ack middleware entirely, and even under NACK/REJECT policies
+          the middleware swallows any error raised from ``nack()`` itself. In both
+          cases ``last_exception`` is set (the broker-wide capture middleware). A
+          failed delivery must not be destroyed: honor the retry strategy via
+          ``nack()`` so the row reschedules (or goes terminal-by-retry), matching
+          every native FastStream broker's "unacked failure -> redeliver" semantics.
+        * **The handler returned cleanly without acking** (``last_exception is None``)
+          — a genuinely forgetful MANUAL handler. Preserve the historical reject
+          fallback so the row doesn't redeliver forever.
+        """
+        if self.state_set:
+            return
+        if self.last_exception is not None:
             if logger is not None:
                 logger.log(
                     logging.ERROR,
-                    f"Outbox message {self} state not set after handler returned; rejecting as fallback",
+                    f"Outbox message {self} handler raised without recording ack state; "
+                    f"nacking to honor the retry strategy",
                 )
-            await self.reject()
+            await self.nack()
+            return
+        if logger is not None:
+            logger.log(
+                logging.ERROR,
+                f"Outbox message {self} state not set after handler returned; rejecting as fallback",
+            )
+        await self.reject()
 
     def __repr__(self) -> str:
         return f"OutboxInnerMessage(id={self.id}, queue={self.queue!r})"
@@ -154,14 +202,14 @@ class OutboxInnerMessage:
 class OutboxMessage(StreamMessage[OutboxInnerMessage]):
     """FastStream stream-message wrapper. Forwards ack/nack/reject to the inner row."""
 
-    async def ack(self) -> None:
-        await self.raw_message.ack()
+    async def ack(self, **options: Any) -> None:
+        await self.raw_message.ack(**options)
         await super().ack()
 
-    async def nack(self) -> None:
-        await self.raw_message.nack()
+    async def nack(self, **options: Any) -> None:
+        await self.raw_message.nack(**options)
         await super().nack()
 
-    async def reject(self) -> None:
-        await self.raw_message.reject()
+    async def reject(self, **options: Any) -> None:
+        await self.raw_message.reject(**options)
         await super().reject()

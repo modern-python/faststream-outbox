@@ -5,6 +5,15 @@ from datetime import datetime
 from typing import Protocol
 
 
+# Absolute ceiling on a single computed delay. Guards two failure modes for an
+# ExponentialRetry left unbounded (no ``max_attempts`` and no ``max_delay_seconds``):
+# (1) ``multiplier ** attempts`` raising ``OverflowError`` at very high attempt
+# counts (``2.0 ** 1024``), and (2) producing a delay larger than Postgres'
+# ``make_interval(secs => …)`` can represent. ~100 years is far beyond any sane
+# retry horizon, so this never changes behavior for a real configuration.
+_MAX_DELAY_SECONDS = 100.0 * 365.0 * 24.0 * 60.0 * 60.0
+
+
 class RetryStrategyProto(Protocol):
     """
     Decides whether a Nack'ed row gets another attempt and how long to wait.
@@ -104,10 +113,18 @@ class ExponentialRetry(_RetryStrategyTemplate):
     _random: random.Random = field(default_factory=random.Random)
 
     def _delay_seconds(self, *, attempts_count: int) -> float:
-        delay = self.initial_delay_seconds * (self.multiplier ** max(0, attempts_count - 1))
+        try:
+            delay = self.initial_delay_seconds * (self.multiplier ** max(0, attempts_count - 1))
+        except OverflowError:
+            # An unbounded exponential eventually overflows float (``2.0 ** 1024``).
+            # Saturate at the absolute ceiling rather than letting the strategy
+            # raise into the destructive reject fallback.
+            delay = _MAX_DELAY_SECONDS
         # Jitter before clamp so max_delay_seconds is the true ceiling.
         if self.jitter_factor:
             delay *= 1.0 + self._random.uniform(-self.jitter_factor / 2, self.jitter_factor / 2)
         if self.max_delay_seconds is not None:
             delay = min(delay, self.max_delay_seconds)
-        return delay
+        # Absolute backstop so an unbounded config can't emit a delay Postgres'
+        # make_interval() can't represent.
+        return min(delay, _MAX_DELAY_SECONDS)

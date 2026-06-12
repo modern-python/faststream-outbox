@@ -94,6 +94,18 @@ def test_prometheus_nacked_terminal_records_reason_label() -> None:
     assert _sample(reg, "faststream_received_processed_messages_total", {**_base_labels(), "status": "nacked"}) == 1.0
 
 
+def test_prometheus_max_deliveries_terminal_does_not_drive_in_process_negative() -> None:
+    """B9: nacked_terminal(reason=max_deliveries) has no preceding dispatched/duration → gauge must not go negative."""
+    reg, rec = _make_recorder()
+    # No 'dispatched' — the max_deliveries path short-circuits before the handler runs.
+    rec("nacked_terminal", {"queue": "q", "subscriber": "h", "deliveries_count": 6, "reason": "max_deliveries"})
+    sample = _sample(reg, "faststream_received_messages_in_process", _base_labels())
+    assert sample is None or sample >= 0.0  # the unconditional .dec() bug produced -1.0
+    # The terminal-reason and processed counters still fire (only the gauge dec is gated).
+    assert _sample(reg, "faststream_outbox_terminal_total", {**_base_labels(), "reason": "max_deliveries"}) == 1.0
+    assert _sample(reg, "faststream_received_processed_messages_total", {**_base_labels(), "status": "nacked"}) == 1.0
+
+
 def test_prometheus_lease_lost_increments_error_status_and_phase_counter() -> None:
     reg, rec = _make_recorder()
     rec("lease_lost", {"queue": "q", "subscriber": "h", "phase": "terminal"})

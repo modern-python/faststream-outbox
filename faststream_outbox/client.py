@@ -289,8 +289,13 @@ class OutboxClient(AbstractOutboxClient):
         dlq_table = self._dlq_table
         assert dlq_table is not None  # noqa: S101
         preparer = self._engine.dialect.identifier_preparer
-        outbox_name = preparer.quote(self._table.name)
-        dlq_name = preparer.quote(dlq_table.name)
+        # ``format_table`` renders the schema-qualified, quoted name (``"app"."outbox"``)
+        # when the Table carries a non-default ``schema=``. ``quote(table.name)`` dropped
+        # the schema, so a ``MetaData(schema="app")`` deployment hit ``UndefinedTable`` on
+        # every terminal failure (poison rows retry forever, the outbox grows) or silently
+        # wrote to a same-named search_path table (B10).
+        outbox_name = preparer.format_table(self._table)
+        dlq_name = preparer.format_table(dlq_table)
         # S608: outbox_name / dlq_name come from application-defined SQLAlchemy
         # Table objects (not request input) and are quoted via the dialect's
         # identifier preparer — values flow through :bindparam placeholders.
@@ -445,8 +450,11 @@ def _run_validate(
         raise ImportError(msg)
 
     # Isolated MetaData containing ONLY the canonical table, so the user's
-    # domain tables (in their own MetaData) don't show up in the diff.
-    canonical_metadata = MetaData()
+    # domain tables (in their own MetaData) don't show up in the diff. Carry the
+    # user's schema onto the canonical copy so the autogenerate diff compares
+    # ``app.outbox`` against ``app.outbox`` rather than the default search_path —
+    # matching the schema-qualified DLQ CTE in ``_build_dlq_cte`` (B10).
+    canonical_metadata = MetaData(schema=table.schema)
     canonical_factory(canonical_metadata, table.name)
 
     def _include_name(name: str | None, type_: str, parent_names: "Mapping[str, str | None]") -> bool:

@@ -53,6 +53,10 @@ except ImportError:  # pragma: no cover
 
 _BACKOFF_EXP_CAP = 30
 _BACKOFF_MAX_SECONDS = 30.0
+# A reconnect loop whose connection stayed healthy at least this long before
+# failing is treated as recovered: the next failure starts a fresh backoff
+# sequence instead of inheriting the lifetime error count (B3).
+_BACKOFF_RESET_THRESHOLD_SECONDS = 60.0
 
 
 # Marker exception raised by programming guards inside ``process_message`` (e.g.
@@ -197,6 +201,11 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
     @typing.override
     async def start(self) -> None:
         await super().start()
+        # Clear the drain flag so a stop()->start() cycle fetches again. Without
+        # this, _stopping stays True from the previous drain and the fetch loop's
+        # reconnect predicate exits immediately while ping() still reports healthy
+        # — the subscriber hot-spins connect/close and consumes nothing (B2).
+        self._stopping = False
         self._post_start()
         if not self.calls:
             return
@@ -249,6 +258,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             name="fetch",
             open_resources=self._open_fetch_resources,
             inner=self._fetch_inner,
+            halt_on_drain=True,
         )
 
     @asynccontextmanager
@@ -359,17 +369,27 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         _, opts = engine.dialect.create_connect_args(engine.url)
         for sa_only_key in ("prepared_statement_cache_size", "async_fallback", "async_creator_fn"):
             opts.pop(sa_only_key, None)
+        conn: _asyncpg.Connection | None = None
+        listening = False
         try:
             conn = await _asyncpg.connect(**opts)
             await conn.add_listener(self._notify_channel, self._on_notify)
+            listening = True
         except Exception as e:  # noqa: BLE001
             self._log(
                 log_level=logging.WARNING,
                 message=f"LISTEN setup failed; falling back to polling: {e!r}",
                 exc_info=e,
             )
-            return None
-        return conn
+        finally:
+            if conn is not None and not listening:
+                # connect() opened the socket but add_listener failed (PgBouncer txn
+                # pooling, a drop between awaits) or the task was cancelled — close the
+                # orphaned connection so a reconnect storm can't leak one raw asyncpg
+                # connection per cycle (B4). suppress: the socket may already be dead.
+                with suppress(Exception):
+                    await conn.close()
+        return conn if listening else None
 
     def _on_notify(self, *_args: object) -> None:
         """
@@ -419,6 +439,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         name: str,
         open_resources: Callable[["AsyncEngine | None"], AbstractAsyncContextManager[Mapping[str, object]]],
         inner: Callable[..., Awaitable[None]],
+        halt_on_drain: bool = False,
     ) -> None:
         """
         Reconnect-with-backoff scaffold shared by ``_fetch_loop`` and ``_worker_loop``.
@@ -430,14 +451,27 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         capped at ``_BACKOFF_MAX_SECONDS``), and reopens.
         """
         error_attempt = 0
-        while self.running:
+        # The fetch loop passes halt_on_drain=True so stop()'s _stopping flag breaks
+        # this loop instead of re-entering _fetch_inner (which returns immediately on
+        # _stopping) in a tight connect/close churn — a production reconnect storm and
+        # an event-loop-starving livelock under the test broker (B1). The worker loop
+        # keeps running through drain to flush in-flight rows.
+        while self.running and not (halt_on_drain and self._stopping):
             client = self._outer_config.client
             if client is None:  # pragma: no cover  # defensive teardown race
                 return
+            started = time.monotonic()
             try:
                 async with open_resources(client.engine) as kwargs:
                     await inner(**kwargs)
             except Exception as e:  # noqa: BLE001
+                # Reset the backoff counter when the connection was healthy for a
+                # sustained window before failing — otherwise the lifetime error count
+                # accrues and every transient blip after the first handful costs the
+                # full capped delay, while min(..., cap) annihilates the jitter and
+                # synchronizes a reconnect herd (B3).
+                if time.monotonic() - started >= _BACKOFF_RESET_THRESHOLD_SECONDS:
+                    error_attempt = 0
                 self._log(
                     log_level=logging.ERROR,
                     message=f"Outbox {name} loop error: {e!r}; reconnecting",

@@ -332,8 +332,6 @@ class FakeOutboxProducer:
     async def publish_batch(self, cmd: OutboxPublishCommand) -> None:
         _validate_activate_args("broker.publish_batch", cmd.activate_in, cmd.activate_at)
         bodies = cmd.batch_bodies
-        if not bodies:
-            return
         next_at = _compute_next_at_client_side(cmd.activate_in, cmd.activate_at)
         recorder = self._broker.config.broker_config.metrics_recorder
         total_size = 0
@@ -508,12 +506,16 @@ def _build_fake_fetch_unprocessed(
         *,
         session: typing.Any = None,
         queue: str | None = None,
+        limit: int = 1000,
     ) -> list[OutboxInnerMessage]:
         del session
         rows = sorted(fake_client.rows, key=lambda r: r.id)
         if queue is not None:
             rows = [r for r in rows if r.queue == queue]
-        return [_to_inner(r) for r in rows]
+        # Mirror production's ``limit`` (default 1000) so a valid
+        # ``broker.fetch_unprocessed(..., limit=N)`` call doesn't TypeError under
+        # the test broker (B16).
+        return [_to_inner(r) for r in rows[:limit]]
 
     return fake_fetch_unprocessed
 
@@ -540,6 +542,9 @@ class TestOutboxBroker(TestBroker[OutboxBroker, OutboxBroker]):  # ty: ignore[in
         super().__init__(broker, **kwargs)
         self.fake_client = FakeOutboxClient()
         self.run_loops = run_loops
+        # Guards against the upstream harness spawning the loops twice (B14); reset
+        # by _fake_close so a re-entered context can spawn again.
+        self._loops_spawned = False
 
     def feed(
         self,
@@ -630,6 +635,13 @@ class TestOutboxBroker(TestBroker[OutboxBroker, OutboxBroker]):  # ty: ignore[in
         # In sync mode, publish drives dispatch directly — don't spawn the loops.
         if not self.run_loops:
             return
+        # The upstream TestBroker harness calls the patched start() twice (once via
+        # ``async with broker`` -> __aenter__ -> start, once via _do_start ->
+        # broker.start()). Spawn the loops only once or a max_workers=1 test silently
+        # runs two workers (B14).
+        if self._loops_spawned:
+            return
+        self._loops_spawned = True
         # Loop mode: spin up the real subscriber loops against the in-memory fake client.
         # Skip subscribers without a registered handler — matches OutboxSubscriber.start()'s
         # ``if not self.calls: return`` behavior so the test broker doesn't access ``_client``
@@ -641,6 +653,22 @@ class TestOutboxBroker(TestBroker[OutboxBroker, OutboxBroker]):  # ty: ignore[in
             for _ in range(sub._config.max_workers):  # noqa: SLF001
                 sub.add_task(sub._worker_loop)  # noqa: SLF001
             sub.add_task(sub._fetch_loop)  # noqa: SLF001
+
+    def _fake_close(self, broker: OutboxBroker, *args: typing.Any, **kwargs: typing.Any) -> None:
+        # Upstream's _fake_close only flips ``sub.running = False``; in loop mode the
+        # spawned fetch/worker tasks are left pending (workers parked on
+        # ``_inflight.get()`` never wake), leaking "Task was destroyed but it is pending!"
+        # noise and stale workers that fire on a re-entered context (B15). Cancel and
+        # clear them, and reset the spawn guard so a re-entered context starts fresh.
+        if self.run_loops:
+            for raw_subscriber in broker.subscribers:
+                sub = typing.cast("OutboxSubscriber", raw_subscriber)
+                for task in sub.tasks:
+                    if not task.done():
+                        task.cancel()
+                sub.tasks.clear()
+            self._loops_spawned = False
+        super()._fake_close(broker, *args, **kwargs)
 
     async def _fake_connect(self, broker: OutboxBroker, *args: typing.Any, **kwargs: typing.Any) -> None:  # noqa: ARG002
         return

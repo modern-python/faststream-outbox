@@ -21,10 +21,21 @@ is_opentelemetry_installed = find_spec("opentelemetry") is not None
 is_prometheus_client_installed = find_spec("prometheus_client") is not None
 
 
+def missing_extra_message(component: str, extra: str) -> str:
+    """
+    Build the friendly "this needs an optional extra" install hint.
+
+    Single source of truth for the message text so the import-time guard and the
+    ``__init__`` probe guard in each middleware module stay in sync (B13).
+    """
+    return f"{component} requires the '{extra}' extra: pip install 'faststream-outbox[{extra}]'"
+
+
 __all__ = [
     "is_alembic_installed",
     "is_asyncpg_installed",
     "is_fastapi_installed",
     "is_opentelemetry_installed",
     "is_prometheus_client_installed",
+    "missing_extra_message",
 ]

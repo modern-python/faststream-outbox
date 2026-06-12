@@ -163,8 +163,6 @@ class OutboxProducer:
 
     async def publish_batch(self, cmd: OutboxPublishCommand) -> None:
         bodies = cmd.batch_bodies
-        if not bodies:
-            return
         # Client-side time for batch: executemany doesn't compose cleanly with
         # column-level SQL expressions, and a few-ms drift versus the DB is
         # harmless for user-supplied scheduling. Retries still use server time.
