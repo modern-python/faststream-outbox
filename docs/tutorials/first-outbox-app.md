@@ -60,7 +60,9 @@ Installed 24 packages in 37ms
  + watchfiles==1.1.1
 ```
 
-Your exact pinned versions will differ; that is fine.
+Your exact pinned versions will differ; that is fine. The Python version
+line will reflect whatever `uv` resolves on your machine — 3.13 or 3.14
+are both fine.
 
 ## Step 2: Start Postgres
 
@@ -145,6 +147,10 @@ async def main() -> None:
 
 asyncio.run(main())
 ```
+
+*Real projects import `metadata` and `outbox_table` from a shared module
+rather than redeclaring them here; this script is self-contained for the
+tutorial's narrow scope.*
 
 Run it:
 
