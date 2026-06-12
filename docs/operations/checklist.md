@@ -63,10 +63,11 @@ story.
   `[validate]` extra. Do **not** call at `broker.start()` — that
   would crash-loop on a pending migration. See [Schema validation §
   Where to call it](../usage/schema-validation.md#where-to-call-it).
-- [ ] **Outbox `table_name` ≤ ~56 chars** — NOTIFY channel name is
-  `outbox_<table_name>`. Postgres' 63-char identifier limit silently
-  truncates longer names and `LISTEN/NOTIFY` short-circuit degrades
-  to plain polling.
+- [ ] **Outbox `table_name` short enough for the NOTIFY channel** — the
+  channel name is `outbox_<table_name>`, and `make_outbox_table` raises
+  `ValueError` at table-build time when that exceeds Postgres' 63-**byte**
+  identifier limit. There is no silent truncation or polling fallback — the
+  guard makes an over-long name impossible to ship.
 
 ## Observability
 
@@ -76,8 +77,9 @@ story.
 - [ ] **Alert on `lease_lost` rate** — non-zero means
   `lease_ttl_seconds < handler P99` for at least one subscriber. See
   [Troubleshooting § `event=lease_lost`](./troubleshooting.md#event-lease_lost-recurring-in-logs).
-- [ ] **`LISTEN/NOTIFY` fallback warning checked at startup** — if
-  the asyncpg connection fails (driver missing, permission error),
-  the subscriber logs once and falls back to polling. Operator
-  silently lives with up-to-`max_fetch_interval` idle latency
-  otherwise.
+- [ ] **`LISTEN/NOTIFY` fallback understood** — a *connection* or
+  *permission* failure (`asyncpg.connect` / `add_listener` raising) logs a
+  WARNING once and falls back to polling. A **missing asyncpg driver or a
+  non-asyncpg engine URL falls back silently** (no log) — diagnose those
+  from the engine URL, not the logs. Either way the subscriber lives with
+  up-to-`max_fetch_interval` idle latency.

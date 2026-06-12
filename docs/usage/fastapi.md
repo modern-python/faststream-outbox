@@ -25,7 +25,7 @@ from sqlalchemy import MetaData
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from faststream_outbox import make_outbox_table
-from faststream_outbox.fastapi import OutboxBroker, OutboxRouter
+from faststream_outbox.fastapi import OutboxRouter
 
 
 metadata = MetaData()
@@ -53,11 +53,10 @@ async def handle(
 @router.post("/orders")
 async def create_order(
     order: OrderIn,
-    broker: OutboxBroker,
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     session.add(Order(...))
-    await broker.publish({"order_id": ...}, queue="orders", session=session)
+    await router.broker.publish({"order_id": ...}, queue="orders", session=session)
     return {"ok": True}
 
 
@@ -104,6 +103,12 @@ async def handle(
 They resolve via FastStream's `Context()` paths but go through FastAPI's
 dependency resolver, so `Depends(...)` and these shortcuts can be mixed
 freely.
+
+These shortcuts resolve through FastStream's subscriber-dispatch
+machinery, so they work **only inside `@router.subscriber` handlers** — not
+in HTTP routes. In an HTTP route, reach the broker via `router.broker` (as
+the quickstart's `create_order` does); a `broker: OutboxBroker` annotation
+there resolves as a request field and fails with a 422.
 
 ## What's intentionally not exposed
 

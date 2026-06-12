@@ -36,9 +36,18 @@ async def test_handler() -> None:
 ```
 
 In sync mode, `session=` is optional — the test broker patches
-`broker.publish` to ignore it. The fake client maintains an in-memory list
-of `_FakeRow` dicts which you can inspect via
-`broker.fake_client.rows`.
+`broker.publish` to ignore it. The fake client keeps an in-memory list of
+rows you can inspect via `fake_client.rows` — but `fake_client` is an
+attribute of the `TestOutboxBroker` harness, not the broker, so bind the
+harness to a name:
+
+```python
+tb = TestOutboxBroker(broker)
+async with tb:
+    await broker.publish(1, queue="orders")
+
+assert len(tb.fake_client.rows) == 1
+```
 
 ## Testing publishers
 
@@ -85,8 +94,8 @@ return`).
 ## Notes
 
 - **`activate_in` / `activate_at` are ignored in sync mode.** Timers fire
-  immediately. The intended firing time is preserved on
-  `broker.fake_client.rows[i].next_attempt_at` for assertions. Use
+  immediately. The intended firing time is preserved on the harness's
+  `fake_client.rows[i].next_attempt_at` for assertions. Use
   `run_loops=True` if you need scheduled delivery to actually wait.
 - **`cancel_timer` and `fetch_unprocessed` are patched** to operate on the
   fake client. The `session` argument is ignored in tests.

@@ -165,7 +165,7 @@ from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from prometheus_client import REGISTRY, make_asgi_app
+from prometheus_client import CollectorRegistry, make_asgi_app
 from sqlalchemy import MetaData
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -184,6 +184,12 @@ trace.set_tracer_provider(tracer_provider)
 meter_provider = MeterProvider(resource=resource, metric_readers=[PrometheusMetricReader()])
 metrics.set_meter_provider(meter_provider)
 
+# Two registries: the middleware and the recorder both define the same
+# faststream_* consume/publish collectors, so sharing one registry raises
+# "Duplicated timeseries in CollectorRegistry" at broker construction.
+MIDDLEWARE_REGISTRY = CollectorRegistry()
+RECORDER_REGISTRY = CollectorRegistry()
+
 # ----- Outbox broker -----
 metadata = MetaData()
 outbox_table = make_outbox_table(metadata, table_name="outbox")
@@ -195,11 +201,11 @@ broker = OutboxBroker(
     middlewares=[
         # Bus-scope spans + meters around consume_scope / publish_scope.
         OutboxTelemetryMiddleware(tracer_provider=tracer_provider, meter_provider=meter_provider),
-        OutboxPrometheusMiddleware(registry=REGISTRY, app_name="my-outbox-service"),
+        OutboxPrometheusMiddleware(registry=MIDDLEWARE_REGISTRY, app_name="my-outbox-service"),
     ],
-    # Outbox-internal events (fetched, lease_lost, terminal reasons) that have
-    # no message context and can't reach the middleware bus.
-    metrics_recorder=PrometheusRecorder(registry=REGISTRY, app_name="my-outbox-service"),
+    # Outbox-internal events (fetched, lease_lost, terminal reasons, dlq_written)
+    # that have no message context and can't reach the middleware bus.
+    metrics_recorder=PrometheusRecorder(registry=RECORDER_REGISTRY, app_name="my-outbox-service"),
 )
 
 
@@ -207,12 +213,28 @@ broker = OutboxBroker(
 async def handle_order(body: dict) -> None: ...
 
 
-app = AsgiFastStream(broker, asgi_routes=[("/metrics", make_asgi_app(registry=REGISTRY))])
+app = AsgiFastStream(
+    broker,
+    asgi_routes=[
+        ("/metrics", make_asgi_app(registry=MIDDLEWARE_REGISTRY)),
+        ("/metrics/outbox", make_asgi_app(registry=RECORDER_REGISTRY)),
+    ],
+)
 ```
 
-Traces flow to OTLP (Jaeger / Tempo / Honeycomb / collector); meters
-and the recorder's outbox-internal counters land on `/metrics` for
-Prometheus to scrape. One process, one ASGI app, one scrape endpoint.
+Traces flow to OTLP (Jaeger / Tempo / Honeycomb / collector); the
+middleware's meters land on `/metrics` and the recorder's outbox-internal
+counters on `/metrics/outbox` for Prometheus to scrape — two scrape targets,
+one process.
+
+**The two seams overlap on consume/publish series.** Both the middleware
+and the recorder emit the same `faststream_received_*` / `faststream_published_*`
+collectors, which is why they must live on **separate registries** (above) —
+sharing one raises `Duplicated timeseries in CollectorRegistry` at broker
+construction, and summing across both double-counts every consume and
+publish. Treat the middleware as the source of truth for consume/publish;
+the recorder's unique value is the outbox-internal events the middleware
+can't see (`fetched`, `lease_lost`, terminal reasons, `dlq_written`).
 
 The providers set `messaging.system = "outbox"`, matching the
 recorder-seam adapters. The OTel provider maps `row.id →

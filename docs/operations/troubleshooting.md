@@ -98,8 +98,12 @@ the SQLAlchemy fetch connection; common failure modes are: the
 asyncpg driver isn't installed (no `[asyncpg]` extra), the engine URL
 is not asyncpg, or Postgres user lacks `LISTEN` permission.
 
-**Diagnose.** Check startup logs for a WARNING noting NOTIFY fallback
-to polling. The subscriber logs it once and continues without crashing.
+**Diagnose.** A connection or permission failure (`asyncpg.connect` /
+`add_listener` raising) logs a WARNING once at startup noting the NOTIFY
+fallback to polling. A **missing asyncpg driver or a non-asyncpg engine URL
+falls back silently** — there is no log line, so check the engine URL
+(`drivername` must be `postgresql+asyncpg`) and that the `[asyncpg]` extra
+is installed.
 
 **Fix.** Install the `[asyncpg]` extra and use an asyncpg-driven
 engine URL (`postgresql+asyncpg://...`). Restart the subscriber.

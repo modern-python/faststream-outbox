@@ -120,7 +120,8 @@ In tests using `TestOutboxBroker` (default `run_loops=False` mode),
 — sync dispatch ignores `next_attempt_at`. This trades production parity
 for test ergonomics: tests can assert handler effects without time travel.
 
-The schedule is still recorded on the fake row
-(`broker.fake_client.rows[0].next_attempt_at`) if a test needs to assert
-on it. Pass `run_loops=True` if you need scheduled delivery to actually
+The schedule is still recorded on the fake row — bind the
+`TestOutboxBroker` to a name and read
+`tb.fake_client.rows[0].next_attempt_at` — if a test needs to assert on it.
+Pass `run_loops=True` if you need scheduled delivery to actually
 wait. See [Testing](./testing.md).

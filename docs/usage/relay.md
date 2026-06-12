@@ -28,7 +28,7 @@ boundary, and the relay carries an at-least-once guarantee end to end.
 from faststream.kafka import KafkaBroker
 from faststream_outbox import OutboxBroker
 
-broker_outbox = OutboxBroker(engine=engine)
+broker_outbox = OutboxBroker(engine, outbox_table=outbox_table)
 broker_kafka = KafkaBroker("127.0.0.1:9092")
 publisher_kafka = broker_kafka.publisher("kafka_topic")
 
@@ -59,7 +59,7 @@ from fastapi import FastAPI
 from faststream.kafka.fastapi import KafkaRouter
 from faststream_outbox.fastapi import OutboxRouter
 
-outbox_router = OutboxRouter(engine=engine)
+outbox_router = OutboxRouter(engine, outbox_table=outbox_table)
 kafka_router = KafkaRouter("127.0.0.1:9092")
 
 publisher_kafka = kafka_router.publisher("kafka_topic")
@@ -86,7 +86,7 @@ from faststream import FastStream
 from faststream.kafka import KafkaBroker
 from faststream_outbox import OutboxBroker
 
-broker_outbox = OutboxBroker(engine=engine)
+broker_outbox = OutboxBroker(engine, outbox_table=outbox_table)
 broker_kafka = KafkaBroker("127.0.0.1:9092")
 publisher_kafka = broker_kafka.publisher("kafka_topic")
 
