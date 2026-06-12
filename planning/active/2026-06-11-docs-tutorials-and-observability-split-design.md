@@ -10,6 +10,15 @@ outcome: null
 
 # Design: Add two tutorials and split observability.md
 
+> **Scope reduction (2026-06-12).** The implementing PR shipped only
+> the observability split (§3 plus the supporting nav reshape and
+> cross-links). The two tutorials (§1, §2) are deferred to a
+> follow-on spec — the spec's discipline that tutorial code must be
+> executed end-to-end against a clean environment with literal output
+> captured warrants a dedicated session. The structural pieces stand
+> on their own and were unblocked first. See the plan's Tasks 2 and 3
+> deferral notes.
+
 ## Summary
 
 Pull-the-piece-that-matters F-min from the

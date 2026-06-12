@@ -8,8 +8,6 @@ nav:
   - Getting started:
       - Installation: introduction/installation.md
       - Basic usage: usage/basic.md
-      - 'Tutorial: Your first outbox app': tutorials/first-outbox-app.md
-      - 'Tutorial: Add a Kafka relay': tutorials/add-kafka-relay.md
   - Concepts:
       - How it works: introduction/how-it-works.md
       - Comparison: concepts/comparison.md

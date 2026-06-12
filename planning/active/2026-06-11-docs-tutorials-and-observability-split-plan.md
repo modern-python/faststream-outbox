@@ -70,7 +70,12 @@ environment before committing.
 
 ---
 
-### Task 2: Tutorial 1 — Your first outbox app
+### Task 2: Tutorial 1 — Your first outbox app — DEFERRED
+
+> **Deferred to follow-on PR (2026-06-12).** Spec §"Scope reduction"
+> note explains: tutorial execution discipline (clean env, literal
+> captured output) warrants a dedicated session. Structural work
+> (T4–T7) shipped without this task.
 
 **Files:**
 - Create: `docs/tutorials/first-outbox-app.md`
@@ -135,7 +140,9 @@ environment.** Capture the literal terminal output at each step.
 
 ---
 
-### Task 3: Tutorial 2 — Add a Kafka relay
+### Task 3: Tutorial 2 — Add a Kafka relay — DEFERRED
+
+> **Deferred to follow-on PR (2026-06-12).** Same rationale as Task 2.
 
 **Files:**
 - Create: `docs/tutorials/add-kafka-relay.md`
