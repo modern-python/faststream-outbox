@@ -11,7 +11,11 @@ points.
 
 ## Active
 
-_None._
+- **[docs-tutorials](active/2026-06-12-docs-tutorials-design.md)**
+  — The two tutorials deferred from #56: *Your first outbox app*
+  (10-minute walk-through) and *Add a Kafka relay* (extends the
+  first tutorial with a Kafka publisher + at-least-once
+  demonstration). New `docs/tutorials/` directory; two nav entries.
 
 ## Archived (shipped)
 

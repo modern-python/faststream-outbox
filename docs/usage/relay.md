@@ -1,5 +1,8 @@
 # Relay to a foreign broker
 
+> Want a worked end-to-end example? See
+> [Tutorial: Add a Kafka relay](../tutorials/add-kafka-relay.md).
+
 The outbox pattern's payoff line: domain code writes a row to the outbox in
 the same DB transaction as its other writes, and a separate worker relays
 those rows to a real bus (Kafka, RabbitMQ, NATS, Redis…). `faststream-outbox`
