@@ -240,10 +240,11 @@ doesn't use (no DLQ, no timers, no `OutboxResponse`).
 
   Run: `just docs-build`
 
-  Expected: clean. The new page is orphaned-not-in-nav (Task 4
-  wires it); mkdocs strict mode warns but does not fail on
-  orphaned pages by default. If it does fail, add the nav entry now
-  (out of Task-4 order) rather than disabling the strict check.
+  Expected: clean **or** an `not_in_nav` failure (Task 4 wires the
+  page in). `mkdocs build --strict` promotes that warning to an
+  error. If the build fails on it, add the nav entry now (out of
+  Task-4 order) rather than disabling the strict check — `--strict`
+  is load-bearing and shouldn't be relaxed for a single task.
 
 - [ ] **Step 11: Clean up the tutorial environment**
 
