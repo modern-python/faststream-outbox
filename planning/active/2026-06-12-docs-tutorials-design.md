@@ -103,7 +103,9 @@ What you'll build         (2 sentences: a tiny app where publishing
 
 Before you start          (Python 3.13+, Postgres, ~10 minutes)
 
-Step 1: Install           (uv add 'faststream-outbox[asyncpg,validate]')
+Step 1: Install           (uv add 'faststream-outbox[asyncpg,validate]'
+                           'faststream[cli]' — the CLI extra is needed
+                           for `faststream run`)
 
 Step 2: Start Postgres    (one-liner Docker)
 
