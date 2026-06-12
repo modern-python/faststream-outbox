@@ -1,9 +1,9 @@
 ---
-status: draft
+status: shipped
 date: 2026-06-11
 slug: docs-tutorials-and-observability-split
 spec: docs-tutorials-and-observability-split
-pr: null
+pr: "56"
 ---
 
 # docs-tutorials-and-observability-split — implementation plan

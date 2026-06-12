@@ -11,14 +11,15 @@ points.
 
 ## Active
 
-- **[docs-tutorials-and-observability-split](active/2026-06-11-docs-tutorials-and-observability-split-design.md)**
-  — Two new tutorials under `docs/tutorials/` plus a three-way split
-  of `docs/usage/observability.md` into Reference + How-to +
-  Explanation. F-min from the docs-landing-and-comparison
-  follow-ons.
+_None._
 
 ## Archived (shipped)
 
+- **[docs-tutorials-and-observability-split](archived/2026-06-11-docs-tutorials-and-observability-split-design.md)**
+  (#56, 2026-06-12) — Three-way split of `usage/observability.md`
+  into Reference + How-to + Explanation. Tutorials §1 §2 from the
+  spec deferred to a follow-on; archived spec body carries a "Scope
+  reduction" note.
 - **[operator-pages](archived/2026-06-11-operator-pages-design.md)**
   (#53, 2026-06-11) — Three new pages under a new `docs/operations/`
   section: Production checklist, Troubleshooting playbook, Alembic
