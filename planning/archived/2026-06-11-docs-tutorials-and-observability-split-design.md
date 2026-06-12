@@ -1,11 +1,11 @@
 ---
-status: draft
+status: shipped
 date: 2026-06-11
 slug: docs-tutorials-and-observability-split
 supersedes: null
 superseded_by: null
-pr: null
-outcome: null
+pr: "56"
+outcome: merged 2026-06-12 as #56 (observability split only; tutorials §1 §2 deferred to a follow-on spec)
 ---
 
 # Design: Add two tutorials and split observability.md
