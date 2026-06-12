@@ -311,5 +311,5 @@ docker stop outbox-postgres
   `OutboxPublisher` decorator, chained publishing.
 - [FastAPI integration](../usage/fastapi.md) — wire the outbox into
   a real HTTP service with `Depends(get_session)`.
-- Tutorial: Add a Kafka relay (next tutorial) — extend this app to
-  forward each row into Kafka with one stacked decorator.
+- [Tutorial: Add a Kafka relay](./add-kafka-relay.md) — extend this
+  app to forward each row into Kafka with one stacked decorator.
