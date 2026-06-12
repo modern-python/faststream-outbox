@@ -230,8 +230,11 @@ the foreign publish would raise, the outbox row would be nacked, and
 the configured `retry_strategy` would reschedule it. The next dispatch
 re-runs the handler and re-attempts the foreign publish. The net effect
 is **at-least-once delivery to the foreign broker** — the outbox row is
-the durability boundary, and it stays in the table until Kafka actually
-acks the publish.
+the durability boundary, and it stays in the table for the duration of the
+retry budget (the default `ExponentialRetry` allows 10 attempts). Once the
+budget is exhausted the row is deleted — the default configures no DLQ — so
+configure a longer `retry_strategy` or a `dlq_table` to survive outages
+beyond that (with the default schedule, ~13–14 minutes).
 
 In practice, `aiokafka`'s producer has its own client-side reconnect
 and retry logic, so a short Kafka outage usually completes from the

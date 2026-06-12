@@ -131,10 +131,11 @@ guarantee. The factory rejects it at registration.
 
 ```python
 from faststream import AckPolicy
+from faststream_outbox.annotations import OutboxMessage
 
 
 @broker.subscriber("audit", ack_policy=AckPolicy.MANUAL)
-async def handle(msg, body: dict) -> None:
+async def handle(msg: OutboxMessage, body: dict) -> None:
     try:
         await write_audit(body)
         await msg.ack()
@@ -184,13 +185,13 @@ Strategies receive the raised `exception` so users may subclass for
 
 ```python
 class TransientOnly(ExponentialRetry):
-    def get_next_attempt_at(self, *, exception=None, **kw):
+    def get_next_attempt_delay(self, *, exception=None, **kw):
         if exception and not isinstance(exception, TransientError):
             return None  # terminal — DELETE
-        return super().get_next_attempt_at(exception=exception, **kw)
+        return super().get_next_attempt_delay(exception=exception, **kw)
 ```
 
-Returning `None` from `get_next_attempt_at` signals a terminal failure.
+Returning `None` from `get_next_attempt_delay` signals a terminal failure.
 `_RetryStrategyTemplate` also enforces `max_attempts` and
 `max_total_delay_seconds` for you.
 

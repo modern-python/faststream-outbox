@@ -54,10 +54,10 @@ broken recorder never poisons the dispatch loop.
 | `fetched` | `queue`, `subscriber`, `count` | | Fetch loop, every cycle (including empty) |
 | `dispatched` | `queue`, `subscriber` | | Worker loop, before handler runs |
 | `acked` | `queue`, `subscriber` | `duration_seconds` | Handler returned successfully |
-| `nacked_retried` | `queue`, `subscriber`, `attempts_count`, `deliveries_count` | `exception_type` | Retry scheduled |
+| `nacked_retried` | `queue`, `subscriber`, `deliveries_count`, `duration_seconds`, `next_delay_seconds` | `exception_type` | Retry scheduled |
 | `nacked_terminal` | `queue`, `subscriber`, `deliveries_count`, `reason` | `exception_type` | Row terminally failed |
 | `lease_lost` | `queue`, `phase`, `row_id`, `deliveries_count` | | Terminal write found `rowcount == 0` |
-| `published` | `queue`, `destination` | `duration_seconds`, `payload_size_bytes` | Producer INSERT committed |
+| `published` | `queue`, `status`, `count`, `size_bytes`, `duration_seconds` | `exception_type` | Producer, after the INSERT executes (pre-commit; also fires on error with `status="error"`) |
 | `dlq_written` | `queue`, `subscriber`, `deliveries_count`, `failure_reason` | `exception_type` | DLQ CTE wrote an audit row |
 
 `reason` on `nacked_terminal` is one of `max_deliveries`,
@@ -97,7 +97,7 @@ histogram_quantile(0.99,
   rate(faststream_published_messages_duration_seconds_bucket{broker="outbox"}[5m]))
 
 # DLQ misconfiguration: terminal-failure rate diverges from DLQ-write rate
-rate(faststream_outbox_nacked_terminal_total[5m])
+rate(faststream_outbox_terminal_total[5m])
   -
 rate(faststream_outbox_dlq_written_total[5m])
   > 0

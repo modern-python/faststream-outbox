@@ -179,8 +179,9 @@ interval '90 days'` from a daily cron is enough.
 
 ## Test broker
 
-`TestOutboxBroker` accumulates audit rows in
-`broker.fake_client.dlq_rows` so tests can assert on archive content
+`TestOutboxBroker` accumulates audit rows on the harness's
+`fake_client.dlq_rows` (bind the `TestOutboxBroker` to a name, as the
+snippet below does) so tests can assert on archive content
 without a real Postgres. The fake mirrors the production CTE
 side-effect: the source row is removed from `fake_client.rows` and an
 audit dict is appended to `fake_client.dlq_rows` in the same call.

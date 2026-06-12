@@ -56,7 +56,8 @@ app = FastStream(broker)
 decorators, which is useful for code-gen or plugin patterns:
 
 ```python
-from faststream_outbox import OutboxRoute, OutboxRouter
+from faststream_outbox import OutboxRouter
+from faststream_outbox.router import OutboxRoute
 
 
 async def handle_order(order_id: int) -> None:

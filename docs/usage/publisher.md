@@ -128,7 +128,8 @@ transactional contract applies (you provide the session, the row commits
 with your domain writes):
 
 ```python
-from faststream_outbox import OutboxMessage, OutboxResponse
+from faststream_outbox import OutboxResponse
+from faststream_outbox.annotations import OutboxMessage
 
 
 @broker.subscriber("orders")
