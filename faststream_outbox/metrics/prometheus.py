@@ -38,20 +38,20 @@ from faststream_outbox.metrics import BROKER_SYSTEM
 if typing.TYPE_CHECKING:
     from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 
+# ``faststream.prometheus`` imports ``prometheus_client`` at its module top, so its
+# import must be guarded behind the same probe as the third-party import. Importing
+# ``faststream.prometheus.container`` unconditionally raised ``ModuleNotFoundError`` at
+# import time for users without the ``[prometheus]`` extra — defeating the friendly
+# ``ImportError`` in ``PrometheusRecorder.__init__`` (B13). ``DEFAULT_SIZE_BUCKETS`` is a
+# class attribute on FastStream's MetricsContainer; re-exporting keeps bucket spacing in
+# sync with upstream when the extra is present.
 if is_prometheus_client_installed:
+    from faststream.prometheus.container import MetricsContainer as _UpstreamContainer
     from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 
-# ``DEFAULT_SIZE_BUCKETS`` is a class attribute on FastStream's MetricsContainer,
-# not a module-level constant. Re-export through the attribute access so any
-# future upstream tweak (different bucket spacing, additional buckets) flows
-# in automatically. Upstream ``faststream.prometheus`` is part of the dev group;
-# the import is unconditional rather than guarded behind an extra probe because
-# the canonical source of buckets lives in upstream FastStream, not in a separate
-# package.
-from faststream.prometheus.container import MetricsContainer as _UpstreamContainer
-
-
-_UPSTREAM_SIZE_BUCKETS: tuple[float, ...] = tuple(_UpstreamContainer.DEFAULT_SIZE_BUCKETS)
+    _UPSTREAM_SIZE_BUCKETS: tuple[float, ...] = tuple(_UpstreamContainer.DEFAULT_SIZE_BUCKETS)
+else:  # pragma: no cover - exercised only when the [prometheus] extra is absent
+    _UPSTREAM_SIZE_BUCKETS = ()
 
 # Mirror FastStream's PrometheusMiddleware duration histogram boundaries verbatim
 # so dashboards comparing process duration across brokers use the same buckets.
@@ -254,9 +254,14 @@ class PrometheusRecorder:
             # Map outbox event names to upstream ``ProcessingStatus`` values.
             status = "acked" if event == "acked" else "nacked"
             self._processed_total.labels(*consume_base, status).inc()
-            self._in_process.labels(*consume_base).dec()
             duration = tags.get("duration_seconds")
             if duration is not None:
+                # ``duration_seconds`` is present exactly for terminals that followed a
+                # ``dispatched`` (which carries the matching in-process ``.inc()``).
+                # ``nacked_terminal(reason="max_deliveries")`` fires WITHOUT a preceding
+                # ``dispatched`` (the handler never ran) and carries no duration — dec'ing
+                # the gauge there drives ``..._in_process`` negative (B9).
+                self._in_process.labels(*consume_base).dec()
                 self._processed_duration.labels(*consume_base).observe(duration)
             if event == "nacked_terminal":
                 self._terminal_reason.labels(*consume_base, tags["reason"]).inc()

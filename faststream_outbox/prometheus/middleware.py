@@ -12,7 +12,17 @@ import typing
 from collections.abc import Callable, Sequence
 
 from faststream._internal.constants import EMPTY
-from faststream.prometheus.middleware import PrometheusMiddleware
+
+
+try:
+    from faststream.prometheus.middleware import PrometheusMiddleware
+except ImportError as _exc:  # pragma: no cover - only without the [prometheus] extra
+    # ``faststream.prometheus`` imports ``prometheus_client`` at module top, and the
+    # upstream class is needed at class-definition time so it can't be probe-guarded.
+    # Surface the friendly message at import time instead of a raw ModuleNotFoundError
+    # (B13); the __init__ probe guard below stays as defense for a falsified probe.
+    _msg = "OutboxPrometheusMiddleware requires the 'prometheus' extra: pip install 'faststream-outbox[prometheus]'"
+    raise ImportError(_msg) from _exc
 
 from faststream_outbox._import_checker import is_prometheus_client_installed
 from faststream_outbox.message import OutboxInnerMessage

@@ -63,6 +63,17 @@ class OutboxPublishCommand(BatchPublishCommand):
     def queue(self) -> str:
         return self.destination
 
+    @property
+    def batch_bodies(self) -> tuple[typing.Any, ...]:
+        # Upstream's PublishCommand.batch_bodies drops ``self.body`` when it is
+        # None, so a leading (or sole) None body silently vanishes from the batch
+        # — a lost row with no error and no metric. The outbox treats None as a
+        # valid body (``publish(None)`` inserts ``b""``), so every positional body
+        # must survive, in order. ``OutboxPublishCommand`` is the single source of
+        # truth, so overriding here fixes the producer, the fake producer, and the
+        # OpenTelemetry batch-count attribute in one place.
+        return (self.body, *self.extra_bodies)
+
     @classmethod
     def from_cmd(
         cls,

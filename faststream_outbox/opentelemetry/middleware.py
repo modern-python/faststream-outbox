@@ -9,7 +9,18 @@ upstream Kafka / Rabbit / Redis middleware. For outbox-internal events
 
 import typing
 
-from faststream.opentelemetry.middleware import TelemetryMiddleware
+
+try:
+    from faststream.opentelemetry.middleware import TelemetryMiddleware
+except ImportError as _exc:  # pragma: no cover - only without the [opentelemetry] extra
+    # ``faststream.opentelemetry`` imports ``opentelemetry`` at module top, and the
+    # upstream class is needed at class-definition time so it can't be probe-guarded.
+    # Surface the friendly message at import time instead of a raw ModuleNotFoundError
+    # (B13); the __init__ probe guard below stays as defense for a falsified probe.
+    _msg = (
+        "OutboxTelemetryMiddleware requires the 'opentelemetry' extra: pip install 'faststream-outbox[opentelemetry]'"
+    )
+    raise ImportError(_msg) from _exc
 
 from faststream_outbox._import_checker import is_opentelemetry_installed
 from faststream_outbox.opentelemetry.provider import OutboxTelemetrySettingsProvider

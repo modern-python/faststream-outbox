@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 from faststream import Context as _Context
 from faststream._internal.producer import ProducerProto
+from faststream.exceptions import NackMessage
 from faststream.middlewares import AckPolicy
 from sqlalchemy import MetaData
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -394,6 +395,19 @@ async def test_fake_broker_fetch_unprocessed_reads_fake_client() -> None:
 
         q1_only = await broker.fetch_unprocessed(queue="q1")  # ty: ignore[missing-argument]
         assert [r.queue for r in q1_only] == ["q1"]
+
+
+async def test_fake_broker_fetch_unprocessed_respects_limit() -> None:
+    """B16: limit= (production signature) must be accepted and cap the result set under the test broker."""
+    broker = _make_broker()
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        for i in range(5):
+            await broker.publish(str(i), queue="q1")  # ty: ignore[missing-argument]
+        limited = await broker.fetch_unprocessed(limit=2)  # ty: ignore[missing-argument]
+        assert len(limited) == 2
+        all_rows = await broker.fetch_unprocessed()  # ty: ignore[missing-argument]
+        assert len(all_rows) == 5
 
 
 async def test_fake_broker_router_subscriber_receives_publish() -> None:
@@ -850,6 +864,35 @@ async def test_subscriber_with_no_handler_skips_loop_setup() -> None:
         assert sub.tasks == [] or all(t.done() for t in sub.tasks)
 
 
+async def test_loop_mode_spawns_each_loop_once() -> None:
+    """B14: the upstream harness calls the patched start() twice; loops must spawn once, not 2x."""
+    broker = _make_broker()
+
+    @broker.subscriber("orders", max_workers=1, min_fetch_interval=0.01, max_fetch_interval=0.05)
+    async def handle(body: str) -> None: ...
+
+    test_broker = TestOutboxBroker(broker, run_loops=True)
+    async with test_broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        # max_workers=1 → exactly 1 worker loop + 1 fetch loop = 2 tasks (the bug spawned 4).
+        assert len(sub.tasks) == 2
+
+
+async def test_loop_mode_cancels_loop_tasks_on_context_exit() -> None:
+    """B15: spawned fetch/worker tasks must be cancelled and cleared on exit, not leaked pending."""
+    broker = _make_broker()
+
+    @broker.subscriber("orders", max_workers=1, min_fetch_interval=0.01, max_fetch_interval=0.05)
+    async def handle(body: str) -> None: ...
+
+    test_broker = TestOutboxBroker(broker, run_loops=True)
+    async with test_broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        assert sub.tasks  # loops are running
+
+    assert sub.tasks == []  # _fake_close cancelled + cleared them
+
+
 async def test_sync_publish_skips_callless_subscriber() -> None:
     """``_find_subscriber_for_queue`` must skip subscribers that have no registered call."""
     from faststream_outbox.subscriber.factory import create_subscriber  # noqa: PLC0415
@@ -995,6 +1038,48 @@ async def test_fake_broker_nack_on_error_default_keeps_row_for_retry() -> None:
         await broker.publish("x", queue="orders")  # ty: ignore[missing-argument]
 
     # Row rescheduled, not deleted — same as the no-ack_policy default.
+    assert len(test_broker.fake_client.rows) == 1
+    row = test_broker.fake_client.rows[0]
+    assert row.attempts_count == 1
+    assert row.next_attempt_at > _dt.datetime.now(tz=_dt.UTC)
+
+
+async def test_fake_broker_manual_policy_handler_exception_retries_not_deletes() -> None:
+    """B5: AckPolicy.MANUAL + handler exception must redeliver (honor retry), not DELETE the row."""
+    broker = _make_broker()
+
+    @broker.subscriber("orders", ack_policy=AckPolicy.MANUAL)
+    async def handle(body: str) -> None:
+        del body  # MANUAL handler raises before any manual ack/nack
+        boom = "db blip before ack"
+        raise RuntimeError(boom)
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish("x", queue="orders")  # ty: ignore[missing-argument]
+
+    # The row survived: the default ExponentialRetry rescheduled it instead of
+    # the destructive reject fallback deleting it.
+    assert len(test_broker.fake_client.rows) == 1
+    row = test_broker.fake_client.rows[0]
+    assert row.attempts_count == 1
+    assert row.next_attempt_at > _dt.datetime.now(tz=_dt.UTC)
+
+
+async def test_fake_broker_nack_message_exception_retries_not_deletes() -> None:
+    """B6: ``raise NackMessage(delay=…)`` (native idiom) must reschedule, not DELETE under NACK_ON_ERROR."""
+    broker = _make_broker()
+
+    @broker.subscriber("orders", ack_policy=AckPolicy.NACK_ON_ERROR)
+    async def handle(body: str) -> None:
+        del body
+        raise NackMessage(delay=5)
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish("x", queue="orders")  # ty: ignore[missing-argument]
+
+    # The kwargs no longer TypeError inside the ack middleware -> no reject fallback.
     assert len(test_broker.fake_client.rows) == 1
     row = test_broker.fake_client.rows[0]
     assert row.attempts_count == 1

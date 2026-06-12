@@ -1288,6 +1288,48 @@ async def test_dlq_atomic_insert_with_delete(
     assert row["payload"] is not None
 
 
+async def test_dlq_writes_to_schema_qualified_tables(pg_engine: AsyncEngine) -> None:
+    """
+    B10: with a non-default ``MetaData(schema=...)`` the DLQ CTE must target ``schema.table``.
+
+    The buggy ``quote(table.name)`` dropped the schema, so the raw DELETE+INSERT CTE
+    referenced a bare ``outbox`` / ``outbox_dlq`` not on the search_path → ``UndefinedTable``
+    on every terminal failure and no audit row ever landed.
+    """
+    schema = f"sch_{uuid.uuid4().hex[:8]}"
+    metadata = MetaData(schema=schema)
+    outbox = make_outbox_table(metadata, table_name="outbox")
+    dlq = make_dlq_table(metadata, table_name="outbox_dlq")
+    async with pg_engine.begin() as conn:
+        await conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+        await conn.run_sync(metadata.create_all)
+    try:
+        broker = OutboxBroker(pg_engine, outbox_table=outbox, dlq_table=dlq)
+        handled = asyncio.Event()
+
+        @broker.subscriber("orders", retry_strategy=NoRetry(), min_fetch_interval=0.02)
+        async def handle(body: dict) -> None:
+            del body
+            handled.set()
+            boom = "always fails"
+            raise RuntimeError(boom)
+
+        session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+        async with broker:
+            async with session_factory() as session, session.begin():
+                await broker.publish({"audit": True}, queue="orders", session=session)
+            await asyncio.wait_for(handled.wait(), timeout=5.0)
+
+        assert await _row_count(pg_engine, outbox) == 0
+        rows = await _dlq_rows(pg_engine, dlq)
+        assert len(rows) == 1
+        assert rows[0]["failure_reason"] == "retry_terminal"
+    finally:
+        async with pg_engine.begin() as conn:
+            await conn.run_sync(metadata.drop_all)
+            await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+
+
 async def test_dlq_insert_failure_rolls_back_delete(
     pg_engine: AsyncEngine,
     outbox_table: Table,

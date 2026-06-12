@@ -2,9 +2,11 @@ import asyncio
 import datetime as _dt
 import json
 import logging
+import math
 import typing
 import uuid
 import warnings
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import faststream.asgi.factories.asyncapi.try_it_out
@@ -18,7 +20,7 @@ from faststream.response.response import PublishCommand
 from pydantic import BaseModel
 from sqlalchemy import MetaData
 from sqlalchemy.dialects import postgresql
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from faststream_outbox import (
     ConstantRetry,
@@ -384,6 +386,74 @@ async def test_assert_state_set_rejects_when_not_set() -> None:
     assert msg.to_delete  # reject path → terminal
 
 
+async def test_assert_state_set_with_exception_nacks_for_retry() -> None:
+    """B5: a handler that raised without acking must honor the retry strategy, not reject-delete."""
+    msg = _make_msg(retry_strategy=ConstantRetry(delay_seconds=60), last_exception=RuntimeError("boom"))
+    await msg.assert_state_set(logger=None)
+    assert msg.state_set
+    assert not msg.to_delete  # nack scheduled a retry, did not delete
+    assert msg.pending_delay_seconds == 60.0
+    assert msg.terminal_failure_reason is None
+
+
+async def test_assert_state_set_with_exception_no_strategy_is_terminal_retry() -> None:
+    """B5: handler raised, no retry strategy -> terminal via nack (retry_terminal), not rejected."""
+    msg = _make_msg(last_exception=RuntimeError("boom"))
+    await msg.assert_state_set(logger=None)
+    assert msg.state_set
+    assert msg.to_delete
+    assert msg.terminal_failure_reason == "retry_terminal"
+
+
+async def test_inner_message_nack_accepts_and_ignores_kwargs() -> None:
+    """B6: NackMessage(delay=5) forwards delay= to nack(); we accept-and-ignore it."""
+    msg = _make_msg(retry_strategy=ConstantRetry(delay_seconds=60))
+    await msg.nack(delay=5)  # native-broker idiom; the kwarg must not raise
+    assert msg.pending_delay_seconds == 60.0  # our strategy owns timing, not the kwarg
+
+
+async def test_outbox_message_nack_accepts_and_ignores_kwargs() -> None:
+    """B6: the StreamMessage wrapper the ack middleware calls must accept **options too."""
+    inner = _make_msg(retry_strategy=ConstantRetry(delay_seconds=60))
+    msg = OutboxMessage(
+        raw_message=inner,
+        body=b"",
+        headers={},
+        content_type=None,
+        message_id="1",
+        correlation_id="1",
+    )
+    await msg.nack(delay=5)
+    assert inner.pending_delay_seconds == 60.0
+
+
+class _RaisingRetryStrategy:
+    """A buggy retry strategy that raises when computing the next delay."""
+
+    def get_next_attempt_delay(self, **_kwargs: object) -> float | None:
+        msg = "strategy boom"
+        raise RuntimeError(msg)
+
+
+async def test_nack_with_raising_strategy_degrades_to_retry_terminal() -> None:
+    """B7: a strategy that raises must degrade to retry_terminal, never reject-delete."""
+    msg = _make_msg(retry_strategy=_RaisingRetryStrategy())
+    await msg.nack()
+    assert msg.state_set
+    assert msg.to_delete
+    assert msg.terminal_failure_reason == "retry_terminal"
+
+
+def test_exponential_retry_does_not_overflow_at_extreme_attempts() -> None:
+    """B7: ExponentialRetry with no max_attempts/max_delay must not raise OverflowError."""
+    strategy = ExponentialRetry(initial_delay_seconds=1.0, multiplier=2.0)
+    now = _dt.datetime.now(tz=_dt.UTC)
+    delay = strategy.get_next_attempt_delay(first_attempt_at=now, last_attempt_at=now, attempts_count=2000)
+    assert delay is not None
+    assert math.isfinite(delay)
+    assert delay <= 100.0 * 365.0 * 24.0 * 60.0 * 60.0  # clamped at the absolute ceiling
+
+
 # --- parser ---
 
 
@@ -579,6 +649,14 @@ async def test_publish_command_rejects_naive_activate_at() -> None:
     naive = _dt.datetime(2026, 5, 23, 12, 0, 0)  # noqa: DTZ001
     with pytest.raises(ValueError, match="timezone-aware"):
         OutboxPublishCommand(b"x", queue="orders", session=session, activate_at=naive)
+
+
+async def test_publish_command_batch_bodies_preserves_none_body() -> None:
+    """B8: batch_bodies must keep a leading/sole None body; upstream's getter drops body=None."""
+    session = _make_session_mock()
+    assert OutboxPublishCommand(None, b"x", queue="q", session=session).batch_bodies == (None, b"x")
+    assert OutboxPublishCommand(None, queue="q", session=session).batch_bodies == (None,)
+    assert OutboxPublishCommand(b"a", b"b", queue="q", session=session).batch_bodies == (b"a", b"b")
 
 
 async def test_publish_command_rejects_non_async_session() -> None:
@@ -945,16 +1023,18 @@ async def test_publisher_request_raises_not_implemented() -> None:
         await pub.request(b"x")
 
 
-async def test_outbox_producer_publish_batch_empty_bodies_is_noop() -> None:
-    """Empty ``batch_bodies`` returns before any SQL fires (the real broker also short-circuits)."""
+async def test_outbox_producer_publish_batch_with_none_body_inserts_row() -> None:
+    """B8: a sole None body must insert one b"" row, not silently vanish (upstream drops body=None)."""
     metadata = MetaData()
     t = make_outbox_table(metadata)
     producer = OutboxProducer(table=t, parser=None, decoder=None)
     session = _make_session_mock()
     cmd = OutboxPublishCommand(None, queue="orders", session=session)
-    cmd.batch_bodies = ()  # PublishCommand carries body=None, but be explicit
     await producer.publish_batch(cmd)
-    session.execute.assert_not_called()
+    # First execute is the multi-row INSERT; its rows arg carries one b"" payload.
+    insert_rows = session.execute.call_args_list[0].args[1]
+    assert len(insert_rows) == 1
+    assert insert_rows[0]["payload"] == b""
 
 
 def _make_outbox_publisher_spec(*, title: str | None = None, queue: str = "orders") -> OutboxPublisherSpecification:
@@ -1000,14 +1080,26 @@ async def test_fake_outbox_producer_publish_batch_inserts_rows() -> None:
     assert {r.payload for r in fake_client.rows} == {b"a", b"b"}
 
 
-async def test_fake_outbox_producer_publish_batch_empty_is_noop() -> None:
+async def test_fake_outbox_producer_publish_batch_with_none_body_inserts_row() -> None:
+    """B8: a sole None body inserts one b"" row via the fake producer too."""
     broker = _make_broker()
     fake_client = FakeOutboxClient()
     producer = FakeOutboxProducer(fake_client, broker, serializer=None, run_loops=False)
     cmd = OutboxPublishCommand(None, queue="orders", session=_make_session_mock())
-    cmd.batch_bodies = ()
     await producer.publish_batch(cmd)
-    assert fake_client.rows == []
+    assert len(fake_client.rows) == 1
+    assert fake_client.rows[0].payload == b""
+
+
+async def test_fake_outbox_producer_publish_batch_leading_none_inserts_all() -> None:
+    """B8: (None, b"x") inserts 2 rows — the leading None is not dropped."""
+    broker = _make_broker()
+    fake_client = FakeOutboxClient()
+    producer = FakeOutboxProducer(fake_client, broker, serializer=None, run_loops=False)
+    cmd = OutboxPublishCommand(None, b"x", queue="orders", session=_make_session_mock())
+    await producer.publish_batch(cmd)
+    assert len(fake_client.rows) == 2
+    assert {r.payload for r in fake_client.rows} == {b"", b"x"}
 
 
 async def test_fake_outbox_producer_request_raises() -> None:
@@ -1100,6 +1192,46 @@ async def test_broker_ping_live_subscriber_task_is_true() -> None:
     live_task.done.return_value = False
     sub.tasks = [live_task]
     assert await broker.ping() is True
+
+
+async def test_broker_ping_checks_router_registered_subscribers() -> None:
+    """B11: a dead task on a router-registered subscriber must fail the probe."""
+    metadata = MetaData()
+    t = make_outbox_table(metadata)
+    engine = AsyncMock()
+    broker = OutboxBroker(engine, outbox_table=t)
+    router = OutboxRouter()
+
+    @router.subscriber("orders")
+    async def handle(body: dict) -> None: ...
+
+    broker.include_router(router)
+    broker.config.broker_config.client.ping = AsyncMock(return_value=True)  # type: ignore[union-attr]
+    # Router subscribers live on the router, not in broker._subscribers — the old
+    # ping() iterated _subscribers and never saw this one.
+    subs = list(broker.subscribers)
+    assert subs
+    assert all(s not in broker._subscribers for s in subs)  # noqa: SLF001
+    done_task = MagicMock()
+    done_task.done.return_value = True
+    subs[0].tasks = [done_task]  # ty: ignore[unresolved-attribute]
+    assert await broker.ping() is False
+
+
+async def test_broker_ping_honors_timeout_when_probe_hangs() -> None:
+    """B12: ping(timeout) must bound a hanging client.ping() and return False, not hang."""
+    metadata = MetaData()
+    t = make_outbox_table(metadata)
+    engine = AsyncMock()
+    broker = OutboxBroker(engine, outbox_table=t)
+
+    async def _hang() -> bool:
+        await asyncio.sleep(10)
+        return True  # pragma: no cover - move_on_after cancels the sleep before this returns
+
+    broker.config.broker_config.client.ping = _hang  # type: ignore[union-attr]
+    result = await broker.ping(timeout=0.05)
+    assert result is False
 
 
 def test_outbox_params_storage_caches_logger() -> None:
@@ -1896,6 +2028,116 @@ async def test_worker_loop_reconnects_after_error(monkeypatch: pytest.MonkeyPatc
     assert sleeps[0] > 0
 
 
+async def test_open_listen_connection_closes_conn_when_add_listener_fails() -> None:
+    """B4: connect() succeeded but add_listener() failed → close the orphaned conn, don't leak it."""
+    sub = _make_subscriber_for_listener_test()
+    engine = MagicMock()
+    engine.url.drivername = "postgresql+asyncpg"
+    engine.dialect.create_connect_args.return_value = (
+        [],
+        {"host": "h", "user": "u", "password": "p", "database": "db"},
+    )
+    fake_conn = MagicMock()
+    fake_conn.add_listener = AsyncMock(side_effect=OSError("listen rejected"))
+    fake_conn.close = AsyncMock()
+    with (
+        patch("faststream_outbox.subscriber.usecase._asyncpg.connect", new=AsyncMock(return_value=fake_conn)),
+        patch.object(OutboxSubscriber, "_notify_channel", new="outbox_orders"),
+        patch.object(sub, "_log"),
+    ):
+        result = await sub._open_listen_connection(engine)  # noqa: SLF001
+    assert result is None
+    fake_conn.close.assert_awaited_once()
+
+
+async def test_subscriber_start_resets_stopping_flag() -> None:
+    """B2: start() clears _stopping so a stop()->start() cycle fetches again instead of hot-spinning."""
+    sub = _make_subscriber_for_listener_test()
+    sub._stopping = True  # noqa: SLF001  # simulate a completed drain
+    with (
+        patch("faststream._internal.endpoint.subscriber.SubscriberUsecase.start", new=AsyncMock()),
+        patch.object(sub, "_post_start"),
+        patch.object(sub, "add_task"),
+    ):
+        await sub.start()
+    assert sub._stopping is False  # noqa: SLF001
+
+
+async def test_fetch_reconnect_loop_exits_on_drain_without_churning() -> None:
+    """B1: with _stopping set, the fetch reconnect loop must exit, not re-open connections in a tight spin."""
+    fake = FakeOutboxClient()
+    broker, test_broker = _make_broker_for_dispatch(fake)
+    opens = {"n": 0}
+
+    @asynccontextmanager
+    async def _open(_engine: object) -> typing.AsyncIterator[dict[str, object]]:
+        opens["n"] += 1  # pragma: no cover - the drain guard exits before resources open
+        yield {}  # pragma: no cover
+
+    async def _inner_returns_immediately() -> None:
+        return  # pragma: no cover - inner is never entered during drain
+
+    async with test_broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        sub.running = True
+        sub._stopping = True  # noqa: SLF001
+        # Without the halt_on_drain guard this loop re-opens resources forever and
+        # asyncio.wait_for would time out.
+        await asyncio.wait_for(
+            sub._run_with_reconnect(  # noqa: SLF001
+                name="fetch",
+                open_resources=_open,
+                inner=_inner_returns_immediately,
+                halt_on_drain=True,
+            ),
+            timeout=1.0,
+        )
+    assert opens["n"] == 0  # never opened resources during drain
+
+
+async def test_run_with_reconnect_resets_backoff_after_sustained_uptime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """B3: error_attempt resets when the connection was healthy longer than the reset threshold."""
+    fake = FakeOutboxClient()
+    broker, test_broker = _make_broker_for_dispatch(fake)
+    attempts: list[int] = []
+
+    async def _no_sleep(_delay: float) -> None: ...
+
+    def _capture_backoff(attempt: int, ceiling: float, *, base: float = 1.0) -> float:
+        del ceiling, base
+        attempts.append(attempt)
+        return 0.0
+
+    monkeypatch.setattr("faststream_outbox.subscriber.usecase.anyio.sleep", _no_sleep)
+    monkeypatch.setattr("faststream_outbox.subscriber.usecase._compute_backoff", _capture_backoff)
+    # threshold 0 → every failure counts as "sustained uptime" → reset before each increment
+    monkeypatch.setattr("faststream_outbox.subscriber.usecase._BACKOFF_RESET_THRESHOLD_SECONDS", 0.0)
+
+    @asynccontextmanager
+    async def _open(_engine: object) -> typing.AsyncIterator[dict[str, object]]:
+        yield {}
+
+    async with test_broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        sub.running = True
+        calls = {"n": 0}
+
+        async def _inner() -> None:
+            calls["n"] += 1
+            if calls["n"] >= 4:
+                sub.running = False
+                return
+            boom = "blip"
+            raise RuntimeError(boom)
+
+        with patch.object(sub, "_log"):
+            await sub._run_with_reconnect(name="t", open_resources=_open, inner=_inner)  # noqa: SLF001
+
+    # 3 failures, each preceded by a reset → _compute_backoff always sees attempt 1
+    # (the buggy lifetime-accumulating counter would produce [1, 2, 3]).
+    assert attempts == [1, 1, 1]
+
+
 async def test_outbox_client_delete_with_lease_uses_caller_conn() -> None:
     """``delete_with_lease`` runs its statement on the supplied conn with no explicit transaction."""
     metadata = MetaData()
@@ -2438,6 +2680,28 @@ async def test_producer_emit_metric_swallows_recorder_exceptions(caplog: pytest.
 
 
 # --- make_dlq_table -----------------------------------------------------------
+
+
+async def test_dlq_cte_uses_schema_qualified_table_names() -> None:
+    """B10: the DLQ CTE must render schema-qualified names when the tables carry a non-default schema."""
+    engine = create_async_engine("postgresql+asyncpg://u:p@localhost/db")  # constructed, never connected
+    try:
+        metadata = MetaData(schema="app")
+        outbox = make_outbox_table(metadata)
+        dlq = make_dlq_table(metadata)
+        client = OutboxClient(engine, outbox, dlq_table=dlq)
+        stmt, _params = client._build_dlq_cte_stmt(  # noqa: SLF001
+            1,
+            uuid.uuid4(),
+            {"failure_reason": "rejected", "last_exception": None},
+        )
+        sql = str(stmt)
+        # The buggy quote(table.name) rendered bare "outbox" / "outbox_dlq"; format_table
+        # carries the schema → "app.outbox" / "app.outbox_dlq" (B10).
+        assert "DELETE FROM app.outbox " in sql
+        assert "INSERT INTO app.outbox_dlq " in sql
+    finally:
+        await engine.dispose()
 
 
 def test_make_dlq_table_columns_present() -> None:

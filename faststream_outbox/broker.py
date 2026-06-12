@@ -13,6 +13,7 @@ import typing
 from collections.abc import Iterable, Sequence
 from types import TracebackType
 
+import anyio
 from faststream import BaseMiddleware
 from faststream._internal.basic_types import LoggerProto
 from faststream._internal.broker import BrokerUsecase
@@ -298,16 +299,28 @@ class OutboxBroker(
 
     @typing.override
     async def ping(self, timeout: float | None = None) -> bool:
-        client = self.config.broker_config.client
-        if client is None:
-            return False
-        if not await client.ping():
-            return False
-        for subscriber in self._subscribers:
-            for task in subscriber.tasks:
-                if task.done():
-                    return False
-        return True
+        # ``move_on_after(None)`` is an unbounded scope, so threading the caller's
+        # timeout keeps the historical "wait forever" default while honoring a bound
+        # when given — a black-holed TCP or a stuck pool checkout can no longer hang
+        # the probe past *timeout*, which is the exact partition ``ping`` exists to
+        # detect (upstream brokers wrap their probe the same way).
+        with anyio.move_on_after(timeout):
+            client = self.config.broker_config.client
+            if client is None:
+                return False
+            if not await client.ping():
+                return False
+            # Walk the ``subscribers`` property, not the ``_subscribers`` list, so
+            # router-registered subscribers (the FastAPI pattern) are health-checked
+            # too — a dead worker task on a router subscriber must fail the probe.
+            for subscriber in self.subscribers:
+                outbox_sub = typing.cast("OutboxSubscriber", subscriber)
+                for task in outbox_sub.tasks:
+                    if task.done():
+                        return False
+            return True
+        # Only reached when the timeout scope cancelled the probe.
+        return False
 
     async def validate_schema(self) -> None:
         """Validate the user's table matches what the package expects. Opt-in."""
