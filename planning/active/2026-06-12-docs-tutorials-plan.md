@@ -388,7 +388,7 @@ push past a flaky step to "make it work for the page."
   footer links to:
   - [Relay reference](../usage/relay.md)
   - [Subscriber § Retry strategies](../usage/subscriber.md#retry-strategies)
-  - [Comparison § vs FastStream foreign-broker direct](../concepts/comparison.md#vs-faststream-foreign-broker-direct)
+  - [Comparison](../concepts/comparison.md) — see the section *"vs. FastStream + `KafkaBroker` / `RabbitBroker` directly"* (the auto-generated anchor isn't stable enough to hardcode; link the page and let the reader scroll)
 
   If Step 6 fell back to a callout, capture that in a one-line note
   at the top: *"This tutorial originally demonstrated retry by
