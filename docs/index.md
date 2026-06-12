@@ -41,7 +41,7 @@ process, no Kafka.
 | Understand the architecture before adopting | [How it works](introduction/how-it-works.md) |
 | Compare against CDC / Kafka transactions / a hand-rolled outbox | [Comparison](concepts/comparison.md) |
 | Deploy to production safely | [Production checklist](operations/checklist.md) |
-| Install and write the first publisher / subscriber | [Installation](introduction/installation.md) → [Basic usage](usage/basic.md) |
+| Install and write the first publisher / subscriber | [Installation](introduction/installation.md) → [Tutorial: Your first outbox app](tutorials/first-outbox-app.md) |
 
 ## Documentation
 
