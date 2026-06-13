@@ -189,6 +189,40 @@ async def test_mark_pending_with_lease(pg_engine: AsyncEngine, outbox_table: Tab
     assert rows2 == []
 
 
+async def test_mark_pending_with_wrong_token_is_noop(pg_engine: AsyncEngine, outbox_table: Table) -> None:
+    """
+    T1: mark_pending_with_lease must filter on acquired_token (the UPDATE half of the lease invariant).
+
+    Mirrors test_delete_with_wrong_token_is_noop for the retry path: a slow handler whose lease
+    was reclaimed by a newer fetch must NOT reschedule/release the row the new holder now owns.
+    Deleting ``acquired_token == :token`` from the WHERE would update by id alone.
+    """
+    async with pg_engine.begin() as conn:
+        await conn.execute(insert(outbox_table).values(queue="orders", payload=b"x"))
+    client = OutboxClient(pg_engine, outbox_table)
+    async with pg_engine.connect() as fetch_conn:
+        rows = await client.fetch(fetch_conn, ["orders"], limit=1, lease_ttl_seconds=60.0)
+    msg = rows[0]
+    async with pg_engine.connect() as raw_conn:
+        writer_conn = await raw_conn.execution_options(isolation_level="AUTOCOMMIT")
+        updated = await client.mark_pending_with_lease(
+            writer_conn,
+            msg.id,
+            uuid.uuid4(),  # WRONG token — not the lease holder
+            delay_seconds=600.0,
+            attempts_count=1,
+            first_attempt_at=_dt.datetime.now(tz=_dt.UTC),
+            last_attempt_at=_dt.datetime.now(tz=_dt.UTC),
+        )
+    assert updated is False
+    # The row is untouched: still leased under the ORIGINAL token, attempts_count not bumped,
+    # next_attempt_at not pushed out — the mutation (id-only WHERE) would change all three.
+    async with pg_engine.connect() as conn:
+        row = (await conn.execute(select(outbox_table).where(outbox_table.c.id == msg.id))).mappings().one()
+    assert row["attempts_count"] == 0
+    assert row["acquired_token"] == msg.acquired_token  # lease holder unchanged (not released)
+
+
 async def test_mark_pending_with_lease_uses_db_clock(pg_engine: AsyncEngine, outbox_table: Table) -> None:
     """next_attempt_at must be computed server-side as now() + delay, not from the worker's clock."""
     async with pg_engine.begin() as conn:

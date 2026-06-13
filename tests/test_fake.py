@@ -3,7 +3,7 @@ import datetime as _dt
 import typing
 import uuid
 import warnings as _warnings
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from unittest.mock import AsyncMock
 
 import pytest
@@ -893,6 +893,73 @@ async def test_loop_mode_cancels_loop_tasks_on_context_exit() -> None:
     assert sub.tasks == []  # _fake_close cancelled + cleared them
 
 
+# --- Drain (off-Postgres) -------------------------------------------------------------
+# These exercise the REAL OutboxSubscriber.stop() drain in loop mode. NB: the test broker
+# mocks broker.stop() (upstream _patch_broker), so drain tests must drive sub.stop()
+# directly — broker.stop() inside the context is a no-op. (See the 2026-06-12 audit, T8.)
+
+
+async def test_drain_finishes_inflight_rows_before_returning_in_fake_mode() -> None:
+    """T8: sub.stop() drains in-flight rows to completion (the two-flag drain) without Postgres."""
+    fetched_total = 0
+
+    def recorder(event: str, fields: Mapping[str, typing.Any]) -> None:
+        nonlocal fetched_total
+        if event == "fetched":
+            fetched_total += fields["count"]
+
+    metadata = MetaData()
+    t = make_outbox_table(metadata)
+    broker = OutboxBroker(outbox_table=t, graceful_timeout=5.0, metrics_recorder=recorder)
+    handled: list[int] = []
+
+    @broker.subscriber("orders", min_fetch_interval=0.01, max_fetch_interval=0.05, max_workers=2, fetch_batch_size=10)
+    async def handle(body: dict) -> None:
+        await asyncio.sleep(0.05)
+        handled.append(body["i"])
+
+    test_broker = TestOutboxBroker(broker, run_loops=True)
+    async with test_broker:
+        for i in range(6):
+            payload, hdrs = encode_payload({"i": i})
+            test_broker.feed("orders", payload, headers=hdrs)
+        await _wait_until(lambda: fetched_total >= 6, timeout=3.0)
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        await sub.stop()  # real drain — broker.stop() is mocked here
+
+    assert sorted(handled) == list(range(6))  # every claimed row ran to completion
+    assert test_broker.fake_client.rows == []  # all acked → deleted
+
+
+async def test_broker_stop_cancels_wedged_handler_within_graceful_timeout_in_fake_mode() -> None:
+    """T8: a wedged handler is cancelled within graceful_timeout (no 2x wait), row preserved — off-Postgres."""
+    metadata = MetaData()
+    t = make_outbox_table(metadata)
+    broker = OutboxBroker(outbox_table=t, graceful_timeout=0.3)
+    started = asyncio.Event()
+
+    @broker.subscriber("orders", min_fetch_interval=0.01, max_fetch_interval=0.05)
+    async def handle(body: dict) -> None:
+        del body
+        started.set()
+        await asyncio.sleep(60.0)  # wedged — never returns voluntarily
+
+    test_broker = TestOutboxBroker(broker, run_loops=True)
+    async with test_broker:
+        payload, hdrs = encode_payload({"i": 0})
+        test_broker.feed("orders", payload, headers=hdrs)
+        await asyncio.wait_for(started.wait(), timeout=3.0)
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        start = asyncio.get_event_loop().time()
+        await sub.stop()
+        elapsed = asyncio.get_event_loop().time() - start
+
+    # ~graceful_timeout (0.3) + cancellation slack. The 2x-regression (re-waiting in
+    # super().stop()) would exceed 0.6s; 0.7s is the safe upper guard.
+    assert elapsed < 0.7, f"sub.stop() took {elapsed:.3f}s — strict-bound regression"
+    assert len(test_broker.fake_client.rows) == 1  # handler cancelled pre-ack → row preserved (lease set)
+
+
 async def test_sync_publish_skips_callless_subscriber() -> None:
     """``_find_subscriber_for_queue`` must skip subscribers that have no registered call."""
     from faststream_outbox.subscriber.factory import create_subscriber  # noqa: PLC0415
@@ -1084,6 +1151,29 @@ async def test_fake_broker_nack_message_exception_retries_not_deletes() -> None:
     row = test_broker.fake_client.rows[0]
     assert row.attempts_count == 1
     assert row.next_attempt_at > _dt.datetime.now(tz=_dt.UTC)
+
+
+async def test_fake_broker_manual_handler_without_ack_is_rejected_via_dispatch() -> None:
+    """
+    T2: a forgetful MANUAL handler (returns, no ack/nack/reject, no exception) is rejected through dispatch.
+
+    Goes through the full ``broker.publish -> dispatch_one`` path (not a direct
+    ``assert_state_set`` call). Deleting the fallback would emit a false ``acked``
+    and leave the row to redeliver forever; here the row must be DELETEd (rejected).
+    """
+    broker = _make_broker()
+
+    @broker.subscriber("orders", ack_policy=AckPolicy.MANUAL)
+    async def handle(body: str) -> None:
+        del body  # forgetful: neither acks/nacks/rejects nor raises
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish("x", queue="orders")  # ty: ignore[missing-argument]
+
+    # Rejected → row DELETEd. The mutation (no assert_state_set) leaves the row in place
+    # (and emits a false ``acked``), so it would redeliver forever.
+    assert test_broker.fake_client.rows == []
 
 
 # --- Publisher tests --------------------------------------------------------------------

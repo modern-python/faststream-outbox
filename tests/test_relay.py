@@ -229,6 +229,35 @@ async def test_outbox_response_with_foreign_publisher_raises() -> None:
             await outbox.publish({"x": 1}, queue="relay_queue", session=None)  # ty: ignore[invalid-argument-type]
 
 
+async def test_outbox_response_with_foreign_publisher_fires_guard_before_side_effects() -> None:
+    """
+    T5: the dual-fire guard must raise BEFORE the publisher chain runs.
+
+    Moving the guard below the chain still raises (so ``pytest.raises`` passes), but the
+    Kafka publish AND the follow-on outbox insert have already happened by then. Pin the
+    ordering: when the guard fires, neither side effect occurs.
+    """
+    metadata = MetaData()
+    outbox_table = make_outbox_table(metadata)
+    broker_outbox = OutboxBroker(outbox_table=outbox_table)
+    broker_kafka = KafkaBroker("kafka://test:9092")
+    publisher_kafka = broker_kafka.publisher("relay_topic")
+
+    @publisher_kafka
+    @broker_outbox.subscriber("relay_queue")
+    async def relay(body: dict[str, Any]) -> OutboxResponse:
+        return OutboxResponse(body=body, queue="next_queue", session=None)  # ty: ignore[invalid-argument-type]
+
+    test_outbox = TestOutboxBroker(broker_outbox, run_loops=False)
+    async with TestKafkaBroker(broker_kafka), test_outbox as outbox:
+        with pytest.raises(RuntimeError, match="OutboxResponse"):
+            await outbox.publish({"x": 1}, queue="relay_queue", session=None)  # ty: ignore[invalid-argument-type]
+        # Guard fired before the chain → the foreign Kafka publish never happened…
+        publisher_kafka.mock.assert_not_called()
+        # …and no follow-on outbox row was inserted for the relayed body.
+        assert not any(r.queue == "next_queue" for r in test_outbox.fake_client.rows)
+
+
 async def test_unstarted_foreign_broker_warns_on_start(caplog: pytest.LogCaptureFixture) -> None:
     """
     Log one WARNING per unstarted foreign broker at start() time.
