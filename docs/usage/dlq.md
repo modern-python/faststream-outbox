@@ -64,6 +64,7 @@ behaviors that decide which reason fires.
 | `failed_at` | `DateTime(timezone=True)`, not null, default `now()` | When the audit row was written. |
 | `failure_reason` | `String(64)`, not null | One of the three values in the table above. |
 | `last_exception` | `String`, nullable | `repr()` of the raised exception, bounded at 8 KiB (see below). `None` on manual `reject()` without an exception. |
+| `timer_id` | `String(255)`, nullable | The originating single-publish dedup key, carried into the audit trail so a terminally-failed timer keeps its business key. `None` for non-timer rows. |
 
 Index: `(queue, failed_at)` (btree, non-unique) — supports "show me recent
 failures for queue X" queries without a sequential scan as the DLQ grows.
@@ -80,12 +81,12 @@ a single CTE statement:
 ```sql
 WITH deleted AS (
     DELETE FROM <outbox> WHERE id = :id AND acquired_token = :token
-    RETURNING id, queue, payload, headers, deliveries_count, created_at
+    RETURNING id, queue, payload, headers, deliveries_count, created_at, timer_id
 )
 INSERT INTO <dlq> (original_id, queue, payload, headers, deliveries_count,
-                   created_at, failure_reason, last_exception)
+                   created_at, failure_reason, last_exception, timer_id)
 SELECT id, queue, payload, headers, deliveries_count, created_at,
-       :failure_reason, :last_exception
+       :failure_reason, :last_exception, timer_id
 FROM deleted;
 ```
 

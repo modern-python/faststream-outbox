@@ -90,6 +90,7 @@ op.create_table('outbox_dlq',
     sa.Column('failed_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('failure_reason', sa.String(length=64), nullable=False),
     sa.Column('last_exception', sa.String(), nullable=True),
+    sa.Column('timer_id', sa.String(length=255), nullable=True),
     sa.PrimaryKeyConstraint('id')
 )
 op.create_index('outbox_dlq_queue_failed_idx', 'outbox_dlq', ['queue', 'failed_at'], unique=False)
@@ -187,6 +188,7 @@ op.execute("""
         failed_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
         failure_reason  VARCHAR(64) NOT NULL,
         last_exception  TEXT,
+        timer_id        VARCHAR(255),
         PRIMARY KEY (id, failed_at)
     ) PARTITION BY RANGE (failed_at);
 """)

@@ -5,7 +5,8 @@ slug: 2026-06-13-docs-audit-findings
 scope: docs/ (22 user-facing mkdocs pages)
 prs: []
 outcome: >
-  Pending. Findings raised, not yet remediated. Successor to the
+  In progress. The timer_id DLQ cluster (B1–B3, I1) is fixed; the rest
+  is pending. Successor to the
   2026-06-12 docs audit (I1–I22, B1–B16) — that pass closed clean; this
   pass re-swept all 22 pages on convenience / readability / consistency /
   factual drift and surfaced a new high-severity DLQ-migration bug plus a
@@ -48,6 +49,11 @@ DELETE, and the outbox grows with `lease_lost` spikes — the exact symptom
 `operations/troubleshooting.md` describes. This is the one finding that
 causes a production incident; everything else is polish or local
 confusion.
+
+> **Resolved.** B1–B3 and I1 fixed: `timer_id` added to both Alembic DDL
+> blocks (`operations/alembic.md`), the partitioned `SELECT *` copy now
+> aligns, and `usage/dlq.md` carries the column in both the schema-
+> reference table and the atomicity CTE. `mkdocs build --strict` clean.
 
 ## Summary table (bugs + inaccuracies)
 
