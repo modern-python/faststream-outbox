@@ -16,7 +16,7 @@ c. `AcknowledgementMiddleware.__aexit__` turns publisher-chain exceptions into o
 
 ### `OutboxResponse` + foreign publisher refused
 
-`OutboxSubscriber` overrides `process_message` to check chain composition. If a handler returns `OutboxResponse(...)` while having a non-`OutboxFakePublisher` entry in `handler._publishers`, the override raises `_OutboxConfigError` (a private `RuntimeError` subclass). The subscriber also overrides `consume()` and extends `dispatch_one`'s exception handler to re-raise `_OutboxConfigError` rather than swallowing it via upstream's `except Exception: pass`. The exception propagates through `AcknowledgementMiddleware` and triggers the outbox's normal nack path so the row is retried (and the operator sees the error log) until the handler is fixed.
+`OutboxSubscriber` overrides `process_message` to check chain composition. If a handler returns `OutboxResponse(...)` while having a non-`OutboxFakePublisher` entry in `handler._publishers`, the override raises `_OutboxConfigError` (a private `RuntimeError` subclass). The subscriber also overrides `consume()` and extends `dispatch_one`'s exception handler to re-raise `_OutboxConfigError` rather than swallowing it via upstream's `except Exception: pass`. The re-raised error unwinds out of `dispatch_one` **before** any terminal flush, so the worker loop catches it, logs it at ERROR, and moves on — it does **not** route the row through the reconnect/backoff path (which would throttle unrelated rows) and no nack is ever flushed. The row's lease simply expires and a later fetch reclaims it (retry via lease expiry, **not** the `retry_strategy`) until the handler is fixed (P18).
 
 ### WARNING for unstarted foreign brokers at `start()`
 
