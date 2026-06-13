@@ -15,7 +15,7 @@ User-facing: `docs/usage/timers.md`. Invariant summary: `CLAUDE.md` § Timers.
 
 ## NOTIFY-skip conditions
 
-NOTIFY is skipped when `activate_in` / `activate_at` is set OR the conflict path returned no row — both cases would either wake listeners that find nothing, or wake them prematurely.
+NOTIFY is skipped when the row is **genuinely future-dated** (`activate_in > 0`, or `activate_at` resolves to a time after `now()`) OR the `on_conflict_do_nothing` path returned no row — both cases would either wake listeners that find nothing, or wake them prematurely. A past/zero `activate_at`/`activate_in` is immediately eligible, so it **does** fire NOTIFY.
 
 ## `cancel_timer` lease guard
 

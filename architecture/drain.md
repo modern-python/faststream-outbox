@@ -34,8 +34,9 @@ The two changes are complementary — the `dispatch_one` guard covers correctnes
 
 Both overrides replace upstream FastStream methods. Stable for years upstream, but if FastStream adds new cleanup to `BrokerUsecase.stop`, `SubscriberUsecase.stop`, or `TasksMixin.stop`, we silently miss it. **Reviewers touching shutdown must re-check both overrides.** Regression tests pin both behaviors:
 
-- `tests/test_fake.py::test_drain_timeout_strict_bound_per_subscriber` — per-subscriber strict bound
-- `tests/test_fake.py::test_broker_stop_runs_subscribers_in_parallel` — gather shape
+- `tests/test_fake.py::test_drain_finishes_inflight_rows_before_returning_in_fake_mode` — drain waits for in-flight rows (off-Postgres)
+- `tests/test_fake.py::test_broker_stop_cancels_wedged_handler_within_graceful_timeout_in_fake_mode` — graceful-timeout bound (off-Postgres)
+- `tests/test_integration.py` — the Postgres-backed drain + parallel-gather coverage
 
 ## Test-broker gotcha
 
