@@ -1,7 +1,9 @@
 ---
 date: 2026-06-12
 scope: faststream_outbox/ (package) + tests/ (test quality)
-status: triage
+status: bugs-remediated  # B1-B16 fixed in PR #61; suspected/test-holes/improvements still open
+bugs_pr: 61
+bugs_remediated: 2026-06-13
 ---
 
 # Code audit findings — 2026-06-12
@@ -26,6 +28,32 @@ Severity tiers: **bug** (confirmed wrong behavior), **suspected**
 (plausible, not proven end-to-end), **test-hole** (a load-bearing
 invariant the 100%-coverage suite does not actually pin — named by the
 mutation that survives), **improvement**.
+
+## Remediation status (2026-06-13)
+
+**All 16 confirmed bugs (B1–B16) are fixed in PR #61** (branch `worktree-fix-audit-bugs-b1-b16`, commit `74f8554`). Each fix ships a
+regression test verified red on the pre-fix code where mechanically feasible.
+Verification: full dockerized suite (Postgres 17) **423 passed** (was 401 — 22 new
+tests), the **100% coverage** gate met, `ruff format`/`ruff check`/`ty check` clean.
+
+Implementation followed the audit's suggested directions: B5/B6/B7 accept-and-ignore
+`**options` on ack/nack/reject, the manual-fallback nacks (honors retry) when
+`last_exception` is set, a raising retry strategy degrades to `retry_terminal`, and
+`ExponentialRetry` clamps the exponent (`_MAX_DELAY_SECONDS` ceiling). B8 overrides
+`OutboxPublishCommand.batch_bodies`. B10 uses `format_table` + `MetaData(schema=...)`.
+
+Two notes worth recording:
+
+* The first B5 regression test passed for the **wrong reason** — a handler typed
+  `msg: OutboxMessage` never had the message injected, so the body never ran and a
+  DI exception (not the intended `raise`) drove the retry. Coverage caught it; the
+  handler is now body-based and genuinely exercises "MANUAL + handler exception".
+* B13's missing-extra import path can't be exercised under the all-extras CI (the
+  audit itself flagged this); the fix is structural — the new `else`/`except`
+  branches carry `# pragma: no cover`.
+
+**Still open** (out of scope for PR #61): suspected S1–S5, test-holes T1–T8, the
+additional test findings, improvements P1–P35, and the doc / CLAUDE.md drift items.
 
 ## Summary — bugs
 
