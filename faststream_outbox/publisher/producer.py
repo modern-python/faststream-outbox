@@ -79,15 +79,18 @@ class OutboxProducer:
         pass
 
     async def publish(self, cmd: OutboxPublishCommand) -> int | None:
-        payload, hdrs = _encode_payload(
-            cmd.body,
-            headers=cmd.headers,
-            correlation_id=cmd.correlation_id,
-            serializer=self.serializer,
-        )
         start_perf = time.perf_counter()
-        size_bytes = len(payload)
+        size_bytes = 0
         try:
+            # P3: encode inside the try so a serialization / content-type / correlation_id
+            # failure still emits the ``published`` error metric instead of bypassing it.
+            payload, hdrs = _encode_payload(
+                cmd.body,
+                headers=cmd.headers,
+                correlation_id=cmd.correlation_id,
+                serializer=self.serializer,
+            )
+            size_bytes = len(payload)
             row_id = await self._do_publish(cmd, payload, hdrs)
         except Exception as exc:
             self._emit_metric(
@@ -173,15 +176,17 @@ class OutboxProducer:
             next_at = cmd.activate_at
         rows: list[dict[str, typing.Any]] = []
         total_size = 0
-        for body in bodies:
-            payload, hdrs = _encode_payload(body, headers=cmd.headers, serializer=self.serializer)
-            total_size += len(payload)
-            row: dict[str, typing.Any] = {"queue": cmd.queue, "payload": payload, "headers": hdrs}
-            if next_at is not None:
-                row["next_attempt_at"] = next_at
-            rows.append(row)
         start_perf = time.perf_counter()
         try:
+            # P3: encode inside the try so a serialization failure on any body still
+            # emits the ``published`` error metric.
+            for body in bodies:
+                payload, hdrs = _encode_payload(body, headers=cmd.headers, serializer=self.serializer)
+                total_size += len(payload)
+                row: dict[str, typing.Any] = {"queue": cmd.queue, "payload": payload, "headers": hdrs}
+                if next_at is not None:
+                    row["next_attempt_at"] = next_at
+                rows.append(row)
             await cmd.session.execute(insert(self._table), rows)
             # Skip NOTIFY only when genuinely future-dated; past times are eligible.
             if next_at is None or next_at <= now:

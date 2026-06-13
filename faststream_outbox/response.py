@@ -20,6 +20,10 @@ from faststream.response.response import BatchPublishCommand, PublishCommand, Re
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
+# Matches the ``queue`` column width in ``make_outbox_table`` (``String(255)``).
+_MAX_QUEUE_LENGTH = 255
+
+
 class OutboxPublishCommand(BatchPublishCommand):
     """Outbox-specific publish command: carries session + scheduling fields end-to-end."""
 
@@ -45,6 +49,24 @@ class OutboxPublishCommand(BatchPublishCommand):
             raise ValueError(msg)
         if activate_at is not None and activate_at.tzinfo is None:
             msg = "OutboxPublishCommand requires activate_at to be timezone-aware"
+            raise ValueError(msg)
+        # P5: ``queue`` reaches SQL unvalidated — empty / non-str / over the
+        # ``String(255)`` column would surface as an opaque DB error (or silent
+        # truncation). Reject at the single-source-of-truth constructor instead.
+        if not isinstance(queue, str):
+            msg = f"queue must be a str, got {type(queue).__name__}"
+            raise TypeError(msg)
+        if not queue:
+            msg = "queue must be a non-empty string"
+            raise ValueError(msg)
+        if len(queue) > _MAX_QUEUE_LENGTH:
+            msg = f"queue must be at most {_MAX_QUEUE_LENGTH} characters (got {len(queue)})"
+            raise ValueError(msg)
+        # P4: timer_id / correlation_id are per-row single-publish concepts the batch
+        # path silently drops (each batched row gets its own auto correlation_id and
+        # no dedup key). Reject them on a batch command rather than accept-and-ignore.
+        if bodies and (timer_id is not None or correlation_id is not None):
+            msg = "timer_id / correlation_id are not supported for batch publishes (multiple bodies)"
             raise ValueError(msg)
         super().__init__(
             body,

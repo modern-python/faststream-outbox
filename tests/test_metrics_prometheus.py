@@ -132,6 +132,35 @@ def test_prometheus_published_event_uses_destination_label() -> None:
     )
 
 
+def test_prometheus_published_error_status_total_fires_at_count_zero() -> None:
+    """
+    P28: a status="error" published event (count=0) must increment the error-status total.
+
+    The old ``if count > 0`` gate left ``published_messages_total{status="error"}`` — the
+    exact series dashboards alert on — permanently at zero.
+    """
+    reg, rec = _make_recorder()
+    rec(
+        "published",
+        {
+            "queue": "q",
+            "status": "error",
+            "count": 0,
+            "size_bytes": 0,
+            "duration_seconds": 0.001,
+            "exception_type": "ValueError",
+        },
+    )
+    assert (
+        _sample(
+            reg,
+            "faststream_published_messages_total",
+            {"app_name": "", "broker": "outbox", "destination": "q", "status": "error"},
+        )
+        == 1.0
+    )
+
+
 def test_prometheus_published_duration_uses_destination_label() -> None:
     reg, rec = _make_recorder()
     rec(

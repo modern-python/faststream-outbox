@@ -80,6 +80,12 @@ class FakeOutboxClient(AbstractOutboxClient):
         next_attempt_at: _dt.datetime | None = None,
         timer_id: str | None = None,
     ) -> int | None:
+        # P31: reject naive datetimes up front — the publish path is tz-strict, and a
+        # naive next_attempt_at otherwise blows up deep in a patched-away logger with no
+        # diagnostic. Match the production contract here.
+        if next_attempt_at is not None and next_attempt_at.tzinfo is None:
+            msg = "feed() requires next_attempt_at to be timezone-aware"
+            raise ValueError(msg)
         # Mirror the real client's partial-unique-on-(queue, timer_id) behavior:
         # re-feeding a timer that already exists is a no-op.
         if timer_id is not None and any(r.queue == queue and r.timer_id == timer_id for r in self._rows):
@@ -88,7 +94,10 @@ class FakeOutboxClient(AbstractOutboxClient):
             id=self._next_id,
             queue=queue,
             payload=payload,
-            headers=headers,
+            # P32: store a copy so a handler mutating msg.headers can't corrupt the
+            # "persisted" row (the real client round-trips through the DB; the fake must
+            # not share the dict by reference).
+            headers=dict(headers) if headers is not None else None,
             next_attempt_at=next_attempt_at or _utcnow(),
             timer_id=timer_id,
         )
@@ -169,6 +178,7 @@ class FakeOutboxClient(AbstractOutboxClient):
                             "failed_at": _utcnow(),
                             "failure_reason": dlq_payload["failure_reason"],
                             "last_exception": dlq_payload["last_exception"],
+                            "timer_id": row.timer_id,  # P9 parity with the real DLQ CTE
                         },
                     )
                 del self._rows[i]
@@ -227,7 +237,7 @@ def _to_inner(row: _FakeRow) -> OutboxInnerMessage:
         id=row.id,
         queue=row.queue,
         payload=row.payload,
-        headers=row.headers,
+        headers=dict(row.headers) if row.headers is not None else None,  # P32: don't share the dict by reference
         attempts_count=row.attempts_count,
         deliveries_count=row.deliveries_count,
         created_at=row.created_at,
@@ -236,11 +246,19 @@ def _to_inner(row: _FakeRow) -> OutboxInnerMessage:
         last_attempt_at=row.last_attempt_at,
         acquired_at=row.acquired_at,
         acquired_token=row.acquired_token,
+        timer_id=row.timer_id,
     )
 
 
 def _find_subscriber_for_queue(broker: OutboxBroker, queue: str) -> "OutboxSubscriber | None":
-    """First matching subscriber wins — mirrors production fetch behavior for overlapping subscribers."""
+    """
+    First matching subscriber wins (deterministic).
+
+    NB: this does NOT mirror production for *overlapping* subscribers — there, multiple
+    subscribers on the same queue compete via ``FOR UPDATE SKIP LOCKED``, so which one
+    claims a given row is nondeterministic. The fake picks the first match for test
+    repeatability (P35).
+    """
     for raw_subscriber in broker.subscribers:
         sub = typing.cast("OutboxSubscriber", raw_subscriber)
         if not sub.calls:
@@ -391,7 +409,10 @@ def _build_fake_publish(
         activate_at: _dt.datetime | None = None,
         timer_id: str | None = None,
     ) -> int | None:
-        # session is ignored in test mode — the fake client has no transaction.
+        # P33: test mode is intentionally lenient about ``session`` — the fake client has
+        # no transaction, so any value (including None) is accepted here. This DIVERGES from
+        # production and from ``publisher.publish()`` / ``OutboxResponse``, which require a
+        # real AsyncSession; tests that assert that contract must use those paths.
         del session
         _validate_activate_args("broker.publish", activate_in, activate_at)
         payload, hdrs = _encode_payload(

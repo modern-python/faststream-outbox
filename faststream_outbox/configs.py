@@ -30,11 +30,6 @@ class OutboxBrokerConfig(BrokerConfig):
     # copy audit data into this table in the same statement as the outbox DELETE.
     # See ``OutboxClient.delete_with_lease`` for the CTE shape.
     dlq_table: "Table | None" = None
-
-    async def connect(self) -> None:
-        # Engine and client are wired up by the broker's constructor; nothing to do here.
-        pass
-
-    async def disconnect(self) -> None:
-        # Caller owns the engine — never dispose it here.
-        pass
+    # P24: the former connect()/disconnect() overrides were dead code — BrokerConfig has
+    # no such hooks and nothing in the package or upstream called them. The broker's own
+    # start()/connect() wire the engine/client; the caller owns the engine lifecycle.

@@ -50,6 +50,7 @@ from faststream_outbox.subscriber.usecase import (
     _TRUNCATION_SUFFIX,
     OutboxSubscriber,
     _compute_backoff,
+    _OutboxConfigError,
 )
 from faststream_outbox.testing import FakeOutboxClient, FakeOutboxProducer
 
@@ -136,11 +137,20 @@ def test_make_outbox_table_attaches_to_metadata() -> None:
 
 
 def test_make_outbox_table_accepts_max_length_name() -> None:
-    # 56 ASCII bytes + "outbox_" (7) = 63 — exactly the Postgres limit.
+    # P7: the binding identifier is the longest derived name — "<t>_pending_idx" /
+    # "<t>_timer_id_uq" (12-byte suffix), not the "outbox_" channel prefix (7). So the
+    # longest valid table_name is 63 - 12 = 51 bytes.
     metadata = MetaData()
-    name = "a" * 56
+    name = "a" * 51
     t = make_outbox_table(metadata, table_name=name)
     assert t.name == name
+
+
+def test_make_outbox_table_rejects_name_that_fits_channel_but_overflows_index() -> None:
+    """P7: a 52-byte name fits the NOTIFY channel (7+52=59) but overflows the index name (52+12=64)."""
+    metadata = MetaData()
+    with pytest.raises(ValueError, match="63 bytes"):
+        make_outbox_table(metadata, table_name="a" * 52)
 
 
 def test_make_outbox_table_rejects_oversize_name() -> None:
@@ -203,6 +213,18 @@ def test_encode_payload_allows_user_content_type_for_bytes_body() -> None:
     payload, headers = _encode_payload(b"raw", headers={"content-type": "application/octet-stream"})
     assert payload == b"raw"
     assert headers["content-type"] == "application/octet-stream"
+
+
+def test_encode_payload_raises_on_correlation_id_conflict() -> None:
+    """P2: an explicit correlation_id that mismatches headers['correlation_id'] is a conflict (was silently dropped)."""
+    with pytest.raises(ValueError, match="correlation_id"):
+        _encode_payload({"x": 1}, correlation_id="kwarg-id", headers={"correlation_id": "header-id"})
+
+
+def test_encode_payload_correlation_id_matching_header_is_ok() -> None:
+    """P2: kwarg == header is not a conflict."""
+    _, headers = _encode_payload({"x": 1}, correlation_id="same", headers={"correlation_id": "same"})
+    assert headers["correlation_id"] == "same"
 
 
 class _PydanticBody(BaseModel):
@@ -338,6 +360,77 @@ async def test_inner_message_nack_with_no_strategy_is_terminal() -> None:
     msg = _make_msg()
     await msg.nack()
     assert msg.to_delete
+
+
+def test_constant_retry_rejects_oversize_jitter() -> None:
+    """P23: jitter_factor > 2 would make a jittered delay negative (a hot retry)."""
+    with pytest.raises(ValueError, match="jitter_factor"):
+        ConstantRetry(delay_seconds=1.0, jitter_factor=2.5)
+
+
+def test_constant_retry_rejects_non_positive_delay() -> None:
+    """P23: a non-positive delay is a hot retry."""
+    with pytest.raises(ValueError, match="delay_seconds"):
+        ConstantRetry(delay_seconds=0.0)
+
+
+def test_exponential_retry_rejects_non_positive_initial_delay() -> None:
+    """P23: ExponentialRetry needs a positive initial delay."""
+    with pytest.raises(ValueError, match="initial_delay_seconds"):
+        ExponentialRetry(initial_delay_seconds=0.0)
+
+
+def test_retry_rejects_zero_max_attempts() -> None:
+    """P23: max_attempts < 1 means 'never retry' expressed confusingly — reject it."""
+    with pytest.raises(ValueError, match="max_attempts"):
+        ConstantRetry(delay_seconds=1.0, max_attempts=0)
+
+
+def test_retry_rejects_non_positive_max_total_delay() -> None:
+    """P23: max_total_delay_seconds must be > 0 if set."""
+    with pytest.raises(ValueError, match="max_total_delay_seconds"):
+        ConstantRetry(delay_seconds=1.0, max_total_delay_seconds=0.0)
+
+
+def test_linear_retry_rejects_non_positive_initial_delay() -> None:
+    """P23: LinearRetry needs a positive initial delay."""
+    with pytest.raises(ValueError, match="initial_delay_seconds"):
+        LinearRetry(initial_delay_seconds=0.0, step_seconds=1.0)
+
+
+def test_linear_retry_rejects_negative_step() -> None:
+    """P23: a negative step would shrink delays toward zero (hot retry)."""
+    with pytest.raises(ValueError, match="step_seconds"):
+        LinearRetry(initial_delay_seconds=1.0, step_seconds=-1.0)
+
+
+def test_exponential_retry_rejects_non_positive_multiplier() -> None:
+    """P23: a non-positive multiplier is nonsensical for exponential backoff."""
+    with pytest.raises(ValueError, match="multiplier"):
+        ExponentialRetry(initial_delay_seconds=1.0, multiplier=0.0)
+
+
+def test_exponential_retry_rejects_non_positive_max_delay() -> None:
+    """P23: max_delay_seconds must be > 0 if set."""
+    with pytest.raises(ValueError, match="max_delay_seconds"):
+        ExponentialRetry(initial_delay_seconds=1.0, max_delay_seconds=0.0)
+
+
+def test_warn_on_duplicate_queues_across_routers() -> None:
+    """P22: a duplicate queue introduced via include_router is caught at start()-time."""
+    broker = _make_broker()
+
+    @broker.subscriber("orders")
+    async def h1(body: dict) -> None: ...
+
+    router = OutboxRouter()
+
+    @router.subscriber("orders")  # same queue, via a router → invisible to registration-time check
+    async def h2(body: dict) -> None: ...
+
+    broker.include_router(router)
+    with pytest.warns(UserWarning, match="compete for the same rows"):
+        broker._warn_on_duplicate_queues()  # noqa: SLF001
 
 
 async def test_inner_message_nack_with_strategy_schedules_retry() -> None:
@@ -657,6 +750,60 @@ async def test_publish_command_batch_bodies_preserves_none_body() -> None:
     assert OutboxPublishCommand(None, b"x", queue="q", session=session).batch_bodies == (None, b"x")
     assert OutboxPublishCommand(None, queue="q", session=session).batch_bodies == (None,)
     assert OutboxPublishCommand(b"a", b"b", queue="q", session=session).batch_bodies == (b"a", b"b")
+
+
+def test_publish_command_rejects_empty_queue() -> None:
+    """P5: queue validation in the single-source-of-truth constructor."""
+    with pytest.raises(ValueError, match="non-empty"):
+        OutboxPublishCommand(b"x", queue="", session=_make_session_mock())
+
+
+def test_publish_command_rejects_non_str_queue() -> None:
+    """P5: a non-str queue is a TypeError, not an opaque SQL error."""
+    with pytest.raises(TypeError, match="queue must be a str"):
+        OutboxPublishCommand(b"x", queue=123, session=_make_session_mock())  # ty: ignore[invalid-argument-type]
+
+
+def test_publish_command_rejects_oversize_queue() -> None:
+    """P5: queue over the String(255) column limit is rejected up front."""
+    with pytest.raises(ValueError, match="255"):
+        OutboxPublishCommand(b"x", queue="q" * 256, session=_make_session_mock())
+
+
+def test_publish_command_rejects_timer_id_for_batch() -> None:
+    """P4: timer_id is meaningless for a batch (multiple bodies) — reject, don't silently drop."""
+    with pytest.raises(ValueError, match="batch"):
+        OutboxPublishCommand(b"a", b"b", queue="q", session=_make_session_mock(), timer_id="t")
+
+
+def test_publish_command_rejects_correlation_id_for_batch() -> None:
+    """P4: correlation_id is per-row single-publish only — reject on a batch command."""
+    with pytest.raises(ValueError, match="batch"):
+        OutboxPublishCommand(b"a", b"b", queue="q", session=_make_session_mock(), correlation_id="c")
+
+
+async def test_broker_publish_batch_empty_still_rejects_non_async_session() -> None:
+    """P1: the session-type check fires even on an empty batch (no command is built there)."""
+    broker = _make_broker()
+    with pytest.raises(TypeError, match="AsyncSession"):
+        await broker.publish_batch(queue="orders", session=object())  # ty: ignore[invalid-argument-type]  # no bodies
+
+
+async def test_producer_publish_emits_error_metric_on_encode_failure() -> None:
+    """P3: an encode failure (content-type conflict) still emits the ``published`` error metric."""
+    events, recorder = _events_recorder()
+    metadata = MetaData()
+    table = make_outbox_table(metadata)
+    producer = OutboxProducer(table=table, parser=None, decoder=None, metrics_recorder=recorder)
+    cmd = OutboxPublishCommand(
+        {"x": 1},
+        queue="orders",
+        session=_make_session_mock(),
+        headers={"content-type": "text/plain"},
+    )
+    with pytest.raises(ValueError, match="content-type"):
+        await producer.publish(cmd)
+    assert any(ev == "published" and tags.get("status") == "error" for ev, tags in events)
 
 
 async def test_publish_command_rejects_non_async_session() -> None:
@@ -1440,12 +1587,6 @@ async def test_fake_client_validate_schema_raises_and_ping_passes() -> None:
 # --- OutboxBrokerConfig connect/disconnect (no-op stubs) ---
 
 
-async def test_outbox_broker_config_connect_disconnect_noop() -> None:
-    cfg = OutboxBrokerConfig()
-    await cfg.connect()  # must not raise
-    await cfg.disconnect()  # must not raise
-
-
 # --- subscriber get_one + _make_response_publisher ---
 
 
@@ -1501,6 +1642,42 @@ def _make_subscriber_for_listener_test() -> OutboxSubscriber:
     async def handle(body: dict) -> None: ...
 
     return next(iter(broker._subscribers))  # noqa: SLF001
+
+
+def test_on_notify_wakes_only_for_served_queues() -> None:
+    """P14: NOTIFY payload is the queue name; only wake for queues this subscriber serves."""
+    sub = _make_subscriber_for_listener_test()  # serves "orders"
+    sub._notify_event.clear()  # noqa: SLF001
+    sub._on_notify(None, 123, "outbox_outbox", "orders")  # noqa: SLF001  # served
+    assert sub._notify_event.is_set()  # noqa: SLF001
+
+    sub._notify_event.clear()  # noqa: SLF001
+    sub._on_notify(None, 123, "outbox_outbox", "other-queue")  # noqa: SLF001  # not served
+    assert not sub._notify_event.is_set()  # noqa: SLF001
+
+
+def test_on_notify_wakes_conservatively_on_unexpected_payload() -> None:
+    """P14: an unexpected callback shape wakes (don't risk a missed delivery)."""
+    sub = _make_subscriber_for_listener_test()
+    sub._notify_event.clear()  # noqa: SLF001
+    sub._on_notify()  # noqa: SLF001  # no args
+    assert sub._notify_event.is_set()  # noqa: SLF001
+
+
+async def test_stop_awaits_cancelled_tasks() -> None:
+    """P16: stop() awaits the cancelled loop tasks so they've unwound before it returns."""
+    sub = _make_subscriber_for_listener_test()
+    sub.running = True
+
+    async def _forever() -> None:
+        await asyncio.sleep(3600)
+
+    sub.add_task(_forever)
+    await asyncio.sleep(0)  # let the task start (reach its await) before we cancel it
+    tasks = list(sub.tasks)
+    assert tasks
+    await sub.stop()
+    assert all(t.done() for t in tasks)  # gather() awaited the cancellations
 
 
 async def test_open_listen_connection_returns_none_for_non_asyncpg_driver() -> None:
@@ -1846,6 +2023,65 @@ async def test_dispatch_one_preserves_row_when_consume_raises() -> None:
     assert not msg.to_delete
     assert not any(e == "acked" for e, _ in events)
     assert not any(e.startswith("nacked") for e, _ in events)
+
+
+async def test_dispatch_one_lease_lost_emits_only_lease_lost_not_acked() -> None:
+    """
+    P17: a lease-lost terminal flush emits ``lease_lost`` only — not a false ``acked`` that double-counts.
+
+    Before P17 the acked/nacked metric fired before the flush, so a row whose lease was
+    reclaimed (flush rowcount 0 → redelivered) was counted once here and again on redelivery.
+    """
+    events, recorder = _events_recorder()
+    metadata = MetaData()
+    table = make_outbox_table(metadata)
+    broker = OutboxBroker(outbox_table=table, metrics_recorder=recorder)
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> None: ...
+
+    fake = FakeOutboxClient()
+    test_broker = TestOutboxBroker(broker)
+    test_broker.fake_client = fake
+    msg = _make_msg(queue="orders")
+
+    async with test_broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        # Lease lost: the delete finds no matching (id, token) row → rowcount 0.
+        with patch.object(fake, "delete_with_lease", new=AsyncMock(return_value=False)):
+            await sub.dispatch_one(msg, writer_conn=None)
+
+    names = [e for e, _ in events]
+    assert "lease_lost" in names
+    assert "acked" not in names  # the false ack that double-counted is gone
+
+
+async def test_worker_inner_swallows_config_error_without_reconnect() -> None:
+    """
+    P18: an _OutboxConfigError in the worker loop is logged and swallowed, not propagated.
+
+    Letting it reach _run_with_reconnect would tear down the writer connection and back
+    off (throttling unrelated rows). The worker must continue; the row's lease expires.
+    """
+    fake = FakeOutboxClient()
+    broker, test_broker = _make_broker_for_dispatch(fake)
+    async with test_broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        sub.running = True
+        sub._inflight.put_nowait(_make_msg(queue="orders"))  # noqa: SLF001
+        calls = {"n": 0}
+
+        async def _raise_then_stop(row: object, *, writer_conn: object) -> None:
+            del row, writer_conn
+            calls["n"] += 1
+            sub.running = False  # let the worker loop exit after this row
+            msg = "bad relay chain"
+            raise _OutboxConfigError(msg)
+
+        with patch.object(sub, "dispatch_one", new=_raise_then_stop):
+            await sub._worker_inner(writer_conn=None)  # noqa: SLF001  # must NOT raise
+
+    assert calls["n"] == 1
 
 
 async def test_dispatch_one_max_deliveries_emits_terminal_without_dispatched() -> None:
@@ -2399,6 +2635,27 @@ def test_subscriber_rejects_min_above_max_fetch_interval() -> None:
         _register_subscriber(broker, min_fetch_interval=10.0, max_fetch_interval=1.0)
 
 
+def test_subscriber_rejects_non_positive_min_fetch_interval() -> None:
+    """P12: a non-positive min_fetch_interval would busy-poll."""
+    broker = _make_broker()
+    with pytest.raises(ValueError, match="min_fetch_interval must be > 0"):
+        _register_subscriber(broker, min_fetch_interval=0.0)
+
+
+def test_subscriber_rejects_non_positive_max_fetch_interval() -> None:
+    """P12: a non-positive max_fetch_interval would busy-poll."""
+    broker = _make_broker()
+    with pytest.raises(ValueError, match="max_fetch_interval must be > 0"):
+        _register_subscriber(broker, max_fetch_interval=0.0)
+
+
+def test_subscriber_rejects_non_positive_lease_ttl() -> None:
+    """P12: a non-positive lease_ttl_seconds means an instantly-expiring lease."""
+    broker = _make_broker()
+    with pytest.raises(ValueError, match="lease_ttl_seconds must be > 0"):
+        _register_subscriber(broker, lease_ttl_seconds=0.0)
+
+
 def test_subscriber_rejects_ack_first() -> None:
     # ACK_FIRST has no legitimate outbox use — deletes before the handler runs, so a
     # handler crash silently drops the row. Better to refuse than warn-and-ship.
@@ -2618,7 +2875,10 @@ async def test_metrics_max_deliveries_emits_terminal_reason() -> None:
 
     async with test_broker:
         sub = next(iter(broker._subscribers))  # noqa: SLF001
-        await sub.dispatch_one(msg, writer_conn=None)
+        # P17: the outcome metric now emits only after a successful flush, so give the
+        # delete something to land on (the synthetic row isn't in the fake store).
+        with patch.object(fake, "delete_with_lease", new=AsyncMock(return_value=True)):
+            await sub.dispatch_one(msg, writer_conn=None)
 
     terminals = [t for e, t in events if e == "nacked_terminal"]
     assert len(terminals) == 1
@@ -2817,6 +3077,24 @@ async def test_dlq_cte_uses_schema_qualified_table_names() -> None:
         await engine.dispose()
 
 
+async def test_delete_with_lease_raises_when_dlq_payload_but_no_dlq_table() -> None:
+    """P10: a dlq_payload with no dlq_table must raise, not silently degrade to a plain DELETE."""
+    engine = create_async_engine("postgresql+asyncpg://u:p@localhost/db")
+    try:
+        metadata = MetaData()
+        table = make_outbox_table(metadata)
+        client = OutboxClient(engine, table)  # no dlq_table configured
+        with pytest.raises(RuntimeError, match="dlq_table"):
+            await client.delete_with_lease(
+                MagicMock(),  # non-None conn; the guard raises before it's used
+                1,
+                uuid.uuid4(),
+                dlq_payload={"failure_reason": "rejected", "last_exception": None},
+            )
+    finally:
+        await engine.dispose()
+
+
 async def test_fetch_cte_carries_partial_index_predicates_as_conjuncts() -> None:
     """
     T6: each OR arm of the fetch WHERE must carry its partial-index predicate as a conjunct.
@@ -2852,6 +3130,9 @@ async def test_fetch_cte_carries_partial_index_predicates_as_conjuncts() -> None
         sql = str(captured["stmt"].compile(dialect=postgresql.dialect())).lower()
         assert "acquired_token is null" in sql  # Branch A predicate
         assert "acquired_token is not null" in sql  # Branch B conjunct (the naive form drops this)
+        # P11: queues bound as a single ANY(:queues) array (stable SQL across queue counts),
+        # not an OR-of-N-equalities.
+        assert "= any (" in sql  # ANY(:queues) array, not OR-of-equalities
     finally:
         await engine.dispose()
 
@@ -2870,6 +3151,7 @@ def test_make_dlq_table_columns_present() -> None:
         "failed_at",
         "failure_reason",
         "last_exception",
+        "timer_id",
     }
     assert {c.name for c in t.columns} == expected
     assert t.name == "my_dlq"

@@ -292,7 +292,12 @@ class PrometheusRecorder:
             # every attempt (with the status label) so failed-publish latency stays
             # observable.
             count = tags.get("count", 1)
-            if count > 0:
+            if status == "error":
+                # P28: an error lands 0 messages but is one failed publish. Increment the
+                # status="error" series (the exact label dashboards alert on) by 1, rather
+                # than gating on count > 0 — which left it permanently at zero.
+                self._published_total.labels(*publish_base, status).inc()
+            elif count > 0:
                 self._published_total.labels(*publish_base, status).inc(count)
             duration = tags.get("duration_seconds")
             if duration is not None:

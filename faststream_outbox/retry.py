@@ -13,6 +13,16 @@ from typing import Protocol
 # retry horizon, so this never changes behavior for a real configuration.
 _MAX_DELAY_SECONDS = 100.0 * 365.0 * 24.0 * 60.0 * 60.0
 
+# Jitter is applied as ``delay *= 1 + U(-j/2, +j/2)``; j > 2 makes the lower bound
+# negative, so a jittered delay can go negative → an immediate (hot) retry. Bound it.
+_MAX_JITTER_FACTOR = 2.0
+
+
+def _validate_jitter_factor(jitter_factor: float) -> None:
+    if not (0.0 <= jitter_factor <= _MAX_JITTER_FACTOR):
+        msg = f"jitter_factor must be between 0 and {_MAX_JITTER_FACTOR}, got {jitter_factor}"
+        raise ValueError(msg)
+
 
 class RetryStrategyProto(Protocol):
     """
@@ -40,6 +50,15 @@ class RetryStrategyProto(Protocol):
 class _RetryStrategyTemplate(ABC, RetryStrategyProto):
     max_attempts: int | None = None
     max_total_delay_seconds: float | None = None
+
+    def __post_init__(self) -> None:
+        # P23: reject knobs that produce nonsense (a hot-retry loop, an unreachable cap).
+        if self.max_attempts is not None and self.max_attempts < 1:
+            msg = f"max_attempts must be >= 1 if set, got {self.max_attempts}"
+            raise ValueError(msg)
+        if self.max_total_delay_seconds is not None and self.max_total_delay_seconds <= 0:
+            msg = f"max_total_delay_seconds must be > 0 if set, got {self.max_total_delay_seconds}"
+            raise ValueError(msg)
 
     @abstractmethod
     def _delay_seconds(self, *, attempts_count: int) -> float: ...
@@ -83,6 +102,13 @@ class ConstantRetry(_RetryStrategyTemplate):
     jitter_factor: float = 0.0
     _random: random.Random = field(default_factory=random.Random)
 
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.delay_seconds <= 0:
+            msg = f"delay_seconds must be > 0, got {self.delay_seconds}"
+            raise ValueError(msg)
+        _validate_jitter_factor(self.jitter_factor)
+
     def _delay_seconds(self, *, attempts_count: int) -> float:  # noqa: ARG002
         delay = self.delay_seconds
         if self.jitter_factor:
@@ -96,6 +122,16 @@ class LinearRetry(_RetryStrategyTemplate):
     step_seconds: float
     jitter_factor: float = 0.0
     _random: random.Random = field(default_factory=random.Random)
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.initial_delay_seconds <= 0:
+            msg = f"initial_delay_seconds must be > 0, got {self.initial_delay_seconds}"
+            raise ValueError(msg)
+        if self.step_seconds < 0:
+            msg = f"step_seconds must be >= 0, got {self.step_seconds}"
+            raise ValueError(msg)
+        _validate_jitter_factor(self.jitter_factor)
 
     def _delay_seconds(self, *, attempts_count: int) -> float:
         delay = self.initial_delay_seconds + self.step_seconds * max(0, attempts_count - 1)
@@ -111,6 +147,19 @@ class ExponentialRetry(_RetryStrategyTemplate):
     max_delay_seconds: float | None = None
     jitter_factor: float = 0.0
     _random: random.Random = field(default_factory=random.Random)
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.initial_delay_seconds <= 0:
+            msg = f"initial_delay_seconds must be > 0, got {self.initial_delay_seconds}"
+            raise ValueError(msg)
+        if self.multiplier <= 0:
+            msg = f"multiplier must be > 0, got {self.multiplier}"
+            raise ValueError(msg)
+        if self.max_delay_seconds is not None and self.max_delay_seconds <= 0:
+            msg = f"max_delay_seconds must be > 0 if set, got {self.max_delay_seconds}"
+            raise ValueError(msg)
+        _validate_jitter_factor(self.jitter_factor)
 
     def _delay_seconds(self, *, attempts_count: int) -> float:
         try:

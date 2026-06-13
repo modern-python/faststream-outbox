@@ -856,7 +856,7 @@ async def test_subscriber_with_no_handler_skips_loop_setup() -> None:
         max_deliveries=None,
         config=broker.config.broker_config,  # type: ignore[arg-type]
     )
-    broker._subscribers.add(sub)  # noqa: SLF001  # ty: ignore[unresolved-attribute]
+    broker._subscribers.add(sub)  # noqa: SLF001
     async with TestOutboxBroker(broker, run_loops=True):
         # Inside the test broker the logger is wired; call start() directly so the
         # ``if not self.calls: return`` branch fires (no add_call() was performed).
@@ -980,7 +980,7 @@ async def test_sync_publish_skips_callless_subscriber() -> None:
         max_deliveries=None,
         config=broker.config.broker_config,  # type: ignore[arg-type]
     )
-    broker._subscribers.add(sub)  # noqa: SLF001  # ty: ignore[unresolved-attribute]
+    broker._subscribers.add(sub)  # noqa: SLF001
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
@@ -1045,6 +1045,27 @@ async def test_fake_client_cancel_timer_removes_unleased_row() -> None:
     fake.feed(queue="q", payload=b"x", timer_id="email-1")
     assert await fake.cancel_timer(queue="q", timer_id="email-1") is True
     assert fake.rows == []
+
+
+def test_fake_client_feed_rejects_naive_next_attempt_at() -> None:
+    """P31: feed() rejects a naive datetime up front, matching the tz-strict publish path."""
+    fake = FakeOutboxClient()
+    with pytest.raises(ValueError, match="timezone-aware"):
+        fake.feed(queue="q", payload=b"x", next_attempt_at=_dt.datetime.now())  # noqa: DTZ005  # naive on purpose
+
+
+async def test_fake_headers_not_shared_by_reference() -> None:
+    """P32: the fake must copy headers at its boundaries so handler/caller mutation can't corrupt rows."""
+    fake = FakeOutboxClient()
+    src = {"k": "v"}
+    fake.feed(queue="q", payload=b"x", headers=src)
+    src["k"] = "mutated-by-caller"
+    assert fake.rows[0].headers == {"k": "v"}  # stored copy is independent of the caller's dict
+
+    inner = _to_inner(fake.rows[0])
+    assert inner.headers is not None
+    inner.headers["k"] = "mutated-by-handler"
+    assert fake.rows[0].headers == {"k": "v"}  # persisted row unaffected by inner-message mutation
 
 
 async def test_fake_client_cancel_timer_unknown_returns_false() -> None:
@@ -1618,6 +1639,31 @@ async def test_fake_dlq_not_emitted_on_handler_success() -> None:
     assert test_broker.fake_client.dlq_rows == []
     # And the row should be deleted (handler succeeded).
     assert test_broker.fake_client.rows == []
+
+
+async def test_fake_dlq_written_omits_exception_type_when_no_exception() -> None:
+    """P34: dlq_written must omit exception_type (not emit None) for a max_deliveries terminal."""
+    events: list[tuple[str, dict]] = []
+
+    def recorder(event: str, tags: typing.Any) -> None:
+        events.append((event, dict(tags)))
+
+    broker, _received, _raised = _make_broker_with_dlq(max_deliveries=1, recorder=recorder)
+    test_broker = TestOutboxBroker(broker)
+
+    async with test_broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        test_broker.feed("orders", b"x")
+        row = test_broker.fake_client.rows[0]
+        row.deliveries_count = 5  # over max_deliveries=1 → terminal without ever running the handler
+        row.acquired_token = uuid.uuid4()
+        row.acquired_at = _dt.datetime.now(tz=_dt.UTC)
+        await sub.dispatch_one(_to_inner(row), writer_conn=None)
+
+    dlq_events = [t for e, t in events if e == "dlq_written"]
+    assert len(dlq_events) == 1
+    assert dlq_events[0]["failure_reason"] == "max_deliveries"
+    assert "exception_type" not in dlq_events[0]  # omitted, not None
 
 
 async def test_test_broker_aenter_returns_single_outbox_broker() -> None:

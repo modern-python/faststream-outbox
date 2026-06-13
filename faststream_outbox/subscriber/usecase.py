@@ -161,6 +161,9 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         # Set by the LISTEN callback to wake _fetch_loop early; cleared after each
         # wakeup. When LISTEN is unavailable the event simply never fires and the
         # loop sleeps the full adaptive interval.
+        # Frozen set of served queues for the O(1) NOTIFY-payload filter (P14); the
+        # queue list is fixed per subscriber, so caching it here clarifies intent.
+        self._served_queues: frozenset[str] = frozenset(config.queues)
         self._notify_event: asyncio.Event = asyncio.Event()
         # Set by stop() to halt _fetch_inner before tasks are cancelled. Distinct
         # from self.running: running must stay True during drain so FastStream's
@@ -237,9 +240,14 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         with anyio.move_on_after(self._outer_config.graceful_timeout):
             await self._inflight.join()
         self.running = False
-        for task in self.tasks:
+        tasks = list(self.tasks)
+        for task in tasks:
             if not task.done():
                 task.cancel()
+        # P16: await the cancellations so the loops have actually unwound (and released
+        # their connections) before stop() returns — otherwise a caller's immediate
+        # engine.dispose() races the teardown. return_exceptions swallows CancelledError.
+        await asyncio.gather(*tasks, return_exceptions=True)
         self.tasks.clear()
 
     @property
@@ -356,9 +364,11 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         non-asyncpg driver, permission error, network problem). The fetch loop falls back
         to polling-only behavior in that case.
 
-        A separate connection is required because asyncpg's ``add_listener`` makes the
-        connection's reader task monopolize it — interleaving normal queries breaks
-        notification delivery.
+        A separate connection is used so application fetch traffic and the LISTEN reader
+        task don't contend on one connection. The only query this loop runs on the LISTEN
+        connection is the bounded ``SELECT 1`` liveness probe in ``_fetch_inner`` — a
+        deliberate, infrequent exception that surfaces a silently-dropped socket; it does
+        not interfere with notification delivery (P15).
         """
         if _asyncpg is None or "asyncpg" not in (engine.url.drivername or ""):
             return None
@@ -391,14 +401,20 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                     await conn.close()
         return conn if listening else None
 
-    def _on_notify(self, *_args: object) -> None:
+    def _on_notify(self, *args: object) -> None:
         """
         Asyncpg notification callback: ``(connection, pid, channel, payload)``.
 
-        We only need the wake-up signal; payload is ignored. Setting an ``asyncio.Event``
-        from the asyncpg reader task is safe — it runs on the same event loop.
+        The payload is the publisher's queue name (``pg_notify('outbox_<table>', queue)``).
+        We only wake for queues this subscriber serves — on a busy multi-queue table that
+        avoids a cross-queue wakeup storm (every queue's NOTIFY waking every subscriber).
+        If the payload shape is unexpected, wake conservatively rather than risk a missed
+        delivery (P14). Setting an ``asyncio.Event`` from the asyncpg reader task is safe —
+        it runs on the same event loop.
         """
-        self._notify_event.set()
+        payload = args[3] if len(args) >= 4 else None  # noqa: PLR2004
+        if payload is None or payload in self._served_queues:
+            self._notify_event.set()
 
     async def _worker_loop(self) -> None:
         """Thin wrapper around :meth:`_run_with_reconnect` for the worker path."""
@@ -491,10 +507,21 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             row = await self._inflight.get()
             try:
                 await self.dispatch_one(row, writer_conn=writer_conn)
+            except _OutboxConfigError as e:
+                # P18: a config error (e.g. OutboxResponse + foreign publisher) is not a
+                # connection failure. Letting it propagate to _run_with_reconnect would tear
+                # down the writer connection and back off (up to 30s), throttling unrelated
+                # rows. Log it and continue; the row's lease expires and it is reclaimed.
+                # Fix the configuration to stop the error.
+                self._log(
+                    log_level=logging.ERROR,
+                    message=f"Outbox configuration error (fix required; row left to lease-expiry retry): {e!r}",
+                    exc_info=e,
+                )
             finally:
                 self._inflight.task_done()
 
-    async def dispatch_one(
+    async def dispatch_one(  # noqa: C901  # linear pipeline: guard, consume, branch on outcome, flush
         self,
         row: OutboxInnerMessage,
         *,
@@ -519,11 +546,14 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         row.retry_strategy = self._config.retry_strategy
         base = self._base_tags(row.queue)
         if not row.allow_delivery(max_deliveries=self._config.max_deliveries, logger=logger):
-            self._emit_metric(
-                "nacked_terminal",
-                {**base, "deliveries_count": row.deliveries_count, "reason": "max_deliveries"},
-            )
-            await self._safe_flush(row, terminal=True, writer_conn=writer_conn)
+            # P17: flush first; emit the terminal metric only if the DELETE landed. A
+            # lease-lost delete (rowcount 0 → redelivered) emits ``lease_lost`` from the
+            # flush instead, so emitting nacked_terminal here too would double-count.
+            if await self._safe_flush(row, terminal=True, writer_conn=writer_conn):
+                self._emit_metric(
+                    "nacked_terminal",
+                    {**base, "deliveries_count": row.deliveries_count, "reason": "max_deliveries"},
+                )
             return
         # AckPolicy middleware catches handler exceptions; _CaptureExceptionMiddleware
         # stashes exc onto row.last_exception before nack runs, so retry strategies
@@ -549,7 +579,11 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             # terminal/retry, so its state is undefined — flushing or emitting an
             # ack/nack would lie. The lease will expire and the row will be
             # reclaimed; the ERROR log is the operator signal.
-            self._log(log_level=logging.ERROR, message=f"Outbox worker error: {e!r}", exc_info=e)
+            self._log(
+                log_level=logging.ERROR,
+                message=f"Outbox handler error escaped consume(); row left to lease-expiry retry: {e!r}",
+                exc_info=e,
+            )
             return
         # Shutdown race: SubscriberUsecase.consume() returns None without invoking
         # process_message when self.running has been flipped to False by stop().
@@ -571,15 +605,19 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             terminal_tags: dict[str, typing.Any] = {**common, "reason": row.terminal_failure_reason}
             if row.last_exception is not None:
                 terminal_tags["exception_type"] = type(row.last_exception).__name__
-            self._emit_metric("nacked_terminal", terminal_tags)
+            outcome: tuple[str, dict[str, typing.Any]] = ("nacked_terminal", terminal_tags)
         elif row.pending_delay_seconds is not None:
             retry_tags: dict[str, typing.Any] = {**common, "next_delay_seconds": row.pending_delay_seconds}
             if row.last_exception is not None:
                 retry_tags["exception_type"] = type(row.last_exception).__name__
-            self._emit_metric("nacked_retried", retry_tags)
+            outcome = ("nacked_retried", retry_tags)
         else:
-            self._emit_metric("acked", common)
-        await self._safe_flush(row, terminal=row.to_delete, writer_conn=writer_conn)
+            outcome = ("acked", common)
+        # P17: emit the outcome metric only after the flush actually lands. A lease-lost
+        # flush (rowcount 0 → the row gets redelivered) emits ``lease_lost`` from the flush
+        # method instead; emitting acked/nacked here too would count the row twice.
+        if await self._safe_flush(row, terminal=row.to_delete, writer_conn=writer_conn):
+            self._emit_metric(*outcome)
 
     async def _safe_flush(
         self,
@@ -587,9 +625,13 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         *,
         terminal: bool,
         writer_conn: "AsyncConnection | None",
-    ) -> None:
+    ) -> bool:
         """
         Run the terminal/retry write, propagating errors only when ``writer_conn`` is set.
+
+        Returns True iff the write landed (rowcount > 0). False means the lease was lost
+        (a newer fetch reclaimed the row) or — on the test-broker path — the flush raised
+        and was swallowed; either way the caller must NOT emit an acked/nacked metric (P17).
 
         When ``writer_conn`` is None (test broker / sync dispatch), flush errors are logged
         and swallowed — there's no shared connection to rebuild and the legacy test-broker
@@ -600,20 +642,24 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         flush = self._flush_terminal if terminal else self._flush_retry
         if writer_conn is None:
             try:
-                await flush(row, writer_conn=None)
+                return await flush(row, writer_conn=None)
             except Exception as e:  # noqa: BLE001
-                self._log(log_level=logging.ERROR, message=f"Outbox worker error: {e!r}", exc_info=e)
-            return
-        await flush(row, writer_conn=writer_conn)
+                self._log(
+                    log_level=logging.ERROR,
+                    message=f"Outbox terminal-flush error (swallowed; no writer connection): {e!r}",
+                    exc_info=e,
+                )
+                return False
+        return await flush(row, writer_conn=writer_conn)
 
     async def _flush_terminal(
         self,
         row: OutboxInnerMessage,
         *,
         writer_conn: "AsyncConnection | None",
-    ) -> None:
+    ) -> bool:
         if row.acquired_token is None:
-            return
+            return False
         # Build the DLQ payload only when this row is terminal-by-failure AND the
         # broker is configured with a DLQ table. Success-by-ack rows reach this
         # method too (terminal=True via to_delete) but carry
@@ -651,26 +697,31 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                     "deliveries_count": row.deliveries_count,
                 },
             )
-            return
+            return False
         if dlq_payload is not None:
-            self._emit_metric(
-                "dlq_written",
-                {
-                    **self._base_tags(row.queue),
-                    "deliveries_count": row.deliveries_count,
-                    "failure_reason": row.terminal_failure_reason,
-                    "exception_type": (type(row.last_exception).__name__ if row.last_exception is not None else None),
-                },
-            )
+            # P34: omit exception_type when there's no exception (e.g. max_deliveries)
+            # rather than emitting it as None, matching the nacked_terminal convention.
+            dlq_tags: dict[str, typing.Any] = {
+                **self._base_tags(row.queue),
+                "deliveries_count": row.deliveries_count,
+                "failure_reason": row.terminal_failure_reason,
+            }
+            if row.last_exception is not None:
+                dlq_tags["exception_type"] = type(row.last_exception).__name__
+            self._emit_metric("dlq_written", dlq_tags)
+        return True
 
     async def _flush_retry(
         self,
         row: OutboxInnerMessage,
         *,
         writer_conn: "AsyncConnection | None",
-    ) -> None:
+    ) -> bool:
         if row.acquired_token is None or row.pending_delay_seconds is None:
-            return
+            return False
+        # P19: first_attempt_at / last_attempt_at are the worker's clock; next_attempt_at
+        # is computed server-side (now() + delay) inside mark_pending_with_lease, so the
+        # reschedule time stays clock-skew-immune even though these audit timestamps don't.
         updated = await self._client.mark_pending_with_lease(
             writer_conn,
             row.id,
@@ -701,6 +752,8 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                     "deliveries_count": row.deliveries_count,
                 },
             )
+            return False
+        return True
 
     @typing.override
     async def get_one(self, *, timeout: float = 5.0) -> typing.NoReturn:
