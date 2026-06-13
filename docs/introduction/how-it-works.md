@@ -148,11 +148,14 @@ and terminal-by-failure rows are copied into a sibling audit table in the
 same Postgres statement as the `DELETE`:
 
 ```python
+from sqlalchemy import MetaData
+from sqlalchemy.ext.asyncio import create_async_engine
 from faststream_outbox import OutboxBroker, make_dlq_table, make_outbox_table
 
 metadata = MetaData()
 outbox_table = make_outbox_table(metadata, table_name="outbox")
 dlq_table = make_dlq_table(metadata, table_name="outbox_dlq")
+engine = create_async_engine("postgresql+asyncpg://outbox:outbox@localhost:5432/outbox")
 broker = OutboxBroker(engine, outbox_table=outbox_table, dlq_table=dlq_table)
 ```
 
@@ -180,7 +183,7 @@ you add).
 
 ## Relay to Kafka / RabbitMQ / NATS / Redis
 
-> **Relay outbox rows to Kafka / RabbitMQ / NATS / Redis with a single decorator → [Relay tutorial](../usage/relay.md).**
+> **Relay outbox rows to Kafka / RabbitMQ / NATS / Redis with a single decorator → [Relay tutorial](../tutorials/add-kafka-relay.md).**
 
 ## Acknowledgements
 

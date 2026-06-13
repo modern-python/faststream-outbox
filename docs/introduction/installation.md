@@ -59,3 +59,10 @@ Combine extras with commas:
 ```bash
 pip install 'faststream-outbox[asyncpg,fastapi,prometheus]'
 ```
+
+Or use the `all` extra to pull in every optional extra at once
+(`asyncpg`, `validate`, `fastapi`, `prometheus`, `opentelemetry`):
+
+```bash
+pip install 'faststream-outbox[all]'
+```

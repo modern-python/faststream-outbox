@@ -99,7 +99,7 @@ async def publish_one() -> None:
         await broker.publish(1, queue="orders", session=session)
 ```
 
-Run with `faststream run app:app`.
+Save this module as `app.py`, then run with `faststream run app:app`.
 
 ## Connection ownership
 

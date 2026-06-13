@@ -99,7 +99,7 @@ async def checkout(order: Order, session: AsyncSession) -> None:
     await session.commit()                              # row + domain commit together
 ```
 
-Per-call `headers` are merged with the decorator's static headers
+Per-call `headers` are merged with the publisher's static headers
 (per-call wins).
 
 The publisher exists primarily for AsyncAPI spec coverage and to
@@ -130,8 +130,15 @@ transactional contract applies (you provide the session, the row commits
 with your domain writes):
 
 ```python
+from fastapi import Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from faststream_outbox import OutboxResponse
 from faststream_outbox.annotations import OutboxMessage
+
+# `get_session` is your app's session dependency — the same one your HTTP
+# routes use. `Depends(...)` resolves inside a handler only under the FastAPI
+# integration; see the engine / sessionmaker setup in the FastAPI guide.
 
 
 @broker.subscriber("orders")
@@ -151,6 +158,15 @@ async def handle(
 explicitly — useful for trace stitching. Plain returns (`None`, `dict`,
 etc.) are silently skipped, so handlers that don't want to chain just
 return normally.
+
+!!! warning "Duplicate delivery on crash"
+    The chained `downstream` row commits with the handler's transaction,
+    but the inbound `orders` row's terminal `DELETE` runs **after** the
+    handler returns, on the worker's separate autocommit connection. A
+    crash between those two points leaves the inbound row undeleted, so it
+    is redelivered — producing a **second** chained row. For non-idempotent
+    chains, pass a deterministic `timer_id` derived from the inbound message
+    so the duplicate insert is a no-op (see [Timers](./timers.md)).
 
 ## Annotated handler params
 

@@ -317,5 +317,10 @@ docker stop outbox-postgres
   `OutboxPublisher` decorator, chained publishing.
 - [FastAPI integration](../usage/fastapi.md) — wire the outbox into
   a real HTTP service with `Depends(get_session)`.
+- [Schema validation](../usage/schema-validation.md) — this tutorial
+  installed the `validate` extra; call `validate_schema()` from a
+  startup hook or `/health` check to catch a table that drifted from
+  what the broker expects (e.g. a missing partial index after a
+  migration).
 - [Tutorial: Add a Kafka relay](./add-kafka-relay.md) — extend this
   app to forward each row into Kafka with one stacked decorator.
