@@ -144,23 +144,29 @@ def test_otel_dlq_written_emits_counter_with_reason_attr() -> None:
 
 
 def test_otel_meter_argument_takes_precedence_over_meter_provider() -> None:
-    reader = InMemoryMetricReader()
-    provider = MeterProvider(metric_readers=[reader])
-    explicit_meter = provider.get_meter("custom-meter")
-    rec = OpenTelemetryRecorder(meter=explicit_meter)
+    """When both are passed, ``meter`` wins: data lands in the meter's reader, not the provider's."""
+    meter_reader = InMemoryMetricReader()
+    explicit_meter = MeterProvider(metric_readers=[meter_reader]).get_meter("explicit")
+    ignored_reader = InMemoryMetricReader()
+    ignored_provider = MeterProvider(metric_readers=[ignored_reader])
+
+    rec = OpenTelemetryRecorder(meter=explicit_meter, meter_provider=ignored_provider)
     rec("fetched", {"queue": "q", "subscriber": "h", "count": 1})
-    # Smoke-test: explicit-meter path didn't raise; data lands in the same reader.
-    assert "messaging.outbox.fetch.batches" in _collect_metrics(reader)
+
+    assert "messaging.outbox.fetch.batches" in _collect_metrics(meter_reader)  # used the meter
+    assert "messaging.outbox.fetch.batches" not in _collect_metrics(ignored_reader)  # ignored the provider
 
 
 def test_otel_default_meter_provider_path() -> None:
-    # Using neither meter nor meter_provider falls back to the global provider —
-    # which here is the no-op MeterProvider. Just verify the recorder constructs
-    # and accepts events without raising.
-    rec = OpenTelemetryRecorder()
-    rec("fetched", {"queue": "q", "subscriber": "h", "count": 0})
-    # Sanity: confirm the recorder pulled from the global provider (or its default).
-    assert ot_metrics.get_meter_provider() is not None
+    """Neither meter nor meter_provider → the recorder pulls a meter from ``ot_metrics.get_meter``."""
+    reader = InMemoryMetricReader()
+    meter = MeterProvider(metric_readers=[reader]).get_meter("global-fallback")
+    with patch.object(ot_metrics, "get_meter", return_value=meter):
+        rec = OpenTelemetryRecorder()
+        rec("fetched", {"queue": "q", "subscriber": "h", "count": 1})
+    # The event landed in the meter the (patched) global provider handed out — proving the
+    # no-args path actually resolves a meter rather than silently dropping the instrument.
+    assert "messaging.outbox.fetch.batches" in _collect_metrics(reader)
 
 
 def test_otel_nacked_retried_stamps_error_type_attribute() -> None:

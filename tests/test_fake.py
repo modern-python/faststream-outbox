@@ -499,7 +499,12 @@ async def test_fake_broker_publish_invokes_flush_terminal_when_lease_lost() -> N
         async def delete_with_lease(self, *args: object, **kwargs: object) -> bool:  # noqa: ARG002
             return False
 
-    broker = _make_broker()
+    events: list[tuple[str, dict[str, typing.Any]]] = []
+
+    def recorder(event: str, tags: Mapping[str, typing.Any]) -> None:
+        events.append((event, dict(tags)))
+
+    broker = OutboxBroker(outbox_table=make_outbox_table(MetaData()), metrics_recorder=recorder)
     received: list[str] = []
 
     @broker.subscriber("orders")
@@ -512,6 +517,10 @@ async def test_fake_broker_publish_invokes_flush_terminal_when_lease_lost() -> N
         await broker.publish("lease-lost", queue="orders")  # ty: ignore[missing-argument]
 
     assert received == ["lease-lost"]
+    # P17 + lease-lost: the failed delete emits lease_lost(phase=terminal); the paired
+    # ``acked`` is suppressed (emit-after-flush), so a lease-lost row isn't double-counted.
+    assert [tags["phase"] for ev, tags in events if ev == "lease_lost"] == ["terminal"]
+    assert "acked" not in [ev for ev, _ in events]
 
 
 async def test_fake_broker_publish_invokes_flush_retry_when_lease_lost() -> None:
@@ -521,7 +530,12 @@ async def test_fake_broker_publish_invokes_flush_retry_when_lease_lost() -> None
         async def mark_pending_with_lease(self, *args: object, **kwargs: object) -> bool:  # noqa: ARG002
             return False
 
-    broker = _make_broker()
+    events: list[tuple[str, dict[str, typing.Any]]] = []
+
+    def recorder(event: str, tags: Mapping[str, typing.Any]) -> None:
+        events.append((event, dict(tags)))
+
+    broker = OutboxBroker(outbox_table=make_outbox_table(MetaData()), metrics_recorder=recorder)
     attempts: list[str] = []
 
     @broker.subscriber("orders", retry_strategy=ConstantRetry(delay_seconds=0.05, max_attempts=10))
@@ -536,6 +550,10 @@ async def test_fake_broker_publish_invokes_flush_retry_when_lease_lost() -> None
         await broker.publish("never-cleared", queue="orders")  # ty: ignore[missing-argument]
 
     assert attempts == ["never-cleared"]
+    # The failed retry-update emits lease_lost(phase=retry); the paired ``nacked_retried``
+    # is suppressed (emit-after-flush), so a lease-lost row isn't double-counted.
+    assert [tags["phase"] for ev, tags in events if ev == "lease_lost"] == ["retry"]
+    assert "nacked_retried" not in [ev for ev, _ in events]
 
 
 async def test_fake_broker_publish_swallows_post_consume_failure() -> None:
@@ -854,6 +872,10 @@ async def test_loop_mode_flush_with_no_lease_token_is_noop() -> None:
         test_broker.feed("orders", p, headers=h)
         await _wait_until(lambda: received, timeout=5.0)
 
+    # The worker's row had its lease token stripped at fetch -> _flush_terminal early-returns
+    # without deleting. Pin that the no-op preserved the row (was: only the handler ran).
+    assert len(test_broker.fake_client.rows) == 1
+
 
 async def test_loop_mode_flush_retry_with_no_lease_token_is_noop() -> None:
     class TokenStrippingClient(FakeOutboxClient):
@@ -883,6 +905,10 @@ async def test_loop_mode_flush_retry_with_no_lease_token_is_noop() -> None:
         p, h = encode_payload("retry-no-token")
         test_broker.feed("orders", p, headers=h)
         await _wait_until(lambda: attempts, timeout=5.0)
+
+    # _flush_retry early-returns on the stripped token -> the row is neither rescheduled nor
+    # lost; pin that it survives (was: only the handler ran).
+    assert len(test_broker.fake_client.rows) == 1
 
 
 async def test_loop_mode_retry_strategy_can_branch_on_exception_type() -> None:
@@ -1024,7 +1050,8 @@ async def test_broker_stop_cancels_wedged_handler_within_graceful_timeout_in_fak
     """T8: a wedged handler is cancelled within graceful_timeout (no 2x wait), row preserved — off-Postgres."""
     metadata = MetaData()
     t = make_outbox_table(metadata)
-    broker = OutboxBroker(outbox_table=t, graceful_timeout=0.3)
+    graceful_timeout = 1.0  # larger TTL -> load jitter is small relative to the 1x/2x gap
+    broker = OutboxBroker(outbox_table=t, graceful_timeout=graceful_timeout)
     started = asyncio.Event()
 
     @broker.subscriber("orders", min_fetch_interval=0.01, max_fetch_interval=0.05)
@@ -1043,9 +1070,10 @@ async def test_broker_stop_cancels_wedged_handler_within_graceful_timeout_in_fak
         await sub.stop()
         elapsed = asyncio.get_event_loop().time() - start
 
-    # ~graceful_timeout (0.3) + cancellation slack. The 2x-regression (re-waiting in
-    # super().stop()) would exceed 0.6s; 0.7s is the safe upper guard.
-    assert elapsed < 0.7, f"sub.stop() took {elapsed:.3f}s — strict-bound regression"
+    # Drain waits ~graceful_timeout for the wedged handler, then cancels (~1x). The 2x
+    # regression (super().stop() re-waiting another full budget) would take ~2x. A 1.6x
+    # bound separates them with generous slack so CI load can't flake it.
+    assert elapsed < graceful_timeout * 1.6, f"sub.stop() took {elapsed:.3f}s — 2x-drain regression"
     assert len(test_broker.fake_client.rows) == 1  # handler cancelled pre-ack → row preserved (lease set)
 
 
@@ -1169,6 +1197,32 @@ async def test_fake_client_cancel_timer_skips_leased_row() -> None:
     fake.rows[0].acquired_at = _dt.datetime.now(tz=_dt.UTC)
     assert await fake.cancel_timer(queue="q", timer_id="email-1") is False
     assert len(fake.rows) == 1
+
+
+async def test_fake_client_terminal_writes_reject_none_token() -> None:
+    """SQL parity: a None lease token never matches (NULL = NULL is NULL), even on an unleased row."""
+    fake = FakeOutboxClient()
+    row_id = fake.feed(queue="q", payload=b"x")  # unleased -> acquired_token is None
+    assert row_id is not None
+    assert fake.rows[0].acquired_token is None
+    now = _dt.datetime.now(tz=_dt.UTC)
+    # Without the ``acquired_token is not None`` guard the fake's ``None == None`` would match
+    # this row, deleting / rescheduling where the real client's SQL no-ops.
+    assert await fake.delete_with_lease(None, row_id, None) is False  # ty: ignore[invalid-argument-type]
+    assert len(fake.rows) == 1  # not deleted
+    assert (
+        await fake.mark_pending_with_lease(
+            None,
+            row_id,
+            None,  # ty: ignore[invalid-argument-type]
+            delay_seconds=1.0,
+            attempts_count=1,
+            first_attempt_at=now,
+            last_attempt_at=now,
+        )
+        is False
+    )
+    assert fake.rows[0].acquired_token is None  # unchanged
 
 
 # --- AckPolicy plumbing (A) ----------------------------------------------------------

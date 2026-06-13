@@ -31,10 +31,9 @@ async def test_naked_decorator_chain_relays_plain_return_to_kafka() -> None:
     async def relay(body: dict[str, Any]) -> dict[str, Any]:
         return body
 
-    # TestKafkaBroker first, TestOutboxBroker second — see "Context-manager
-    # ordering note" at the end of this plan. The foreign broker's mock producer
-    # must be wired before our subscriber starts (Task 6 introduces a startup
-    # warning that probes foreign producers).
+    # TestKafkaBroker first, TestOutboxBroker second: the foreign broker's mock producer
+    # must be wired before our subscriber starts, because the outbox's start() probes
+    # foreign producers and warns about any whose broker isn't started yet.
     async with TestKafkaBroker(broker_kafka), TestOutboxBroker(broker_outbox, run_loops=False) as outbox:
         await outbox.publish({"hello": "world"}, queue="relay_queue", session=None)  # ty: ignore[invalid-argument-type]
         publisher_kafka.mock.assert_called_once_with({"hello": "world"})
@@ -286,6 +285,29 @@ async def test_unstarted_foreign_broker_warns_on_start(caplog: pytest.LogCapture
         f"Expected exactly one WARNING referencing relay_queue, got {len(matching)}: "
         f"{[r.getMessage() for r in caplog.records]}"
     )
+
+
+async def test_started_foreign_broker_does_not_warn_on_start(caplog: pytest.LogCaptureFixture) -> None:
+    """Negative of the unstarted-broker warning: a STARTED foreign broker emits no warning at start()."""
+    metadata = MetaData()
+    outbox_table = make_outbox_table(metadata)
+    broker_outbox = OutboxBroker(outbox_table=outbox_table)
+    broker_kafka = KafkaBroker("kafka://test:9092")
+    publisher_kafka = broker_kafka.publisher("relay_topic")
+
+    @publisher_kafka
+    @broker_outbox.subscriber("relay_queue")
+    async def relay(body: dict[str, Any]) -> dict[str, Any]:
+        return body  # pragma: no cover — never invoked; the test only exercises start()
+
+    with caplog.at_level(logging.WARNING, logger="faststream_outbox"):
+        # TestKafkaBroker wires the foreign producer before the outbox starts, so the
+        # start()-time probe sees it as started and stays silent.
+        async with TestKafkaBroker(broker_kafka), TestOutboxBroker(broker_outbox, run_loops=False):
+            pass
+
+    foreign = [r.getMessage() for r in caplog.records if "has not been started" in r.getMessage()]
+    assert foreign == []
 
 
 async def test_foreign_warning_names_only_decorated_subscriber_queues(caplog: pytest.LogCaptureFixture) -> None:

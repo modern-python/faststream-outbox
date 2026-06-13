@@ -21,7 +21,7 @@ from faststream.middlewares import AckPolicy
 from sqlalchemy import MetaData
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from faststream_outbox import NoRetry, OutboxMessage, make_outbox_table
+from faststream_outbox import NoRetry, OutboxMessage, OutboxResponse, make_outbox_table
 from faststream_outbox.client import AbstractOutboxClient
 from faststream_outbox.fastapi import (
     OutboxBroker as AnnotatedOutboxBroker,
@@ -199,3 +199,49 @@ async def test_outbox_router_publisher_delegates_to_broker() -> None:
         row_id = await publisher.publish({"v": 1}, session=AsyncMock(spec=AsyncSession))
 
     assert row_id is not None
+
+
+async def test_fastapi_handler_chains_via_outbox_response_with_per_delivery_session() -> None:
+    """
+    Exercise the transactional contract end-to-end through the FastAPI wrapper.
+
+    The Depends-resolved session flows into the chained OutboxResponse, and each delivery
+    resolves its own fresh session (session-per-delivery).
+    """
+    t = _make_outbox_table()
+    router = OutboxRouter(outbox_table=t)
+    sessions_seen: list[AsyncSession] = []
+    downstream: list[dict] = []
+
+    async def get_session() -> AsyncIterator[AsyncSession]:
+        s = AsyncMock(spec=AsyncSession)
+        sessions_seen.append(s)
+        yield s
+
+    session_dep = Depends(get_session)
+
+    @router.subscriber("orders")
+    async def handle_order(body: dict, session: AsyncSession = session_dep) -> OutboxResponse:
+        return OutboxResponse(body={"chained_from": body["id"]}, queue="downstream", session=session)
+
+    @router.subscriber("downstream")
+    async def handle_downstream(body: dict) -> None:
+        downstream.append(body)
+
+    app = _make_app_with_router(router)
+    with TestClient(app):
+        await router.broker.publish({"id": 1}, queue="orders")  # ty: ignore[missing-argument]
+        await router.broker.publish({"id": 2}, queue="orders")  # ty: ignore[missing-argument]
+
+    # OutboxResponse chaining works through the FastAPI wrapper: the bridged Depends session is
+    # the one the follow-on row is published with.
+    assert downstream == [{"chained_from": 1}, {"chained_from": 2}]
+    # Session-per-delivery: each "orders" delivery resolved its own fresh session via Depends.
+    assert len(sessions_seen) == 2
+    assert sessions_seen[0] is not sessions_seen[1]
+
+
+def test_outbox_router_forwards_broker_kwargs_to_inner_broker() -> None:
+    """End-to-end forwarding: an outbox-broker kwarg passed to OutboxRouter reaches the broker."""
+    router = OutboxRouter(outbox_table=_make_outbox_table(), graceful_timeout=3.5)
+    assert router.broker.config.graceful_timeout == 3.5

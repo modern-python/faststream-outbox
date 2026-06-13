@@ -163,7 +163,11 @@ class FakeOutboxClient(AbstractOutboxClient):
         dlq_payload: "typing.Mapping[str, typing.Any] | None" = None,
     ) -> bool:
         for i, row in enumerate(self._rows):
-            if row.id == message_id and row.acquired_token == acquired_token:
+            # ``acquired_token is not None`` mirrors SQL's ``WHERE acquired_token = :token``:
+            # ``NULL = NULL`` is NULL (no match), so a None token must never match — even a
+            # row whose own token is None. Without this, the fake's ``None == None`` would
+            # delete where the real client no-ops.
+            if row.id == message_id and acquired_token is not None and row.acquired_token == acquired_token:
                 if dlq_payload is not None:
                     # Mirror the real CTE side-effect: DLQ row materializes in the
                     # same call as the DELETE, before the row is removed.
@@ -197,7 +201,8 @@ class FakeOutboxClient(AbstractOutboxClient):
         last_attempt_at: _dt.datetime,
     ) -> bool:
         for row in self._rows:
-            if row.id == message_id and row.acquired_token == acquired_token:
+            # Mirror SQL ``NULL = NULL`` semantics — see ``delete_with_lease``.
+            if row.id == message_id and acquired_token is not None and row.acquired_token == acquired_token:
                 row.next_attempt_at = _utcnow() + _dt.timedelta(seconds=max(0.0, delay_seconds))
                 row.attempts_count = attempts_count
                 row.first_attempt_at = first_attempt_at
