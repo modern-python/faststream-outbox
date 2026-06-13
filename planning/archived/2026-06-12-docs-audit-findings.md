@@ -1,7 +1,14 @@
 ---
+status: shipped
 date: 2026-06-12
+slug: 2026-06-12-docs-audit-findings
 scope: docs/ (22 user-facing mkdocs pages)
-status: triage
+prs: [63, 64, 72]
+outcome: >
+  All findings remediated, nothing deferred. Bugs B1–B14 (#63) +
+  inaccuracies I1–I22 (#64) shipped; improvements P1–P25 + the 4
+  source-side docstring/comment notes resolved in #72. Docs-only — not
+  tied to a package release.
 ---
 
 # Docs audit findings — 2026-06-12
