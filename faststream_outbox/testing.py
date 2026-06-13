@@ -283,6 +283,93 @@ async def _sync_dispatch(fake_client: FakeOutboxClient, broker: OutboxBroker, qu
     await subscriber.dispatch_one(_to_inner(fake_row))
 
 
+def _emit_published(broker: OutboxBroker, queue: str, *, count: int, size_bytes: int) -> None:
+    """Emit the producer-side ``published`` metric on the broker's recorder (test-broker parity)."""
+    _safe_emit(
+        broker.config.broker_config.metrics_recorder,
+        "published",
+        {
+            "queue": queue,
+            "status": "success",
+            "count": count,
+            "size_bytes": size_bytes,
+            "duration_seconds": 0.0,
+        },
+    )
+
+
+def _notify_subscriber(broker: OutboxBroker, queue: str) -> None:
+    """
+    P30: wake the matching subscriber's fetch loop immediately, mirroring production NOTIFY.
+
+    Only meaningful in loop mode; callers gate on ``run_loops``. Lets loop-mode tests rely
+    on prompt wakeup instead of a tight ``min_fetch_interval`` poll.
+    """
+    subscriber = _find_subscriber_for_queue(broker, queue)
+    if subscriber is not None:
+        subscriber._notify_event.set()  # noqa: SLF001
+
+
+async def _fake_publish_one(
+    fake_client: FakeOutboxClient,
+    broker: OutboxBroker,
+    serializer: typing.Any,
+    *,
+    body: typing.Any,
+    queue: str,
+    headers: dict[str, str] | None,
+    correlation_id: str | None,
+    next_at: "_dt.datetime | None",
+    timer_id: str | None,
+    run_loops: bool,
+) -> int | None:
+    """Shared single-row insert for ``FakeOutboxProducer.publish`` and the ``broker.publish`` patch (P29)."""
+    payload, hdrs = _encode_payload(body, headers=headers, correlation_id=correlation_id, serializer=serializer)
+    row_id = fake_client.feed(queue=queue, payload=payload, headers=hdrs, next_attempt_at=next_at, timer_id=timer_id)
+    _emit_published(broker, queue, count=0 if row_id is None else 1, size_bytes=len(payload))
+    if run_loops:
+        _notify_subscriber(broker, queue)  # P30: the loops own dispatch; just wake them
+    elif row_id is not None:
+        # Sync dispatch ignores next_attempt_at (timers fire immediately in test mode);
+        # skip only when the insert was a timer-dedup no-op.
+        await _sync_dispatch(fake_client, broker, queue, row_id)
+    return row_id
+
+
+async def _fake_publish_many(
+    fake_client: FakeOutboxClient,
+    broker: OutboxBroker,
+    serializer: typing.Any,
+    *,
+    bodies: "Sequence[typing.Any]",
+    queue: str,
+    headers: dict[str, str] | None,
+    next_at: "_dt.datetime | None",
+    run_loops: bool,
+) -> None:
+    """
+    Shared batch insert for both batch paths (P29).
+
+    S5: insert the WHOLE batch, emit ``published``, then dispatch — mirroring production
+    (atomic batch INSERT -> published -> subscriber fetch), so a handler never observes a
+    half-inserted batch and the event order isn't inverted.
+    """
+    total_size = 0
+    landed_ids: list[int] = []
+    for body in bodies:
+        payload, hdrs = _encode_payload(body, headers=headers, serializer=serializer)
+        total_size += len(payload)
+        row_id = fake_client.feed(queue=queue, payload=payload, headers=hdrs, next_attempt_at=next_at)
+        if row_id is not None:
+            landed_ids.append(row_id)
+    _emit_published(broker, queue, count=len(landed_ids), size_bytes=total_size)
+    if run_loops:
+        _notify_subscriber(broker, queue)
+    else:
+        for row_id in landed_ids:
+            await _sync_dispatch(fake_client, broker, queue, row_id)
+
+
 class FakeOutboxProducer:
     """
     In-memory ``OutboxProducer`` substitute routing inserts through ``FakeOutboxClient``.
@@ -317,72 +404,33 @@ class FakeOutboxProducer:
 
     async def publish(self, cmd: OutboxPublishCommand) -> int | None:
         _validate_activate_args("broker.publish", cmd.activate_in, cmd.activate_at)
-        payload, hdrs = _encode_payload(
-            cmd.body,
+        next_at = _compute_next_at_client_side(cmd.activate_in, cmd.activate_at)
+        return await _fake_publish_one(
+            self._fake_client,
+            self._broker,
+            self._serializer,
+            body=cmd.body,
+            queue=cmd.queue,
             headers=cmd.headers,
             correlation_id=cmd.correlation_id,
-            serializer=self._serializer,
-        )
-        next_at = _compute_next_at_client_side(cmd.activate_in, cmd.activate_at)
-        row_id = self._fake_client.feed(
-            queue=cmd.queue,
-            payload=payload,
-            headers=hdrs,
-            next_attempt_at=next_at,
+            next_at=next_at,
             timer_id=cmd.timer_id,
+            run_loops=self._run_loops,
         )
-        recorder = self._broker.config.broker_config.metrics_recorder
-        _safe_emit(
-            recorder,
-            "published",
-            {
-                "queue": cmd.queue,
-                "status": "success",
-                "count": 0 if row_id is None else 1,
-                "size_bytes": len(payload),
-                "duration_seconds": 0.0,
-            },
-        )
-        if not self._run_loops and row_id is not None:
-            await _sync_dispatch(self._fake_client, self._broker, cmd.queue, row_id)
-        return row_id
 
     async def publish_batch(self, cmd: OutboxPublishCommand) -> None:
         _validate_activate_args("broker.publish_batch", cmd.activate_in, cmd.activate_at)
-        bodies = cmd.batch_bodies
         next_at = _compute_next_at_client_side(cmd.activate_in, cmd.activate_at)
-        recorder = self._broker.config.broker_config.metrics_recorder
-        total_size = 0
-        landed_ids: list[int] = []
-        # S5: insert the WHOLE batch first, then emit ``published``, then dispatch. In
-        # production the batch INSERT commits atomically before the subscriber fetches, so
-        # a handler never sees a half-inserted batch and ``published`` precedes delivery.
-        # Dispatching per-body mid-feed (the old shape) reproduced neither property.
-        for body in bodies:
-            payload, hdrs = _encode_payload(body, headers=cmd.headers, serializer=self._serializer)
-            total_size += len(payload)
-            row_id = self._fake_client.feed(
-                queue=cmd.queue,
-                payload=payload,
-                headers=hdrs,
-                next_attempt_at=next_at,
-            )
-            if row_id is not None:
-                landed_ids.append(row_id)
-        _safe_emit(
-            recorder,
-            "published",
-            {
-                "queue": cmd.queue,
-                "status": "success",
-                "count": len(landed_ids),
-                "size_bytes": total_size,
-                "duration_seconds": 0.0,
-            },
+        await _fake_publish_many(
+            self._fake_client,
+            self._broker,
+            self._serializer,
+            bodies=cmd.batch_bodies,
+            queue=cmd.queue,
+            headers=cmd.headers,
+            next_at=next_at,
+            run_loops=self._run_loops,
         )
-        if not self._run_loops:
-            for row_id in landed_ids:
-                await _sync_dispatch(self._fake_client, self._broker, cmd.queue, row_id)
 
     async def request(self, cmd: OutboxPublishCommand) -> typing.NoReturn:
         msg = "OutboxBroker does not support request-reply"
@@ -420,41 +468,19 @@ def _build_fake_publish(
         # real AsyncSession; tests that assert that contract must use those paths.
         del session
         _validate_activate_args("broker.publish", activate_in, activate_at)
-        payload, hdrs = _encode_payload(
-            body,
+        next_at = _compute_next_at_client_side(activate_in, activate_at)
+        return await _fake_publish_one(
+            fake_client,
+            broker,
+            serializer,
+            body=body,
+            queue=queue,
             headers=headers,
             correlation_id=correlation_id,
-            serializer=serializer,
-        )
-        next_at = _compute_next_at_client_side(activate_in, activate_at)
-        row_id = fake_client.feed(
-            queue=queue,
-            payload=payload,
-            headers=hdrs,
-            next_attempt_at=next_at,
+            next_at=next_at,
             timer_id=timer_id,
+            run_loops=run_loops,
         )
-        # Mirror production: the real OutboxProducer fires `published` events on
-        # success/no-op; reproduce that here so test-broker users can assert on
-        # publish-side metrics without exercising the full Postgres path.
-        recorder = broker.config.broker_config.metrics_recorder
-        _safe_emit(
-            recorder,
-            "published",
-            {
-                "queue": queue,
-                "status": "success",
-                "count": 0 if row_id is None else 1,
-                "size_bytes": len(payload),
-                "duration_seconds": 0.0,
-            },
-        )
-        # Sync dispatch ignores next_attempt_at — timers fire immediately in test mode.
-        # Skip only when loop mode is on (loops would re-dispatch) or the insert was a
-        # timer-dedup no-op.
-        if not run_loops and row_id is not None:
-            await _sync_dispatch(fake_client, broker, queue, row_id)
-        return row_id
 
     return fake_publish
 
@@ -479,37 +505,16 @@ def _build_fake_publish_batch(
         if not bodies:
             return
         next_at = _compute_next_at_client_side(activate_in, activate_at)
-        recorder = broker.config.broker_config.metrics_recorder
-        total_size = 0
-        landed_ids: list[int] = []
-        # S5: insert the whole batch, emit ``published``, then dispatch — mirroring the
-        # production order (atomic batch INSERT → published → subscriber fetch) so handlers
-        # never observe a half-inserted batch and the event order isn't inverted.
-        for body in bodies:
-            payload, hdrs = _encode_payload(body, headers=headers, serializer=serializer)
-            total_size += len(payload)
-            row_id = fake_client.feed(
-                queue=queue,
-                payload=payload,
-                headers=hdrs,
-                next_attempt_at=next_at,
-            )
-            if row_id is not None:
-                landed_ids.append(row_id)
-        _safe_emit(
-            recorder,
-            "published",
-            {
-                "queue": queue,
-                "status": "success",
-                "count": len(landed_ids),
-                "size_bytes": total_size,
-                "duration_seconds": 0.0,
-            },
+        await _fake_publish_many(
+            fake_client,
+            broker,
+            serializer,
+            bodies=bodies,
+            queue=queue,
+            headers=headers,
+            next_at=next_at,
+            run_loops=run_loops,
         )
-        if not run_loops:
-            for row_id in landed_ids:
-                await _sync_dispatch(fake_client, broker, queue, row_id)
 
     return fake_publish_batch
 
@@ -572,6 +577,7 @@ class TestOutboxBroker(TestBroker[OutboxBroker, OutboxBroker]):  # ty: ignore[in
         super().__init__(broker, **kwargs)
         self.fake_client = FakeOutboxClient()
         self.run_loops = run_loops
+        self._outbox_broker = broker  # for feed()'s P30 wakeup
         # Guards against the upstream harness spawning the loops twice (B14); reset
         # by _fake_close so a re-entered context can spawn again.
         self._loops_spawned = False
@@ -586,13 +592,16 @@ class TestOutboxBroker(TestBroker[OutboxBroker, OutboxBroker]):  # ty: ignore[in
         timer_id: str | None = None,
     ) -> int | None:
         """Insert a row directly into the in-memory store. Returns the row id, or None on timer_id conflict."""
-        return self.fake_client.feed(
+        row_id = self.fake_client.feed(
             queue=queue,
             payload=payload,
             headers=headers,
             next_attempt_at=next_attempt_at,
             timer_id=timer_id,
         )
+        if self.run_loops:
+            _notify_subscriber(self._outbox_broker, queue)  # P30: wake the fetch loop, like a production NOTIFY
+        return row_id
 
     @contextmanager
     def _patch_producer(self, broker: OutboxBroker) -> "Iterator[None]":
