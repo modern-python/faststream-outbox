@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 date: 2026-06-13
 slug: portable-planning-convention
 spec: portable-planning-convention
@@ -19,7 +19,7 @@ pr: null
 ids, three lanes, dedicated `audits/`+`retros/`, `deferred.md`, and a portable
 README — and migrate every existing artifact into it.
 
-**Spec:** [`planning/active/2026-06-13-portable-planning-convention-design.md`](./2026-06-13-portable-planning-convention-design.md)
+**Spec:** [`design.md`](./design.md)
 
 **Branch:** `docs/portable-planning-convention` (already created; spec already
 committed there).

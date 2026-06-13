@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 date: 2026-06-13
 slug: portable-planning-convention
 supersedes: planning-conventions
@@ -36,7 +36,7 @@ at the root — rather than relocating it under `planning/`. It is designed to b
 this repo's migration only; rolling it out to the other three repos is separate
 follow-on work.
 
-This supersedes [`planning-conventions`](../archived/2026-06-10-planning-conventions-design.md)
+This supersedes [`planning-conventions`](../../archive/2026-06-10.01-planning-conventions/design.md)
 (the `active/`+`archived/` lifecycle model it introduced is replaced by the
 `changes/` model here). No runtime code, no test code, no public API touched.
 
@@ -103,7 +103,7 @@ truth-vs-history, and the supporting decisions below fix the other three.
 
 - **An index generator / lint check.** `planning/README.md`'s index stays
   hand-maintained, as today. A `just plans`-style generator and "frontmatter
-  must parse" CI are deferred (see [`planning-conventions`](../archived/2026-06-10-planning-conventions-design.md)
+  must parse" CI are deferred (see [`planning-conventions`](../../archive/2026-06-10.01-planning-conventions/design.md)
   Non-goals — the reasoning is unchanged).
 
 - **Trimming or rewriting archived prose.** Existing shipped specs/plans move
