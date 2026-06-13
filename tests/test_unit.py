@@ -1806,6 +1806,83 @@ async def test_dispatch_one_preserves_row_when_consume_early_exits_on_shutdown()
     assert not any(e.startswith("nacked") for e, _ in events)
 
 
+async def test_dispatch_one_preserves_row_when_consume_raises() -> None:
+    """
+    T3: a consume()-escaping exception preserves the row (no DELETE, no false ack/nack).
+
+    ``consume()`` swallows ordinary handler exceptions, but a middleware-bypassing
+    failure (or a framework bug) can escape it. ``dispatch_one`` catches that, logs,
+    and **returns** — the row's state is undefined, so flushing or emitting an
+    ack/nack would lie; the lease expires and another replica reclaims. Replacing
+    that ``return`` with fall-through routes the row into
+    ``assert_state_set → reject → DELETE`` (silent data loss). This pins the return.
+    """
+    events, recorder = _events_recorder()
+    metadata = MetaData()
+    table = make_outbox_table(metadata)
+    broker = OutboxBroker(outbox_table=table, metrics_recorder=recorder)
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> None: ...
+
+    fake = FakeOutboxClient()
+    test_broker = TestOutboxBroker(broker)
+    test_broker.fake_client = fake
+    msg = _make_msg(queue="orders")
+
+    async with test_broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        # running stays True (not the shutdown race) — the escape itself must
+        # preserve the row, so the only thing distinguishing correct-vs-mutant is
+        # whether dispatch_one returns or falls through to the reject fallback.
+        with (
+            patch.object(sub, "consume", new=AsyncMock(side_effect=RuntimeError("middleware bypass"))),
+            patch.object(fake, "delete_with_lease", new=AsyncMock(return_value=True)) as delete_spy,
+        ):
+            await sub.dispatch_one(msg, writer_conn=None)
+
+    delete_spy.assert_not_awaited()
+    assert not msg.state_set
+    assert not msg.to_delete
+    assert not any(e == "acked" for e, _ in events)
+    assert not any(e.startswith("nacked") for e, _ in events)
+
+
+async def test_dispatch_one_max_deliveries_emits_terminal_without_dispatched() -> None:
+    """
+    T7: the max_deliveries terminal emits nacked_terminal(reason=max_deliveries) with NO preceding 'dispatched'.
+
+    The handler never runs (``allow_delivery`` short-circuits), so ``dispatched`` — which
+    carries the in-process gauge's ``.inc()`` — must not fire. The Prometheus adapter tests
+    hand-fed ``dispatched`` before ``nacked_terminal``, an order this real path never
+    produces; that masked B9 (the gauge going negative). This pins the actual emit order.
+    """
+    events, recorder = _events_recorder()
+    metadata = MetaData()
+    table = make_outbox_table(metadata)
+    broker = OutboxBroker(outbox_table=table, metrics_recorder=recorder)
+
+    @broker.subscriber("orders", max_deliveries=1)
+    async def handle(body: dict) -> None: ...
+
+    fake = FakeOutboxClient()
+    test_broker = TestOutboxBroker(broker)
+    test_broker.fake_client = fake
+    msg = _make_msg(queue="orders", deliveries_count=5)  # exceeds max_deliveries=1
+
+    async with test_broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        with patch.object(fake, "delete_with_lease", new=AsyncMock(return_value=True)):
+            await sub.dispatch_one(msg, writer_conn=None)
+
+    names = [e for e, _ in events]
+    terminal = [t for e, t in events if e == "nacked_terminal"]
+    assert terminal
+    assert terminal[0]["reason"] == "max_deliveries"
+    assert "dispatched" not in names  # handler never ran → no gauge inc to balance
+    assert "acked" not in names
+
+
 async def test_flush_terminal_logs_lease_lost_at_warning_with_structured_fields() -> None:
     """M7: when delete returns rowcount=0 (lease reclaimed) the broker emits a WARNING with structured fields."""
 
@@ -2185,6 +2262,42 @@ async def test_outbox_client_mark_pending_with_lease_uses_caller_conn() -> None:
     fake_conn.begin.assert_not_called()  # autocommit writer conn — no per-row BEGIN/COMMIT
     engine.connect.assert_not_called()
     engine.begin.assert_not_called()
+
+
+async def test_fetch_inner_does_not_claim_during_drain() -> None:
+    """
+    T4: with _stopping set, _fetch_inner must claim NO rows (the drain "no new claims" invariant).
+
+    Goes through the real loop guard. Changing it to ``while self.running:`` (dropping
+    the ``_stopping`` conjunct) would keep claiming rows during drain — here the fetch
+    spy must never be awaited.
+    """
+    fake = FakeOutboxClient()
+    fake.feed(queue="orders", payload=b"x")  # a row is available to claim
+    broker, test_broker = _make_broker_for_dispatch(fake)
+
+    async with test_broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        sub.running = True
+        sub._stopping = True  # noqa: SLF001  # drain in progress
+
+        orig_fetch = fake.fetch
+
+        async def _spy_fetch(
+            *args: object, **kwargs: object
+        ) -> object:  # pragma: no cover - only the mutant reaches fetch during drain
+            sub.running = False  # ensure the mutant loop exits after one claim (no hang)
+            return await orig_fetch(*args, **kwargs)  # ty: ignore[invalid-argument-type]
+
+        fetch_mock = AsyncMock(side_effect=_spy_fetch)
+        with patch.object(fake, "fetch", new=fetch_mock):
+            await asyncio.wait_for(
+                sub._fetch_inner(fetch_conn=None, listen_conn=None),  # noqa: SLF001
+                timeout=2.0,
+            )
+
+    fetch_mock.assert_not_awaited()  # never claimed during drain
+    assert sub._inflight.qsize() == 0  # noqa: SLF001
 
 
 # --- _compute_backoff (S1) ---------------------------------------------------
@@ -2700,6 +2813,45 @@ async def test_dlq_cte_uses_schema_qualified_table_names() -> None:
         # carries the schema → "app.outbox" / "app.outbox_dlq" (B10).
         assert "DELETE FROM app.outbox " in sql
         assert "INSERT INTO app.outbox_dlq " in sql
+    finally:
+        await engine.dispose()
+
+
+async def test_fetch_cte_carries_partial_index_predicates_as_conjuncts() -> None:
+    """
+    T6: each OR arm of the fetch WHERE must carry its partial-index predicate as a conjunct.
+
+    Branch A is ``acquired_token IS NULL``; Branch B is ``acquired_token IS NOT NULL AND
+    acquired_at < cutoff``. The naive single-OR form (``acquired_at < cutoff`` without the
+    ``IS NOT NULL`` conjunct) returns the same rows — the fake/real parity test can't tell
+    them apart — but defeats Postgres' partial-index inference. This compiles the real
+    statement and pins the shape.
+    """
+    engine = create_async_engine("postgresql+asyncpg://u:p@localhost/db")
+    try:
+        metadata = MetaData()
+        table = make_outbox_table(metadata)
+        client = OutboxClient(engine, table)
+        captured: dict[str, typing.Any] = {}
+
+        class _CapturingConn:
+            def begin(self) -> object:
+                @asynccontextmanager
+                async def _cm() -> typing.AsyncIterator[None]:
+                    yield
+
+                return _cm()
+
+            async def execute(self, stmt: object, _params: object) -> object:
+                captured["stmt"] = stmt
+                result = MagicMock()
+                result.mappings.return_value.all.return_value = []
+                return result
+
+        await client.fetch(_CapturingConn(), ["orders"], limit=10, lease_ttl_seconds=60.0)  # ty: ignore[invalid-argument-type]
+        sql = str(captured["stmt"].compile(dialect=postgresql.dialect())).lower()
+        assert "acquired_token is null" in sql  # Branch A predicate
+        assert "acquired_token is not null" in sql  # Branch B conjunct (the naive form drops this)
     finally:
         await engine.dispose()
 
