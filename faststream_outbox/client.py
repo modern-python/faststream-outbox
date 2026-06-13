@@ -443,14 +443,17 @@ _EXPECTED_INDEX_PREDICATES = {
     "_lease_idx": "acquired_token is not null",
 }
 
+# No ``indpred IS NOT NULL`` filter: we must also catch an expected index that exists but
+# was created NON-partial (predicate NULL) — that breaks ON CONFLICT inference the same way
+# a wrong predicate does, and alembic's diff won't flag it either. ``pg_get_expr`` returns
+# NULL for a non-partial index, which we treat as a distinct error below.
 _INDEX_PREDICATE_QUERY = text(
     "SELECT c.relname AS index_name, pg_get_expr(i.indpred, i.indrelid) AS predicate "
     "FROM pg_index i "
     "JOIN pg_class c ON c.oid = i.indexrelid "
     "JOIN pg_class t ON t.oid = i.indrelid "
     "JOIN pg_namespace n ON n.oid = t.relnamespace "
-    "WHERE t.relname = :table AND n.nspname = COALESCE(:schema, current_schema()) "
-    "AND i.indpred IS NOT NULL",
+    "WHERE t.relname = :table AND n.nspname = COALESCE(:schema, current_schema())",
 )
 
 
@@ -458,11 +461,15 @@ def _validate_index_predicates_sync(connection: "Connection", table: "Table") ->
     """
     Compare the live partial-index WHERE predicates against what the package expects (S2).
 
-    Alembic's index diff ignores ``postgresql_where``, so a drifted predicate (e.g. a
-    ``{table}_timer_id_uq`` built ``WHERE timer_id IS NULL`` instead of ``IS NOT NULL``)
-    passes :func:`_run_validate` yet breaks ``ON CONFLICT`` arbiter inference at publish
-    time. Missing / non-partial indexes are left to the alembic diff; this only flags a
-    predicate mismatch on an index that does exist.
+    Alembic's index diff ignores ``postgresql_where``, so two drifts pass :func:`_run_validate`
+    yet break the producer's ``ON CONFLICT`` arbiter inference at publish time, both flagged here:
+
+    * a **wrong** predicate (e.g. ``{table}_timer_id_uq`` built ``WHERE timer_id IS NULL``
+      instead of ``IS NOT NULL``), and
+    * a present-but-**non-partial** index (a plain ``UNIQUE (queue, timer_id)`` with no
+      ``WHERE``) — ``indpred`` is NULL, which alembic also can't distinguish from the partial form.
+
+    An index that is **absent** entirely is left to the alembic existence diff.
     """
     rows = (
         connection.execute(
@@ -472,13 +479,17 @@ def _validate_index_predicates_sync(connection: "Connection", table: "Table") ->
         .mappings()
         .all()
     )
-    live = {row["index_name"]: _normalize_predicate(row["predicate"]) for row in rows}
+    live = {row["index_name"]: row["predicate"] for row in rows}  # predicate is None for a non-partial index
     errors: list[str] = []
     for suffix, want in _EXPECTED_INDEX_PREDICATES.items():
         name = f"{table.name}{suffix}"
-        got = live.get(name)
-        if got is not None and got != want:
-            errors.append(f"index {name!r} has wrong partial predicate: expected '{want}', got '{got}'")
+        if name in live:
+            predicate = live[name]
+            if predicate is None:
+                errors.append(f"index {name!r} is not a partial index (expected predicate '{want}')")
+            elif _normalize_predicate(predicate) != want:
+                got = _normalize_predicate(predicate)
+                errors.append(f"index {name!r} has wrong partial predicate: expected '{want}', got '{got}'")
     return errors
 
 
