@@ -12,12 +12,13 @@ import datetime as dt
 
 
 # Fire 30 seconds from now, deduplicated by timer_id:
+order_id = 1
 await broker.publish(
-    {"order_id": 1},
+    {"order_id": order_id},
     queue="orders",
     session=session,
     activate_in=dt.timedelta(seconds=30),
-    timer_id=f"order-confirm-{order.id}",
+    timer_id=f"order-confirm-{order_id}",
 )
 
 # Fire at a specific UTC instant:
@@ -81,6 +82,15 @@ notifies.
 
 `timer_id` is only available on single `publish`, not on `publish_batch`
 (per-row dedup makes no sense for a batch).
+
+### `timer_id` dedups only *live* rows
+
+The unique index is **partial** — `(queue, timer_id) WHERE timer_id IS NOT
+NULL`. It constrains only rows currently in the table. Once a timer fires
+(the row is deleted) or is cancelled, the same `timer_id` can be inserted
+fresh. So `timer_id` is a dedup key for **in-flight / pending** timers, not
+a permanent idempotency key — it won't stop a value from being re-published
+after the original delivery has completed.
 
 ## Cancellation
 

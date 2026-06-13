@@ -35,7 +35,7 @@ if typing.TYPE_CHECKING:
 _REJECT_RELAY_MSG = (
     "OutboxPublisher cannot decorate a subscriber handler — relay chaining is not supported. "
     "Call `await broker.publish(value, queue=..., session=session)` inside your handler instead, "
-    "on the same session that owns the inbound row's terminal write."
+    "reusing the session that owns the inbound row's terminal write."
 )
 
 

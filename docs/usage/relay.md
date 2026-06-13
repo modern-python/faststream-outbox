@@ -47,7 +47,11 @@ the rest of the outbox subscriber's behavior.
 
 ## Two-broker lifecycle
 
-Both brokers must be started for the relay to work. Two idiomatic shapes:
+Both brokers must be started for the relay to work. There's a built-in
+safety net: at `start()` the outbox broker logs a WARNING (one per unstarted
+foreign broker) naming the affected queue(s), and a relay to an unstarted
+foreign broker simply fails-and-retries until that broker is started — the
+row is never lost. Two idiomatic shapes:
 
 ### FastAPI (recommended)
 
@@ -121,6 +125,7 @@ are **not** forwarded to the foreign publish. Two ways to override:
 
 ```python
 from faststream.response import Response
+from faststream_outbox.annotations import OutboxMessage
 
 @publisher_kafka
 @broker_outbox.subscriber("outbox_queue")
@@ -170,13 +175,17 @@ async def relay(body: dict) -> OutboxResponse:
 
 This would both insert a row into the outbox AND publish to Kafka. The
 subscriber raises `RuntimeError` at dispatch time when it detects the
-combination — pick one path.
+combination — pick one path. The worker catches that error and logs it at
+ERROR; it does **not** flush a nack and does **not** route the row through
+the `retry_strategy`. The row's lease simply expires and a later fetch
+reclaims it, so the row keeps being retried (not lost) until you fix the
+configuration.
 
 **Do not** stack an outbox publisher on a foreign subscriber.
 
 ```python
-@broker_outbox.publisher("outbox_queue")
-@broker_kafka.subscriber("kafka_topic")  # NotImplementedError at decoration
+@broker_outbox.publisher("outbox_queue")  # NotImplementedError at decoration
+@broker_kafka.subscriber("kafka_topic")
 async def relay(body: dict) -> dict:
     return body
 ```

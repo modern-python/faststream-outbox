@@ -17,6 +17,25 @@ async def handle(order_id: int) -> None:
     print(f"order {order_id}")
 ```
 
+## Multiple queues per subscriber
+
+The first argument is `queues: str | list[str]`. Pass a list to fan one
+handler across several queues:
+
+```python
+@broker.subscriber(["orders", "refunds"])
+async def handle(body: dict) -> None: ...
+```
+
+The subscriber claims rows from any of its queues in a single fetch. Its
+[connection budget](#connection-budget) is unchanged — `max_workers + 1`
+pool connections regardless of how many queues it serves.
+
+Do **not** register two subscribers on the **same** queue: they compete for
+the same rows, and registration emits a warning to that effect. To run more
+than one handler over a queue, attach them to a single subscriber; to scale
+throughput, raise `max_workers`.
+
 ## Body types
 
 FastStream deserializes the message body into the annotated type. Any
@@ -144,6 +163,15 @@ async def handle(msg: OutboxMessage, body: dict) -> None:
     except PermanentError:
         await msg.reject()  # terminal delete
 ```
+
+!!! warning "MANUAL: returning without acking is a terminal reject"
+    Under `AckPolicy.MANUAL`, a handler that returns **without** calling
+    `ack()` / `nack()` / `reject()` (and without raising) is treated as a
+    terminal **reject** — the row is **deleted** (or written to the DLQ with
+    `failure_reason="rejected"` if a `dlq_table` is configured), not retried.
+    A handler that *raises* is nacked through the retry strategy instead, so
+    only the silent-return path is destructive. Always ack/nack/reject on
+    every branch.
 
 ## Retry strategies
 

@@ -2,7 +2,7 @@
 Test broker with an in-memory ``OutboxClient`` substitute.
 
 ``TestOutboxBroker`` wraps an ``OutboxBroker`` and swaps in a ``FakeOutboxClient``
-backed by a list of dicts. Defaults to **sync dispatch**: ``await broker.publish(...)``
+backed by a list of ``_FakeRow`` records. Defaults to **sync dispatch**: ``await broker.publish(...)``
 finds the matching subscriber and awaits its consume pipeline before returning, the
 same model as ``TestKafkaBroker`` / ``TestRabbitBroker``. Timers fire immediately in
 sync mode — ``activate_in`` / ``activate_at`` are recorded on the fake row but not
@@ -68,7 +68,7 @@ class FakeOutboxClient(AbstractOutboxClient):
         self._next_id = 1
         # Populated when ``delete_with_lease`` receives a ``dlq_payload``. Mirrors
         # the real client's CTE side-effect: outbox row gone + DLQ row created in
-        # the same call. Tests assert against ``broker.fake_client.dlq_rows``.
+        # the same call. Tests assert against ``test_broker.fake_client.dlq_rows``.
         self._dlq_rows: list[dict[str, typing.Any]] = []
 
     def feed(
@@ -562,12 +562,14 @@ class TestOutboxBroker(TestBroker[OutboxBroker, OutboxBroker]):  # ty: ignore[in
     Default (``run_loops=False``): ``broker.publish`` synchronously drives the matching
     subscriber's consume pipeline, so handlers run before ``publish`` returns. Matches the
     FastStream test-broker idiom — ``TestKafkaBroker`` / ``TestRabbitBroker`` behave the
-    same way. Future-dated rows (``activate_in`` / ``activate_at``) stay in the fake
-    client and are *not* dispatched, mirroring production where they wait for the gate.
+    same way. Future-dated rows (``activate_in`` / ``activate_at``) **fire immediately** in
+    sync mode — sync dispatch ignores ``next_attempt_at``. The future-dated gate only applies
+    in loop mode (``run_loops=True``), where the fetch loop honors ``next_attempt_at``.
 
     Pass ``run_loops=True`` to spin up the real ``_fetch_loop`` / ``_worker_loop`` against
     the in-memory client. Required for tests that exercise loop-driven behavior:
-    retry rescheduling, lease expiry reclaim, or fetch-loop error recovery.
+    retry rescheduling, lease expiry reclaim, scheduled-delivery waiting, or fetch-loop
+    error recovery.
     """
 
     fake_client: FakeOutboxClient

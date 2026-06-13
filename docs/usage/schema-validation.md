@@ -38,6 +38,18 @@ schema (`add_*` / `modify_*` ops). `remove_*` ops are silently dropped so
 you can attach your own audit columns or additional indexes without the
 validator complaining.
 
+!!! warning "Server defaults are not checked"
+    The diff runs with `compare_server_default=False` — Alembic's
+    server-default comparison is flaky against Postgres' normalized
+    expressions (`now()` vs `CURRENT_TIMESTAMP`), so it is disabled to avoid
+    false positives. A **green** `validate_schema()` therefore does **not**
+    prove your server defaults exist. The load-bearing case: a table missing
+    `server_default=now()` on `next_attempt_at` leaves fresh rows with NULL
+    `next_attempt_at`, which the fetch CTE's `next_attempt_at <= now()`
+    predicate silently filters out — a silent broker outage that validation
+    will not catch. Generate your migration from `make_outbox_table(...)` so
+    the defaults are in place to begin with.
+
 ## Where to call it
 
 Call it from a `/health` endpoint or startup hook — **not** at

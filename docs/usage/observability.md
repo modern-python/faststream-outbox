@@ -51,7 +51,7 @@ broken recorder never poisons the dispatch loop.
 
 | Event | Tags (always present) | Tags (situational) | Fired by |
 |---|---|---|---|
-| `fetched` | `queue`, `subscriber`, `count` | | Fetch loop, every cycle (including empty) |
+| `fetched` | `queue`, `subscriber`, `count` | | Fetch loop, once per fetch attempt (`count=0` on an empty fetch) — **skipped** when the in-flight queue is full (no fetch is issued). `queue` is tagged with the subscriber's **first** queue only; multi-queue subscribers should break down by queue using the row-level events instead |
 | `dispatched` | `queue`, `subscriber`, `deliveries_count`, `size_bytes` | | Worker loop, before handler runs |
 | `acked` | `queue`, `subscriber`, `deliveries_count`, `duration_seconds` | | Handler returned successfully |
 | `nacked_retried` | `queue`, `subscriber`, `deliveries_count`, `duration_seconds`, `next_delay_seconds` | `exception_type` | Retry scheduled |
@@ -89,12 +89,14 @@ faststream_received_messages_in_process{broker="outbox"}
 # Operator playbook: lease_ttl_seconds is too low for this handler's P99
 rate(faststream_outbox_lease_lost_total[5m]) > 0
 
-# Publish throughput per queue
-rate(faststream_published_messages_total{broker="outbox",status="success"}[1m])
+# Publish throughput per queue (publish metrics are tagged by `destination`)
+sum by (destination) (
+  rate(faststream_published_messages_total{broker="outbox",status="success"}[1m]))
 
 # P99 publish (INSERT) latency per queue
 histogram_quantile(0.99,
-  rate(faststream_published_messages_duration_seconds_bucket{broker="outbox"}[5m]))
+  sum by (destination, le) (
+    rate(faststream_published_messages_duration_seconds_bucket{broker="outbox"}[5m])))
 
 # DLQ misconfiguration: terminal-failure rate diverges from DLQ-write rate
 rate(faststream_outbox_terminal_total[5m])

@@ -87,10 +87,10 @@ You should see:
 outbox-kafka  | [2026-06-12 05:22:33,782] INFO [KafkaRaftServer nodeId=1] Kafka Server started (kafka.server.KafkaRaftServer)
 ```
 
-## Step 2: Install `faststream[kafka]`
+## Step 2: Install `faststream[cli,kafka]`
 
 ```bash
-uv add 'faststream[kafka]'
+uv add 'faststream[cli,kafka]'
 ```
 
 You should see:

@@ -52,6 +52,10 @@ process, no Kafka.
   `opentelemetry`), Postgres setup.
 - [Basic usage](usage/basic.md) — declare the table, create the
   broker, publish a row, register a subscriber.
+- [Tutorial: Your first outbox app](tutorials/first-outbox-app.md) —
+  build a working publisher / subscriber from scratch.
+- [Tutorial: Add a Kafka relay](tutorials/add-kafka-relay.md) — extend
+  the first app to forward outbox rows to Kafka.
 
 ### Concepts
 
@@ -61,6 +65,8 @@ process, no Kafka.
 - [Comparison](concepts/comparison.md) — vs writing your own, vs CDC,
   vs Kafka transactions, vs `LISTEN/NOTIFY`, vs Celery, vs FastStream
   foreign-broker direct.
+- [Instrumentation seams](concepts/instrumentation-seams.md) — the
+  recorder seam vs native middleware, and why both exist.
 
 ### Guides
 
@@ -74,6 +80,8 @@ process, no Kafka.
   loop-driven modes.
 - [Schema validation](usage/schema-validation.md) — opt-in
   Alembic-driven check for `/health` and CI.
+- [Setup Prometheus and OpenTelemetry](usage/setup-prometheus-opentelemetry.md)
+  — wire the native middleware and recorder adapters end-to-end.
 
 ### Reference
 
@@ -87,3 +95,12 @@ process, no Kafka.
   via a single CTE, `dlq_written` metric, retention patterns.
 - [Observability](usage/observability.md) — recorder seam plus
   native Prometheus / OpenTelemetry middleware.
+
+### Operations
+
+- [Production checklist](operations/checklist.md) — connection budget,
+  lease TTL sizing, and deploy-safety items before going live.
+- [Troubleshooting](operations/troubleshooting.md) — common symptoms
+  (idle latency, `lease_lost` spikes, connection exhaustion) and fixes.
+- [Alembic migrations](operations/alembic.md) — autogenerate the outbox
+  table and its partial indexes.

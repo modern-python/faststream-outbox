@@ -21,11 +21,28 @@ pip install 'faststream-outbox[fastapi]'
 from collections.abc import AsyncIterator
 
 from fastapi import Depends, FastAPI
+from pydantic import BaseModel
 from sqlalchemy import MetaData
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from faststream_outbox import make_outbox_table
 from faststream_outbox.fastapi import OutboxRouter
+
+
+class OrderIn(BaseModel):
+    item: str
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class Order(Base):
+    __tablename__ = "orders"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    item: Mapped[str]
 
 
 metadata = MetaData()
@@ -55,8 +72,10 @@ async def create_order(
     order: OrderIn,
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    session.add(Order(...))
-    await router.broker.publish({"order_id": ...}, queue="orders", session=session)
+    db_order = Order(item=order.item)
+    session.add(db_order)
+    await session.flush()  # populate db_order.id
+    await router.broker.publish({"order_id": db_order.id}, queue="orders", session=session)
     return {"ok": True}
 
 
@@ -77,9 +96,10 @@ the same way it would in an HTTP endpoint: a fresh `AsyncSession` per
 delivery, opened in a `session.begin()` block, committed on handler return,
 rolled back on exception.
 
-A handler can therefore receive the **same** `AsyncSession` it would in an
-HTTP route — and `OutboxResponse(session=...)` commits the follow-on row
-with the handler's domain writes. See [Chained
+A handler's `AsyncSession` is therefore resolved exactly as in an HTTP
+route — a fresh session per delivery, not a shared instance — and
+`OutboxResponse(session=...)` commits the follow-on row with the handler's
+domain writes. See [Chained
 publishing](./publisher.md#chained-publishing).
 
 ## Annotated context shortcuts
@@ -112,15 +132,24 @@ there resolves as a request field and fails with a 422.
 
 ## What's intentionally not exposed
 
-`apply_types` and the broker's FastStream `dependencies` argument are
-intentionally **not exposed** on `OutboxRouter.__init__`:
+Several `OutboxBroker.__init__` arguments are intentionally **not exposed**
+on `OutboxRouter.__init__`:
 
-- `StreamRouter` forces `apply_types=False` because FastAPI's FastDepends
-  takes over the parameter resolution. Letting the user flip it would
-  produce weird half-resolved handlers.
-- `dependencies` on the router signature means FastAPI `Depends(...)` only
-  — the broker's FastStream `Dependant` list is the wrong shape for this
-  flow.
+- `apply_types` — `StreamRouter` forces `apply_types=False` because
+  FastAPI's FastDepends takes over the parameter resolution. Letting the
+  user flip it would produce weird half-resolved handlers.
+- `dependencies` — on the router signature this means FastAPI
+  `Depends(...)` only; the broker's FastStream `Dependant` list is the
+  wrong shape for this flow.
+- `dlq_table`, `metrics_recorder`, and `routers` — simply not forwarded
+  through the router today.
+
+The router builds the broker for you and gives you no handle to a
+pre-constructed `OutboxBroker`, and all three of those arguments are
+constructor-only on the broker (no setters). So a FastAPI user **cannot**
+enable the [DLQ](./dlq.md) or the [metrics-recorder
+seam](./observability.md) through `OutboxRouter` today — there is no
+router-based workaround. Use the standalone `OutboxBroker` for those.
 
 If you need broker-level FastStream middlewares, pass them to
 `OutboxRouter(middlewares=[...])` — the router builds the broker for you, so

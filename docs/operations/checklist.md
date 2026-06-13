@@ -30,9 +30,9 @@ story.
   unbounded; pair with a non-`NoRetry()` retry strategy or
   wedge-prone handlers can replay forever.
 - [ ] **Retry strategy chosen.** Default
-  `ExponentialRetry(initial=1, multiplier=2, max=300, attempts=10,
-  jitter=0.2)` is fine for most. Opt into `NoRetry()` explicitly for
-  an audit feed.
+  `ExponentialRetry(initial_delay_seconds=1.0, multiplier=2.0,
+  max_delay_seconds=300.0, max_attempts=10, jitter_factor=0.2)` is fine
+  for most. Opt into `NoRetry()` explicitly for an audit feed.
 
 ## DLQ
 
