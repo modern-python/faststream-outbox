@@ -101,7 +101,7 @@ Per subscriber:
 
 `OutboxSubscriber.get_one()` and `__aiter__()` are explicit `NotImplementedError`s — point operators at `broker.fetch_unprocessed(session=..., queue=...)`. A peek that acquires a lease has surprising `deliveries_count` semantics; lease-free reads belong on `fetch_unprocessed`.
 
-**Connection budget.** Each subscriber holds `max_workers + 1` SQLAlchemy pool connections steady-state + one raw asyncpg connection for LISTEN. Size the pool for `Σ subscribers × (max_workers + 1)` or startup blocks on checkout. **Per process** — Postgres `max_connections` must cover `replicas × Σ subscribers × (max_workers + 1)` or rolling deploys hit `FATAL: too many connections`.
+**Connection budget.** Each subscriber holds `max_workers + 1` SQLAlchemy pool connections steady-state + one raw asyncpg connection for LISTEN. Size the pool for `Σ subscribers × (max_workers + 1)` or startup blocks on checkout — the asyncpg LISTEN connection lives **outside** the pool, so it does not count toward pool sizing. **Per process** — Postgres `max_connections` must cover `replicas × Σ subscribers × (max_workers + 2)`: the `max_workers + 1` pool connections **plus** the out-of-pool asyncpg LISTEN connection. Undersize it and rolling deploys hit `FATAL: too many connections`.
 
 **NOTIFY semantics.** `broker.publish` / `publish_batch` emit `SELECT pg_notify('outbox_<table>', queue)` on the caller's session right after the INSERT, **except** when future-dated or `timer_id` conflict no-op'd the insert. NOTIFY is transactional — atomicity with the row is automatic; rolled-back transactions silently drop it. Channel naming is `outbox_<table_name>`. Postgres limits identifiers to 63 bytes; `make_outbox_table` **raises `ValueError`** when the longest derived identifier — an index name like `<table>_pending_idx`, longer than the NOTIFY channel itself — would exceed it — so over-long table names (~>51 bytes) are rejected at construction, not silently degraded to polling.
 
@@ -167,7 +167,7 @@ Caller owns the `AsyncEngine` — the broker never disposes it. The engine lives
 Two complementary seams — **don't collapse them.**
 
 - **Recorder seam** (`OutboxBroker(..., metrics_recorder=...)`): `Callable[[str, Mapping[str, Any]], None]`. Subscriber emits `fetched`, `dispatched`, `acked`, `nacked_retried`, `nacked_terminal`, `lease_lost`, plus `dlq_written` when `dlq_table` is set. Producer emits `published`. Default `_noop_recorder` lets sites fire unconditionally. Every call site is wrapped in `try/except` + DEBUG log. **Recorder must not block** (sync `Counter.inc()` fine; HTTP/StatsD not). `dlq_written` vs `nacked_terminal` divergence detects DLQ misconfiguration.
-- **Native middleware** (`opentelemetry/`, `prometheus/`): thin subclasses of upstream's `TelemetryMiddleware[OutboxPublishCommand]` and `PrometheusMiddleware[OutboxInnerMessage, OutboxPublishCommand]`. Register via `broker_middlewares=[...]`. Fire on `consume_scope` (via `dispatch_one → self.consume(row)`) and `publish_scope` (via `_basic_publish`).
+- **Native middleware** (`opentelemetry/`, `prometheus/`): thin subclasses of upstream's `TelemetryMiddleware[OutboxPublishCommand]` and `PrometheusMiddleware[OutboxInnerMessage, OutboxPublishCommand]`. Register via the public `OutboxBroker(..., middlewares=[...])` constructor kwarg (forwarded internally as `broker_middlewares`). Fire on `consume_scope` (via `dispatch_one → self.consume(row)`) and `publish_scope` (via `_basic_publish`).
 
 Why two: middleware owns `consume_scope` / `publish_scope` (spans, durations, status, size). Recorder owns events **outside** the bus — `fetched` (no `StreamMessage` at fetch time), `lease_lost` (after `consume_scope` exits), `nacked_terminal(reason="max_deliveries")` (before consume opens). Each fires for events the other physically cannot observe.
 
@@ -177,7 +177,7 @@ Deep dive: `architecture/metrics.md`. User-facing: `docs/usage/observability.md`
 
 ### Retry strategies (`retry.py`)
 
-`get_next_attempt_at(exception, …)` receives the raised exception so subclasses can retry only on transient errors (return `None` for terminal). `_RetryStrategyTemplate` enforces `max_attempts` and `max_total_delay_seconds`. `ExponentialRetry` has optional jitter and `max_delay_seconds`.
+`get_next_attempt_delay(*, first_attempt_at, last_attempt_at, attempts_count, exception=None)` returns the **delay in seconds** before the next attempt (the DB computes `next_attempt_at` from it server-side, so timing is skew-immune), or `None` for terminal failure. It receives the raised exception so subclasses can retry only on transient errors. `_RetryStrategyTemplate` enforces `max_attempts` and `max_total_delay_seconds`. `ExponentialRetry` has optional jitter and `max_delay_seconds`.
 
 **Default**: a subscriber with no explicit `retry_strategy` resolves to `ExponentialRetry(initial_delay_seconds=1.0, multiplier=2.0, max_delay_seconds=300.0, max_attempts=10, jitter_factor=0.2)` (`_default_retry_strategy()` in `registrator.py`). "Delete on first error" is the wrong default for an outbox; opt in with `NoRetry()`.
 

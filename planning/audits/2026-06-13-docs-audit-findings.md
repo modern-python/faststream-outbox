@@ -5,8 +5,9 @@ slug: 2026-06-13-docs-audit-findings
 scope: docs/ (22 user-facing mkdocs pages)
 prs: []
 outcome: >
-  In progress. The timer_id DLQ cluster (B1–B3, I1) is fixed; the rest
-  is pending. Successor to the
+  In progress. The timer_id DLQ cluster (B1–B3, I1) and the three
+  CLAUDE.md source-of-truth drifts (C1–C3) are fixed; the rest is
+  pending. Successor to the
   2026-06-12 docs audit (I1–I22, B1–B16) — that pass closed clean; this
   pass re-swept all 22 pages on convenience / readability / consistency /
   factual drift and surfaced a new high-severity DLQ-migration bug plus a
@@ -106,7 +107,9 @@ confusion.
 ## Source-of-truth drift (CLAUDE.md — not a docs/ bug, flagged for consistency)
 
 The docs are audited *against* CLAUDE.md, so where CLAUDE.md is the
-stale one, fixing the doc to match would introduce a bug. Three cases:
+stale one, fixing the doc to match would introduce a bug. Three cases.
+**All three resolved** — verified against source (`retry.py:39,66`,
+`subscriber/usecase.py:389`, `broker.py:140`) and fixed in CLAUDE.md.
 
 - **C1 — retry method name.** CLAUDE.md "Retry strategies" says
   `get_next_attempt_at(exception, …)`. The actual method is
