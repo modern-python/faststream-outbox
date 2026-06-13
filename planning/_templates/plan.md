@@ -16,7 +16,7 @@ pr: null
 **Goal:** One sentence — what shipping this plan achieves. No design
 rationale; link to the spec for that.
 
-**Spec:** [`planning/active/YYYY-MM-DD-my-change-design.md`](./YYYY-MM-DD-my-change-design.md)
+**Spec:** [`design.md`](./design.md)
 
 **Branch:** `feat/my-change` (or `fix/`, `chore/`, etc.)
 
