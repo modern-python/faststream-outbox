@@ -1,14 +1,20 @@
 ---
-status: shipped
+status: superseded
 date: 2026-06-10
 slug: planning-conventions
 supersedes: null
-superseded_by: null
+superseded_by: portable-planning-convention
 pr: "49"
 outcome: merged 2026-06-10 as #49
 ---
 
 # Design: Rework planning conventions + migrate existing artifacts
+
+> **Superseded by [portable-planning-convention](../2026-06-13.01-portable-planning-convention/design.md).**
+> The `active/` + `archived/` lifecycle layout this spec introduced is replaced
+> by the `changes/` (active → archive) + `architecture/`-promotion model. The
+> migration this spec shipped still happened; only the layout was later
+> reworked.
 
 ## Summary
 
