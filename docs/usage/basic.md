@@ -57,7 +57,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
 async with session_factory() as session, session.begin():
-    session.add(Order(id=1))
+    session.add(Order(id=1))  # `Order` is your own ORM model — the domain write
     await broker.publish(1, queue="orders", session=session)
     # session.begin() commits both atomically on exit
 ```
@@ -99,7 +99,29 @@ async def publish_one() -> None:
         await broker.publish(1, queue="orders", session=session)
 ```
 
-Save this module as `app.py`, then run with `faststream run app:app`.
+To actually run this you need the `asyncpg` driver and the FastStream CLI
+(the base install ships neither):
+
+```bash
+pip install 'faststream-outbox[asyncpg]' 'faststream[cli]'
+```
+
+See [Installation](../introduction/installation.md) for the full extras
+list and a one-line Postgres container.
+
+The package **declares** the outbox table but never creates it. Create it
+once before the first run — for local dev, a one-shot `metadata.create_all`
+against the same `metadata`/`engine` from above:
+
+```python
+async with engine.begin() as conn:
+    await conn.run_sync(metadata.create_all)
+```
+
+Production uses Alembic instead (see [Alembic migrations](../operations/alembic.md));
+the [first-outbox-app tutorial](../tutorials/first-outbox-app.md) shows the
+full `create_schema.py` script. Once the table exists, save the module as
+`app.py` and run it with `faststream run app:app`.
 
 ## Connection ownership
 

@@ -5,9 +5,10 @@ slug: 2026-06-13-docs-audit-findings
 scope: docs/ (22 user-facing mkdocs pages)
 prs: []
 outcome: >
-  In progress. The timer_id DLQ cluster (B1–B3, I1) and the three
-  CLAUDE.md source-of-truth drifts (C1–C3) are fixed; the rest is
-  pending. Successor to the
+  In progress. The timer_id DLQ cluster (B1–B3, I1), the three CLAUDE.md
+  source-of-truth drifts (C1–C3), and the basic.md runnability bugs
+  (B4, B5) are fixed; the inaccuracy (I2–I15) and improvement (P1–P18)
+  tails are pending. Successor to the
   2026-06-12 docs audit (I1–I22, B1–B16) — that pass closed clean; this
   pass re-swept all 22 pages on convenience / readability / consistency /
   factual drift and surfaced a new high-severity DLQ-migration bug plus a
@@ -63,8 +64,8 @@ confusion.
 | B1 | bug | operations/alembic.md:82-94 | DLQ `op.create_table('outbox_dlq')` omits `timer_id` → runtime DLQ INSERT fails, outbox grows (**verified** vs schema.py:165 + client.py:322-329) |
 | B2 | bug | operations/alembic.md:178-192 | Partitioned-DLQ `CREATE TABLE outbox_dlq` omits `timer_id`; the `SELECT *` data copy (210-213) then misaligns (**verified**) |
 | B3 | bug | usage/dlq.md:81-89 | Atomicity CTE example drops `timer_id` from RETURNING/INSERT/SELECT — contradicts the real statement (**verified**) |
-| B4 | bug | usage/basic.md §Full quickstart | "Save as app.py, run `faststream run app:app`" is non-runnable: table never created, and `asyncpg` + `faststream[cli]` prereqs unstated |
-| B5 | bug | usage/basic.md:60 §4 | `session.add(Order(id=1))` — `Order` is never defined/imported → `NameError` if copied |
+| B4 | bug | usage/basic.md §Full quickstart | ✅ **fixed** — added the `asyncpg` + `faststream[cli]` prereqs, the required table-creation step (dev `metadata.create_all` + Alembic/tutorial pointers), and gated the run line on the table existing |
+| B5 | bug | usage/basic.md:60 §4 | ✅ **fixed** — annotated `Order` as the reader's own ORM model / domain write |
 | I1 | inaccuracy | usage/dlq.md:55-66 | DLQ "Schema reference" table omits the `timer_id` column (lists 10 of 11) |
 | I2 | inaccuracy | usage/observability.md:61; usage/dlq.md:144 | `exception_type` tag described "always present / `None`"; source **omits the key** for `max_deliveries` and manual `reject()` (usecase.py:721-730) |
 | I3 | inaccuracy | usage/observability.md | "The first eight [PromQL]…" — only **seven** queries precede the DLQ-divergence one |
