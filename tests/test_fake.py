@@ -104,6 +104,36 @@ async def test_fake_broker_publish_triggers_handler() -> None:
     assert test_broker.fake_client.rows == []  # row deleted after ack
 
 
+async def test_sync_batch_inserts_whole_batch_before_dispatch_and_published_first() -> None:
+    """S5: sync-mode batch inserts the whole batch before any handler runs, and ``published`` precedes delivery."""
+    events: list[str] = []
+    seen_counts: list[int] = []
+    metadata = MetaData()
+    t = make_outbox_table(metadata)
+
+    def _recorder(event: str, tags: Mapping[str, typing.Any]) -> None:
+        del tags
+        events.append(event)
+
+    broker = OutboxBroker(outbox_table=t, metrics_recorder=_recorder)
+
+    @broker.subscriber("orders")
+    async def handle(body: str) -> None:
+        del body
+        seen_counts.append(len(test_broker.fake_client.rows))
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish_batch("a", "b", "c", queue="orders")  # ty: ignore[missing-argument]
+
+    # The whole 3-row batch was present before the first handler ran (the old per-feed
+    # dispatch would have shown only 1), and ``published`` was emitted before delivery.
+    assert seen_counts
+    assert seen_counts[0] == 3
+    assert events
+    assert events[0] == "published"
+
+
 async def test_fake_broker_publish_batch_triggers_handler() -> None:
     broker = _make_broker()
     received: list[str] = []

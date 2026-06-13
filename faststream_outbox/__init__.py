@@ -1,7 +1,6 @@
 import functools
 import typing
 
-import faststream.asgi.factories.asyncapi.try_it_out
 from faststream._internal.broker import BrokerUsecase
 from faststream._internal.testing.broker import TestBroker
 
@@ -40,6 +39,11 @@ __all__ = [
 ]
 
 try:
+    # S4: import inside the guard too — if upstream moves/removes the module, this
+    # raises ImportError here and is tolerated, instead of breaking ``import
+    # faststream_outbox`` from an unguarded top-level import.
+    import faststream.asgi.factories.asyncapi.try_it_out
+
     original_get_broker_registry = faststream.asgi.factories.asyncapi.try_it_out._get_broker_registry  # noqa: SLF001
 
     @functools.lru_cache(maxsize=1)

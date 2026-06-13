@@ -45,6 +45,43 @@ async def _row_count(engine: AsyncEngine, table) -> int:
         return len(result.all())
 
 
+async def test_validate_schema_detects_wrong_partial_index_predicate(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+) -> None:
+    """S2: a partial index built with the wrong WHERE predicate is caught (alembic's diff ignores it)."""
+    idx = f"{outbox_table.name}_timer_id_uq"
+    async with pg_engine.begin() as conn:
+        await conn.execute(text(f'DROP INDEX "{idx}"'))
+        # Recreate with the wrong predicate: should be ``timer_id IS NOT NULL``.
+        await conn.execute(
+            text(f'CREATE UNIQUE INDEX "{idx}" ON {outbox_table.name} (queue, timer_id) WHERE timer_id IS NULL'),
+        )
+    client = OutboxClient(pg_engine, outbox_table)
+    with pytest.raises(RuntimeError, match="wrong partial predicate"):
+        await client.validate_schema()
+
+
+async def test_validate_schema_detects_non_partial_index_on_present_index(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+) -> None:
+    """
+    S2 (review #1): an expected partial index recreated NON-partial breaks ON CONFLICT too, and is caught.
+
+    Alembic's diff can't distinguish a plain UNIQUE (queue, timer_id) from the partial
+    form (it ignores postgresql_where), and the indpred-NULL row would otherwise be
+    silently skipped by the probe.
+    """
+    idx = f"{outbox_table.name}_timer_id_uq"
+    async with pg_engine.begin() as conn:
+        await conn.execute(text(f'DROP INDEX "{idx}"'))
+        await conn.execute(text(f'CREATE UNIQUE INDEX "{idx}" ON {outbox_table.name} (queue, timer_id)'))
+    client = OutboxClient(pg_engine, outbox_table)
+    with pytest.raises(RuntimeError, match="not a partial index"):
+        await client.validate_schema()
+
+
 async def test_validate_schema_passes_for_correct_table(pg_engine, outbox_table) -> None:
     client = OutboxClient(pg_engine, outbox_table)
     await client.validate_schema()  # should not raise

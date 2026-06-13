@@ -86,6 +86,30 @@ additional test findings, improvements P1–P35, and the doc / CLAUDE.md drift i
 | S4 | __init__.py:4,42-57 | The try-it-out resilience guard protects the attribute access but the module import itself sits unguarded at top level — an upstream module move breaks `import faststream_outbox` entirely, defeating the guard's stated purpose |
 | S5 | testing.py:341-364,461-484 | Sync-mode batch publish dispatches handlers per-body mid-feed (handlers observe half-inserted batches — impossible in production) and emits `published` after the handlers ran (inverted event order) |
 
+### Suspected — resolution (2026-06-13)
+
+All five investigated against current `main`; each confirmed or dismissed (no longer "unproven"):
+
+- **S1 — confirmed, fixed.** The teardown `listen_conn.close()` was unbounded. Now bounded
+  via `asyncio.wait_for(..., _LISTEN_CLOSE_TIMEOUT)` with a `terminate()` fallback, so a
+  half-dead socket can't wedge the fetch loop on shutdown.
+- **S2 — confirmed, fixed.** A docker probe showed `validate_schema()` passes with a wrong
+  `timer_id_uq` predicate (alembic's diff ignores `postgresql_where`). Added
+  `_validate_index_predicates_sync` — a `pg_get_expr(indpred, …)` probe comparing each
+  partial index's predicate against the expected value.
+- **S3 — dismissed (already resolved by P17).** Emitting `acked`/`nacked_*` only after a
+  successful flush means a lease-lost row emits `lease_lost` *instead*, never a paired
+  ack/nack — so `processed_total` no longer double-counts. Pinned by
+  `test_dispatch_one_lease_lost_emits_only_lease_lost_not_acked`.
+- **S4 — confirmed, fixed.** The `try_it_out` import sat outside the resilience guard.
+  Moved inside the `try/except (AttributeError, ImportError)` so an upstream module
+  move/rename no longer breaks `import faststream_outbox`.
+- **S5 — confirmed, fixed.** Sync-mode batch publish dispatched each handler mid-feed and
+  emitted `published` last. Now inserts the whole batch, emits `published`, then dispatches
+  — mirroring production (atomic batch INSERT → published → subscriber fetch).
+
+Fixes shipped together; see PR for tests.
+
 ## Bug details (what the table can't carry)
 
 **B1 + B2 (drain spin / dead restart).** The two-flag drain design keeps

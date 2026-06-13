@@ -86,6 +86,10 @@ _UNSUPPORTED_PEEK_MSG = (
 # TCP socket can hang on the kernel keepalive default (~2.5h on Linux) before failing.
 _LISTEN_HEALTH_CHECK_INTERVAL = 30.0
 _LISTEN_HEALTH_CHECK_TIMEOUT = 5.0
+# Bound the graceful close of the LISTEN connection on teardown (S1): a graceful
+# close on the same half-dead socket the health probe just detected can block on
+# the kernel keepalive; cap it and fall back to an immediate terminate.
+_LISTEN_CLOSE_TIMEOUT = 5.0
 
 
 def _compute_backoff(attempt: int, ceiling: float, *, base: float = 1.0) -> float:
@@ -290,7 +294,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                 yield {"fetch_conn": fetch_conn, "listen_conn": listen_conn}
             finally:
                 if listen_conn is not None:
-                    await listen_conn.close()
+                    await self._close_listen_connection(listen_conn)
 
     async def _fetch_inner(
         self,
@@ -400,6 +404,21 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                 with suppress(Exception):
                     await conn.close()
         return conn if listening else None
+
+    async def _close_listen_connection(self, listen_conn: "_asyncpg.Connection") -> None:
+        """
+        Close the raw LISTEN connection without letting teardown wedge the fetch loop (S1).
+
+        A graceful ``close()`` on a half-dead socket can block on the kernel keepalive
+        (the same socket the bounded health probe may have just flagged). Cap the graceful
+        close, then fall back to ``terminate()`` (immediate, no network round-trip). Both
+        are best-effort — teardown must never raise.
+        """
+        try:
+            await asyncio.wait_for(listen_conn.close(), timeout=_LISTEN_CLOSE_TIMEOUT)
+        except Exception:  # noqa: BLE001  (includes TimeoutError) — fall back to a hard terminate
+            with suppress(Exception):
+                listen_conn.terminate()
 
     def _on_notify(self, *args: object) -> None:
         """
