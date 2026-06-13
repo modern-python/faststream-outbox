@@ -21,6 +21,10 @@ Event vocabulary (stable, additive):
   ran). ``exception_type`` is present when ``last_exception`` was set (post-handler raises;
   manual ``msg.reject()`` may omit it).
 * ``lease_lost`` — terminal flush found a foreign lease. Tags include ``phase`` (``terminal`` | ``retry``).
+  ``acked`` / ``nacked_retried`` / ``nacked_terminal`` are emitted only **after** the
+  terminal/retry write lands (P17); a row whose lease was reclaimed emits ``lease_lost``
+  *instead* (never a paired acked/nacked), so the row isn't counted twice when it
+  redelivers.
 * ``dlq_written`` — emitted from ``_flush_terminal`` after the DELETE+INSERT CTE commits.
   Fires only when ``OutboxBroker`` was constructed with ``dlq_table=...`` AND the row was
   terminal-by-failure (any ``nacked_terminal`` reason). Skipped on lease-lost. Tags:
