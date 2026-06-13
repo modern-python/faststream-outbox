@@ -65,3 +65,6 @@ _None._
   *shipped* state, not pending work.
 - **[lint-suppressions.md](lint-suppressions.md)** — audit of `noqa` /
   `ty: ignore` directives and why each one stays.
+- **[deferred-work.md](deferred-work.md)** — real-but-unscheduled items
+  raised in reviews/audits, parked with a revisit trigger (e.g. the
+  `OutboxRouter` DLQ/recorder forwarding gap).
