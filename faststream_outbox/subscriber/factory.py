@@ -74,7 +74,7 @@ def create_subscriber(
     )
 
 
-def _validate_subscriber_config(
+def _validate_subscriber_config(  # noqa: C901  # flat sequence of independent knob checks
     *,
     max_workers: int,
     fetch_batch_size: int,
@@ -99,11 +99,22 @@ def _validate_subscriber_config(
     if fetch_batch_size <= 0:
         msg = f"fetch_batch_size must be >= 1, got {fetch_batch_size}"
         raise ValueError(msg)
+    # P12: non-positive intervals/TTL turn the adaptive backoff into a busy-poll (or an
+    # instantly-expiring lease). Reject up front rather than spin a hot loop at runtime.
+    if min_fetch_interval <= 0:
+        msg = f"min_fetch_interval must be > 0, got {min_fetch_interval}"
+        raise ValueError(msg)
+    if max_fetch_interval <= 0:
+        msg = f"max_fetch_interval must be > 0, got {max_fetch_interval}"
+        raise ValueError(msg)
+    if lease_ttl_seconds <= 0:
+        msg = f"lease_ttl_seconds must be > 0, got {lease_ttl_seconds}"
+        raise ValueError(msg)
     if min_fetch_interval > max_fetch_interval:
         msg = (
             f"min_fetch_interval ({min_fetch_interval}) must be <= max_fetch_interval "
-            f"({max_fetch_interval}); the adaptive backoff treats min as a floor and "
-            f"max as the ceiling."
+            f"({max_fetch_interval}); the adaptive idle backoff grows from ~min_fetch_interval "
+            f"(the base interval, with ±50% jitter) up to max_fetch_interval (the ceiling)."
         )
         raise ValueError(msg)
     is_no_retry = isinstance(retry_strategy, NoRetry)

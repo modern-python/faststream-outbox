@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     Column,
     DateTime,
     Index,
@@ -46,13 +47,26 @@ def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table
     ``outbox_<table_name>`` past Postgres' 63-byte identifier limit (NAMEDATALEN-1).
     """
     # Byte length, not char count — UTF-8 multibyte chars expand and would silently
-    # truncate the channel identifier on one side of LISTEN/NOTIFY.
-    encoded_channel = b"outbox_" + table_name.encode("utf-8")
-    if len(encoded_channel) > _POSTGRES_IDENT_MAX_BYTES:
+    # truncate identifiers. Guard on the LONGEST identifier derived from table_name:
+    # the NOTIFY channel "outbox_<t>" (7-byte prefix) AND the index / constraint names
+    # ("<t>_pending_idx", "<t>_timer_id_uq", "<t>_lease_idx", "<t>_lease_ck"; suffixes
+    # up to ~12 bytes). The index suffixes are longer than the channel prefix, so a
+    # table_name that fits the channel can still overflow an index name and fail at
+    # CREATE INDEX time (P7).
+    name_bytes = table_name.encode("utf-8")
+    derived = (
+        b"outbox_" + name_bytes,
+        name_bytes + b"_pending_idx",
+        name_bytes + b"_timer_id_uq",
+        name_bytes + b"_lease_idx",
+        name_bytes + b"_lease_ck",
+    )
+    longest = max(derived, key=len)
+    if len(longest) > _POSTGRES_IDENT_MAX_BYTES:
         msg = (
-            f"table_name {table_name!r} too long for NOTIFY channel "
-            f"'outbox_<table_name>': must fit in {_POSTGRES_IDENT_MAX_BYTES} bytes "
-            f"(got {len(encoded_channel)})"
+            f"table_name {table_name!r} too long: the derived identifier "
+            f"{longest.decode('utf-8', 'replace')!r} must fit in {_POSTGRES_IDENT_MAX_BYTES} bytes "
+            f"(got {len(longest)})"
         )
         raise ValueError(msg)
     table = Table(
@@ -71,6 +85,14 @@ def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table
         Column("acquired_at", DateTime(timezone=True), nullable=True),
         Column("acquired_token", Uuid, nullable=True),
         Column("timer_id", String(255), nullable=True),
+        # P8: a lease is either fully set or fully unset. A half-set lease (e.g. a
+        # manual UPDATE that sets acquired_at but not acquired_token) would be
+        # permanently invisible to fetch, cancel_timer, and the metrics — this
+        # CHECK makes that state unrepresentable.
+        CheckConstraint(
+            "(acquired_token IS NULL) = (acquired_at IS NULL)",
+            name=f"{table_name}_lease_ck",
+        ),
     )
     # Partial index that backs the fetch query's hot branch
     # (`WHERE acquired_token IS NULL AND queue = ? AND next_attempt_at <= now()`).
@@ -138,6 +160,9 @@ def make_dlq_table(metadata: "MetaData", table_name: str = "outbox_dlq") -> Tabl
         # canonical set can grow without a migration that rewrites every audit row.
         Column("failure_reason", String(64), nullable=False),
         Column("last_exception", String, nullable=True),
+        # P9: carry the originating timer_id so a terminally-failed timer keeps its
+        # business dedup key in the audit trail. Nullable — most rows have none.
+        Column("timer_id", String(255), nullable=True),
     )
     Index(f"{table_name}_queue_failed_idx", table.c.queue, table.c.failed_at)
     return table

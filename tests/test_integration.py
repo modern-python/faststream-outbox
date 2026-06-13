@@ -11,6 +11,7 @@ from unittest import mock
 import pytest
 from faststream.kafka import KafkaBroker, TestKafkaBroker
 from sqlalchemy import MetaData, Table, event, insert, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from faststream_outbox import (
@@ -1362,6 +1363,46 @@ async def test_dlq_writes_to_schema_qualified_tables(pg_engine: AsyncEngine) -> 
         async with pg_engine.begin() as conn:
             await conn.run_sync(metadata.drop_all)
             await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+
+
+async def test_lease_pairing_check_rejects_half_set_lease(pg_engine: AsyncEngine, outbox_table: Table) -> None:
+    """P8: a half-set lease (acquired_at set, acquired_token NULL) is unrepresentable via the CHECK."""
+    with pytest.raises(IntegrityError):
+        async with pg_engine.begin() as conn:
+            await conn.execute(
+                insert(outbox_table).values(
+                    queue="orders",
+                    payload=b"x",
+                    acquired_at=_dt.datetime.now(tz=_dt.UTC),  # acquired_token left NULL
+                ),
+            )
+
+
+async def test_dlq_preserves_timer_id(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+    dlq_table: Table,
+) -> None:
+    """P9: a terminally-failed timer keeps its timer_id in the DLQ audit trail."""
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table, dlq_table=dlq_table)
+    handled = asyncio.Event()
+
+    @broker.subscriber("orders", retry_strategy=NoRetry(), min_fetch_interval=0.02)
+    async def handle(body: dict) -> None:
+        del body
+        handled.set()
+        boom = "always fails"
+        raise RuntimeError(boom)
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with broker:
+        async with session_factory() as session, session.begin():
+            await broker.publish({"x": 1}, queue="orders", session=session, timer_id="email-42")
+        await asyncio.wait_for(handled.wait(), timeout=5.0)
+
+    rows = await _dlq_rows(pg_engine, dlq_table)
+    assert len(rows) == 1
+    assert rows[0]["timer_id"] == "email-42"
 
 
 async def test_dlq_insert_failure_rolls_back_delete(

@@ -21,9 +21,12 @@ import uuid
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
+    ARRAY,
     Float,
     MetaData,
+    String,
     and_,
+    any_,
     bindparam,
     delete,
     func,
@@ -182,7 +185,11 @@ class OutboxClient(AbstractOutboxClient):
             select(t.c.id)
             .where(
                 t.c.next_attempt_at <= func.now(),
-                or_(*(t.c.queue == q for q in queues)),
+                # P11: ``queue = ANY(:queues)`` binds a single array param, so the SQL
+                # text is stable regardless of the number of queues — asyncpg can reuse
+                # the prepared statement across ticks instead of recompiling an
+                # OR-of-N-equalities whose text changes with the queue count.
+                t.c.queue == any_(bindparam("queues", list(queues), type_=ARRAY(String))),
                 # The OR is split into two index-implying disjuncts so Postgres'
                 # partial-index inference picks up both `_pending_idx` (Branch A,
                 # `acquired_token IS NULL`) and `_lease_idx` (Branch B,
@@ -260,7 +267,16 @@ class OutboxClient(AbstractOutboxClient):
         if conn is None:
             msg = "OutboxClient.delete_with_lease requires a live AsyncConnection (got None)"
             raise TypeError(msg)
-        if dlq_payload is not None and self._dlq_table is not None:
+        if dlq_payload is not None:
+            if self._dlq_table is None:
+                # P10: a dlq_payload with no dlq_table would silently degrade to a plain
+                # DELETE — losing the audit row. If the broker/client wiring ever desyncs,
+                # fail loudly rather than drop forensics.
+                msg = (
+                    "delete_with_lease received a dlq_payload but the client has no dlq_table; "
+                    "refusing to drop the audit row silently"
+                )
+                raise RuntimeError(msg)
             stmt, params = self._build_dlq_cte_stmt(message_id, acquired_token, dlq_payload)
             result = await conn.execute(stmt, params)
             return (result.rowcount or 0) > 0
@@ -303,14 +319,14 @@ class OutboxClient(AbstractOutboxClient):
             f"WITH deleted AS ("  # noqa: S608
             f"DELETE FROM {outbox_name} "
             f"WHERE id = :message_id AND acquired_token = :acquired_token "
-            f"RETURNING id, queue, payload, headers, deliveries_count, created_at"
+            f"RETURNING id, queue, payload, headers, deliveries_count, created_at, timer_id"
             f") "
             f"INSERT INTO {dlq_name} ("
             f"original_id, queue, payload, headers, deliveries_count, created_at, "
-            f"failure_reason, last_exception"
+            f"failure_reason, last_exception, timer_id"
             f") "
             f"SELECT id, queue, payload, headers, deliveries_count, created_at, "
-            f":failure_reason, :last_exception "
+            f":failure_reason, :last_exception, timer_id "
             f"FROM deleted"
         )
         sql = text(cte_sql)
@@ -405,6 +421,7 @@ def _row_to_message(row: dict) -> OutboxInnerMessage:
         last_attempt_at=row["last_attempt_at"],
         acquired_at=row["acquired_at"],
         acquired_token=row["acquired_token"],
+        timer_id=row["timer_id"],
     )
 
 

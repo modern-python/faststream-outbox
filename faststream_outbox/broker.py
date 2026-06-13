@@ -10,6 +10,7 @@ import asyncio
 import datetime as _dt
 import logging
 import typing
+import warnings
 from collections.abc import Iterable, Sequence
 from types import TracebackType
 
@@ -42,6 +43,8 @@ _logger = logging.getLogger(__name__)
 
 
 if typing.TYPE_CHECKING:
+    from weakref import WeakSet
+
     from fast_depends.dependencies import Dependant
     from fast_depends.library.serializer import SerializerProto
     from faststream._internal.context.repository import ContextRepo
@@ -121,7 +124,9 @@ class OutboxBroker(
 ):
     """FastStream broker backed by a Postgres outbox table."""
 
-    _subscribers: list["OutboxSubscriber"]
+    # P25: the runtime container is a WeakSet (set by the upstream Registrator), not a
+    # list — annotate it accurately so the _subscribers/subscribers distinction is clear.
+    _subscribers: "WeakSet[OutboxSubscriber]"
 
     def __init__(  # noqa: PLR0913
         self,
@@ -212,6 +217,11 @@ class OutboxBroker(
 
     @typing.override
     async def __aenter__(self) -> typing.Self:
+        # Upstream equivalent (replaced):
+        #   BrokerUsecase.__aenter__ -> faststream/_internal/broker/broker.py
+        # Upstream's __aenter__ only connects; we upgrade to a full start() so the
+        # subscriber loops spin up under `async with broker:`. Re-check this if upstream
+        # changes __aenter__/__aexit__ pairing (P26).
         await self.start()
         return self
 
@@ -220,6 +230,25 @@ class OutboxBroker(
         await self.connect()
         await super().start()
         self._warn_on_unstarted_foreign_publishers()
+        self._warn_on_duplicate_queues()
+
+    def _warn_on_duplicate_queues(self) -> None:
+        # P22: the registration-time overlap warning only sees the broker's own
+        # _subscribers, so duplicates introduced via include_router slip through. Re-check
+        # at start() over the full ``subscribers`` property (routers included).
+        counts: dict[str, int] = {}
+        for sub in self.subscribers:
+            for q in getattr(sub, "_queues", []):
+                counts[q] = counts.get(q, 0) + 1
+        duplicated = sorted(q for q, n in counts.items() if n > 1)
+        if duplicated:
+            warnings.warn(
+                f"Multiple subscribers serve queue(s) {duplicated}: their workers compete "
+                f"for the same rows (nondeterministic via SKIP LOCKED). Use one subscriber "
+                f"per queue, or attach multiple handlers to a single subscriber.",
+                UserWarning,
+                stacklevel=2,
+            )
 
     def _warn_on_unstarted_foreign_publishers(self) -> None:
         """
@@ -251,7 +280,9 @@ class OutboxBroker(
                     if key in self._warned_foreign_config_ids:
                         continue
                     self._warned_foreign_config_ids.add(key)
-                    queues = sorted({q for s in self.subscribers for q in getattr(s, "_queues", [])})
+                    # P21: name the queue(s) of the subscriber actually decorated by this
+                    # foreign publisher, not every subscriber on the broker.
+                    queues = sorted(getattr(sub, "_queues", []))
                     _logger.warning(
                         "Foreign publisher %r is decorated on outbox subscriber(s) for "
                         "queue(s) %s, but its broker has not been started yet. The first "
@@ -276,11 +307,15 @@ class OutboxBroker(
         #
         # Upstream equivalent (replaced):
         #   BrokerUsecase.stop -> faststream/_internal/broker/broker.py
+        # P20: snapshot once — re-evaluating the ``subscribers`` property after the await
+        # (e.g. a mid-shutdown include_router) would desync the strict zip and raise out of
+        # stop(), defeating its never-raise contract.
+        subs = list(self.subscribers)
         results = await asyncio.gather(
-            *(sub.stop() for sub in self.subscribers),
+            *(sub.stop() for sub in subs),
             return_exceptions=True,
         )
-        for sub, result in zip(self.subscribers, results, strict=True):
+        for sub, result in zip(subs, results, strict=True):
             if isinstance(result, BaseException):
                 self._log_subscriber_stop_error(sub, result)
         self.running = False
@@ -384,6 +419,11 @@ class OutboxBroker(
         every row in the batch identically — per-row timer dedup is not supported,
         use :meth:`publish` for that.
         """
+        # P1: validate the session type up front so an empty batch fails the same way a
+        # non-empty one does (the command constructor that checks it is only built below).
+        if not isinstance(session, AsyncSession):
+            msg = "broker.publish_batch requires an sqlalchemy.ext.asyncio.AsyncSession"
+            raise TypeError(msg)
         if not bodies:
             # Validate the activate args even when there's no work so callers
             # get the same misuse error on empty batches as on real ones.

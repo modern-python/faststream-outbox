@@ -62,6 +62,10 @@ class OutboxInnerMessage:
     acquired_at: _dt.datetime | None
     acquired_token: uuid.UUID | None
 
+    # P9: the originating timer_id (single-publish dedup key), so a terminally-failed
+    # timer keeps it in the DLQ audit trail. None for non-timer rows.
+    timer_id: str | None = None
+
     retry_strategy: "RetryStrategyProto | None" = None
     last_exception: BaseException | None = None
 
@@ -109,7 +113,9 @@ class OutboxInnerMessage:
         if self.retry_strategy is not None:
             try:
                 delay = self.retry_strategy.get_next_attempt_delay(
-                    first_attempt_at=self.first_attempt_at or self.last_attempt_at,  # ty: ignore[invalid-argument-type]
+                    # _record_attempt() above always sets first_attempt_at, so the
+                    # former ``or self.last_attempt_at`` fallback was dead code (P19).
+                    first_attempt_at=self.first_attempt_at,  # ty: ignore[invalid-argument-type]
                     last_attempt_at=self.last_attempt_at,  # ty: ignore[invalid-argument-type]
                     attempts_count=self.attempts_count,
                     exception=self.last_exception,

@@ -31,7 +31,10 @@ Event vocabulary (stable, additive):
 * ``published`` — producer-side insert. Tags include ``status`` (``success`` | ``error``),
   ``count, size_bytes, duration_seconds``. No ``subscriber`` tag.
   ``count`` is **messages landed**, not publish attempts — errors and ``timer_id``
-  no-ops carry ``count=0``. Counter-style adapters should `inc(count)` so totals
+  no-ops both carry ``count=0`` (P6). ``count=0`` alone does not distinguish them:
+  a successful ``timer_id`` conflict has ``status="success"`` with no ``exception_type``,
+  while a failed publish has ``status="error"`` with an ``exception_type``.
+  Counter-style adapters should `inc(count)` so totals
   reflect messages-on-the-wire; duration histograms record every attempt
   (including failures) so failed-publish latency stays observable.
 

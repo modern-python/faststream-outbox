@@ -286,3 +286,29 @@ async def test_unstarted_foreign_broker_warns_on_start(caplog: pytest.LogCapture
         f"Expected exactly one WARNING referencing relay_queue, got {len(matching)}: "
         f"{[r.getMessage() for r in caplog.records]}"
     )
+
+
+async def test_foreign_warning_names_only_decorated_subscriber_queues(caplog: pytest.LogCaptureFixture) -> None:
+    """P21: the unstarted-foreign-broker warning names the decorated subscriber's queue, not every queue."""
+    metadata = MetaData()
+    outbox_table = make_outbox_table(metadata)
+    broker_outbox = OutboxBroker(outbox_table=outbox_table)
+    broker_kafka = KafkaBroker("kafka://test:9092")
+    publisher_kafka = broker_kafka.publisher("relay_topic")
+
+    @publisher_kafka
+    @broker_outbox.subscriber("relay_queue")
+    async def relay(body: dict[str, Any]) -> dict[str, Any]:
+        return body  # pragma: no cover  # never invoked — test only exercises start()
+
+    @broker_outbox.subscriber("unrelated_queue")
+    async def plain(body: dict[str, Any]) -> None: ...  # a second, foreign-publisher-free subscriber
+
+    with caplog.at_level(logging.WARNING, logger="faststream_outbox"):
+        async with TestOutboxBroker(broker_outbox, run_loops=False):
+            pass
+
+    foreign = [r.getMessage() for r in caplog.records if "has not been started" in r.getMessage()]
+    assert len(foreign) == 1
+    assert "relay_queue" in foreign[0]
+    assert "unrelated_queue" not in foreign[0]  # the old code listed every subscriber's queues
