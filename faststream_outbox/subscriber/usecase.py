@@ -161,6 +161,9 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         # Set by the LISTEN callback to wake _fetch_loop early; cleared after each
         # wakeup. When LISTEN is unavailable the event simply never fires and the
         # loop sleeps the full adaptive interval.
+        # Frozen set of served queues for the O(1) NOTIFY-payload filter (P14); the
+        # queue list is fixed per subscriber, so caching it here clarifies intent.
+        self._served_queues: frozenset[str] = frozenset(config.queues)
         self._notify_event: asyncio.Event = asyncio.Event()
         # Set by stop() to halt _fetch_inner before tasks are cancelled. Distinct
         # from self.running: running must stay True during drain so FastStream's
@@ -410,7 +413,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         it runs on the same event loop.
         """
         payload = args[3] if len(args) >= 4 else None  # noqa: PLR2004
-        if payload is None or payload in self._queues:
+        if payload is None or payload in self._served_queues:
             self._notify_event.set()
 
     async def _worker_loop(self) -> None:

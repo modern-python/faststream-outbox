@@ -235,12 +235,19 @@ class OutboxBroker(
     def _warn_on_duplicate_queues(self) -> None:
         # P22: the registration-time overlap warning only sees the broker's own
         # _subscribers, so duplicates introduced via include_router slip through. Re-check
-        # at start() over the full ``subscribers`` property (routers included).
+        # at start() over the full ``subscribers`` property — but warn only for queues a
+        # router contributed to, since same-broker overlaps were already flagged at
+        # registration time (avoids double-warning one mistake).
+        direct = set(self._subscribers)
         counts: dict[str, int] = {}
+        router_queues: set[str] = set()
         for sub in self.subscribers:
+            from_router = sub not in direct
             for q in getattr(sub, "_queues", []):
                 counts[q] = counts.get(q, 0) + 1
-        duplicated = sorted(q for q, n in counts.items() if n > 1)
+                if from_router:
+                    router_queues.add(q)
+        duplicated = sorted(q for q, n in counts.items() if n > 1 and q in router_queues)
         if duplicated:
             warnings.warn(
                 f"Multiple subscribers serve queue(s) {duplicated}: their workers compete "
