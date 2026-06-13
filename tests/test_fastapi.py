@@ -17,10 +17,11 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
+from faststream.middlewares import AckPolicy
 from sqlalchemy import MetaData
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from faststream_outbox import OutboxMessage, make_outbox_table
+from faststream_outbox import NoRetry, OutboxMessage, make_outbox_table
 from faststream_outbox.client import AbstractOutboxClient
 from faststream_outbox.fastapi import (
     OutboxBroker as AnnotatedOutboxBroker,
@@ -75,6 +76,22 @@ async def test_subscriber_registered_via_outbox_router_runs_when_published() -> 
         await router.broker.publish({"x": 1}, queue="orders")  # ty: ignore[missing-argument]
 
     assert received == [{"x": 1}]
+
+
+def test_subscriber_misconfig_warning_attributed_to_user_via_fastapi_router() -> None:
+    """
+    P27: through the FastAPI router (extra frames) the misconfig warning points at the user's call site.
+
+    Old static ``stacklevel=4`` landed on a faststream-internal frame on this path; the
+    ``skip_file_prefixes`` attribution lands on the user's ``@router.subscriber(...)`` line.
+    """
+    router = OutboxRouter(outbox_table=_make_outbox_table())
+    with pytest.warns(UserWarning, match="NACK_ON_ERROR") as record:
+
+        @router.subscriber("orders", ack_policy=AckPolicy.NACK_ON_ERROR, retry_strategy=NoRetry())
+        async def handle(body: dict) -> None: ...
+
+    assert record[0].filename == __file__  # attributed to this test (the user), not a package frame
 
 
 async def test_subscriber_receives_fastapi_depends_session() -> None:
