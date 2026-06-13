@@ -58,7 +58,7 @@ broken recorder never poisons the dispatch loop.
 | `nacked_terminal` | `queue`, `subscriber`, `deliveries_count`, `reason` | `duration_seconds`, `exception_type` | Row terminally failed (`duration_seconds` absent for `max_deliveries`, which never ran the handler) |
 | `lease_lost` | `queue`, `subscriber`, `phase`, `row_id`, `deliveries_count` | | Terminal or retry write found `rowcount == 0` (`phase` = `terminal` \| `retry`) |
 | `published` | `queue`, `status`, `count`, `size_bytes`, `duration_seconds` | `exception_type` | Producer, after the INSERT executes (pre-commit; also fires on error with `status="error"`) |
-| `dlq_written` | `queue`, `subscriber`, `deliveries_count`, `failure_reason`, `exception_type` | | DLQ CTE wrote an audit row (`exception_type` is `None` when the terminal had no exception) |
+| `dlq_written` | `queue`, `subscriber`, `deliveries_count`, `failure_reason` | `exception_type` | DLQ CTE wrote an audit row. `exception_type` is **omitted** — not set to `None` — when the terminal had no exception (`max_deliveries`, or a manual `reject()` without one) |
 
 `reason` on `nacked_terminal` is one of `max_deliveries`,
 `retry_terminal`, `rejected`. The same value lands in the DLQ
@@ -66,15 +66,23 @@ broken recorder never poisons the dispatch loop.
 
 ## PromQL playbook
 
-Operator queries that key off the recorder-side metrics emitted by
-the Prometheus adapter. The `broker` label is always `"outbox"`; add
-the filter to disambiguate from upstream FastStream services.
+Operator queries that key off the recorder-side metrics. The
+`faststream_outbox_*` series below (`_lease_lost_total`,
+`_terminal_total`, `_dlq_written_total`) are emitted by
+**`PrometheusRecorder`** (`faststream_outbox.metrics.prometheus`), wired
+via `metrics_recorder=…` — see [Setup](./setup-prometheus-opentelemetry.md);
+the native `OutboxPrometheusMiddleware` does **not** emit them. The
+`broker` label is always `"outbox"`; add the filter to disambiguate from
+upstream FastStream services.
 
 ```promql
 # Handler throughput (acked / sec)
 rate(faststream_received_processed_messages_total{broker="outbox",status="acked"}[1m])
 
-# Handler error rate
+# Handler error rate. NB: status="error" also counts lease losses (the
+# recorder maps lease_lost onto the error status), so this includes an
+# operational, not handler, failure mode. To isolate handler failures use
+# status="nacked"; track lease loss separately via the query below.
 rate(faststream_received_processed_messages_total{broker="outbox",status!="acked"}[5m])
   /
 rate(faststream_received_processed_messages_total{broker="outbox"}[5m])
@@ -105,7 +113,7 @@ rate(faststream_outbox_dlq_written_total[5m])
   > 0
 ```
 
-The first eight are direct ports of the recorder-side metrics into
+The first seven are direct ports of the recorder-side metrics into
 operator-actionable PromQL. The last one is the
 DLQ-misconfiguration-detection alert covered in [DLQ § Metric:
 dlq_written](./dlq.md#metric-dlq_written).

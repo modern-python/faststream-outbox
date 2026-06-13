@@ -94,7 +94,8 @@ idle dispatch latency drops from up to `max_fetch_interval` (default 10s) to
 error), the loop logs once and falls back to polling.
 
 **2. Worker loop** (× `max_workers`). Pulls from an in-process
-`asyncio.Queue(maxsize=fetch_batch_size)`, dispatches via the handler, then
+`asyncio.Queue(maxsize=fetch_batch_size)`, dispatches each row via
+`OutboxSubscriber.dispatch_one` (which runs the handler), then
 flushes the row's terminal state (`DELETE` on success, `UPDATE
 next_attempt_at` for retry). Each worker owns a long-lived `AsyncConnection`,
 so draining N rows costs O(workers) pool checkouts, not O(rows).

@@ -213,14 +213,26 @@ Strategies receive the raised `exception` so users may subclass for
 
 ```python
 class TransientOnly(ExponentialRetry):
-    def get_next_attempt_delay(self, *, exception=None, **kw):
+    def get_next_attempt_delay(
+        self,
+        *,
+        first_attempt_at: datetime,
+        last_attempt_at: datetime,
+        attempts_count: int,
+        exception: BaseException | None = None,
+    ) -> float | None:
         if exception and not isinstance(exception, TransientError):
             return None  # terminal — DELETE
-        return super().get_next_attempt_delay(exception=exception, **kw)
+        return super().get_next_attempt_delay(
+            first_attempt_at=first_attempt_at,
+            last_attempt_at=last_attempt_at,
+            attempts_count=attempts_count,
+            exception=exception,
+        )
 ```
 
 Returning `None` from `get_next_attempt_delay` signals a terminal failure.
-`_RetryStrategyTemplate` also enforces `max_attempts` and
+The base strategy also enforces `max_attempts` and
 `max_total_delay_seconds` for you.
 
 ## Connection budget
@@ -248,7 +260,8 @@ startup with `FATAL: too many connections`.
 ## Read-only inspection
 
 `subscriber.get_one()` and `async for msg in subscriber:` are **not
-supported** on `OutboxSubscriber` — they would acquire a lease and bump
-`deliveries_count`, surprising semantics for a peek API. Use
+supported** on `OutboxSubscriber` — both raise `NotImplementedError`.
+They would acquire a lease and bump `deliveries_count`, surprising
+semantics for a peek API. Use
 `broker.fetch_unprocessed(session=..., queue=...)` for lease-free reads of
 the current table state.

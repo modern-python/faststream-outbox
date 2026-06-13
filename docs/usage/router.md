@@ -91,5 +91,6 @@ for sub in broker.subscribers:
 
 The property iterates `[*broker._subscribers,
 *(s for r in broker.routers for s in r.subscribers)]`, so it covers both
-inline and router-attached subscribers. The bare `broker._subscribers` list
-will silently miss everything attached via a router.
+inline and router-attached subscribers. The bare `broker._subscribers`
+(a `WeakSet`, set by the upstream `Registrator`) holds only the inline
+ones and will silently miss everything attached via a router.
