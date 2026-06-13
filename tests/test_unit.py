@@ -35,6 +35,7 @@ from faststream_outbox import (
     make_outbox_table,
 )
 from faststream_outbox.annotations import OutboxMessage as AnnotatedOutboxMessage
+from faststream_outbox.broker import OutboxParamsStorage
 from faststream_outbox.client import OutboxClient, _validate_schema_sync
 from faststream_outbox.configs import OutboxBrokerConfig
 from faststream_outbox.envelope import _encode_payload
@@ -44,7 +45,9 @@ from faststream_outbox.publisher.config import OutboxPublisherSpecificationConfi
 from faststream_outbox.publisher.fake import OutboxFakePublisher
 from faststream_outbox.publisher.producer import OutboxProducer
 from faststream_outbox.publisher.specification import OutboxPublisherSpecification
+from faststream_outbox.registrator import _default_retry_strategy
 from faststream_outbox.response import OutboxPublishCommand
+from faststream_outbox.router import OutboxRoute
 from faststream_outbox.subscriber.usecase import (
     _LAST_EXCEPTION_MAX_CHARS,
     _TRUNCATION_SUFFIX,
@@ -838,7 +841,6 @@ async def test_broker_publish_batch_rejects_non_async_session() -> None:
 
 
 async def test_broker_publish_batch_no_bodies_is_noop() -> None:
-    from sqlalchemy.ext.asyncio import AsyncSession  # noqa: PLC0415
 
     broker = _make_broker()
     session = AsyncMock(spec=AsyncSession)
@@ -1093,7 +1095,6 @@ async def test_broker_cancel_timer_returns_false_when_nothing_deleted() -> None:
 
 
 async def test_broker_publish_batch_executes_single_insert_for_many_rows() -> None:
-    from sqlalchemy.ext.asyncio import AsyncSession  # noqa: PLC0415
 
     broker = _make_broker()
     session = AsyncMock(spec=AsyncSession)
@@ -1303,7 +1304,6 @@ def test_validate_schema_sync_raises_when_alembic_missing() -> None:
 
 
 async def test_broker_ping_done_subscriber_task_is_false() -> None:
-    from unittest.mock import MagicMock  # noqa: PLC0415
 
     metadata = MetaData()
     t = make_outbox_table(metadata)
@@ -1323,7 +1323,6 @@ async def test_broker_ping_done_subscriber_task_is_false() -> None:
 
 
 async def test_broker_ping_live_subscriber_task_is_true() -> None:
-    from unittest.mock import MagicMock  # noqa: PLC0415
 
     metadata = MetaData()
     t = make_outbox_table(metadata)
@@ -1382,9 +1381,6 @@ async def test_broker_ping_honors_timeout_when_probe_hangs() -> None:
 
 
 def test_outbox_params_storage_caches_logger() -> None:
-    from unittest.mock import MagicMock  # noqa: PLC0415
-
-    from faststream_outbox.broker import OutboxParamsStorage  # noqa: PLC0415
 
     storage = OutboxParamsStorage()
     context = MagicMock()
@@ -1478,7 +1474,6 @@ async def test_outbox_message_reject_calls_raw_then_super() -> None:
 
 
 async def test_message_assert_state_set_logs_when_logger_given() -> None:
-    from unittest.mock import MagicMock  # noqa: PLC0415
 
     msg = _make_msg()
     logger = MagicMock()
@@ -1491,7 +1486,6 @@ async def test_message_assert_state_set_logs_when_logger_given() -> None:
 
 
 def test_outbox_route_constructs() -> None:
-    from faststream_outbox.router import OutboxRoute  # noqa: PLC0415
 
     async def handler(body: str) -> None: ...
 
@@ -1514,7 +1508,6 @@ def test_subscriber_specification_name_lists_queues() -> None:
 
 
 async def test_subscriber_specification_get_schema() -> None:
-    from faststream_outbox import TestOutboxBroker  # noqa: PLC0415
 
     metadata = MetaData()
     t = make_outbox_table(metadata)
@@ -1539,27 +1532,23 @@ async def test_subscriber_specification_get_schema() -> None:
 
 
 def test_fake_client_table_property() -> None:
-    from faststream_outbox.testing import FakeOutboxClient  # noqa: PLC0415
 
     assert FakeOutboxClient().table is None
 
 
 async def test_fake_client_fetch_empty_queues() -> None:
-    from faststream_outbox.testing import FakeOutboxClient  # noqa: PLC0415
 
     client = FakeOutboxClient()
     assert await client.fetch(None, [], limit=10, lease_ttl_seconds=60.0) == []
 
 
 async def test_fake_client_delete_miss() -> None:
-    from faststream_outbox.testing import FakeOutboxClient  # noqa: PLC0415
 
     client = FakeOutboxClient()
     assert await client.delete_with_lease(None, 123, uuid.uuid4()) is False
 
 
 async def test_fake_client_mark_pending_miss() -> None:
-    from faststream_outbox.testing import FakeOutboxClient  # noqa: PLC0415
 
     client = FakeOutboxClient()
     now = _dt.datetime.now(tz=_dt.UTC)
@@ -3504,3 +3493,14 @@ async def test_metrics_reject_on_error_terminal_emits_reason_rejected() -> None:
     assert len(terminals) == 1
     assert terminals[0]["reason"] == "rejected"
     assert terminals[0]["exception_type"] == "RuntimeError"
+
+
+def test_default_retry_strategy_pins_documented_parameters() -> None:
+    """The opt-out default must stay exactly as documented (CLAUDE.md / operations/checklist.md)."""
+    strategy = _default_retry_strategy()
+    assert isinstance(strategy, ExponentialRetry)
+    assert strategy.initial_delay_seconds == 1.0
+    assert strategy.multiplier == 2.0
+    assert strategy.max_delay_seconds == 300.0
+    assert strategy.max_attempts == 10
+    assert strategy.jitter_factor == 0.2

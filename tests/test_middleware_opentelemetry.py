@@ -20,6 +20,8 @@ from faststream.message import StreamMessage
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from sqlalchemy import MetaData
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -239,3 +241,35 @@ def test_outbox_telemetry_middleware_raises_friendly_error_when_extra_missing() 
         pytest.raises(ImportError, match=r"pip install 'faststream-outbox\[opentelemetry\]'"),
     ):
         OutboxTelemetryMiddleware()
+
+
+async def test_outbox_telemetry_middleware_emits_consume_span_with_outbox_attributes() -> None:
+    """The middleware owns the consume-scope span (the recorder seam can't): assert it fires."""
+    reader = InMemoryMetricReader()
+    span_exporter = InMemorySpanExporter()
+    tracer_provider = TracerProvider()
+    tracer_provider.add_span_processor(SimpleSpanProcessor(span_exporter))
+
+    metadata = MetaData()
+    table = make_outbox_table(metadata)
+    meter_provider = MeterProvider(metric_readers=[reader])
+    broker = OutboxBroker(
+        outbox_table=table,
+        middlewares=[  # ty: ignore[invalid-argument-type]
+            OutboxTelemetryMiddleware(meter_provider=meter_provider, tracer_provider=tracer_provider)
+        ],
+    )
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> None:
+        pass
+
+    async with TestOutboxBroker(broker):
+        await broker.publish({"x": 1}, queue="orders", session=_session_mock())
+
+    spans = span_exporter.get_finished_spans()
+    outbox_spans = [sp for sp in spans if dict(sp.attributes or {}).get("messaging.system") == "outbox"]
+    assert outbox_spans, f"no outbox consume span emitted; spans={[sp.name for sp in spans]}"
+    attrs = dict(outbox_spans[0].attributes or {})
+    assert attrs["messaging.system"] == "outbox"
+    assert attrs["messaging.destination_publish.name"] == "orders"

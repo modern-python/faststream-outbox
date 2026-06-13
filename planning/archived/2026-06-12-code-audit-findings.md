@@ -3,14 +3,16 @@ status: shipped
 date: 2026-06-12
 slug: 2026-06-12-code-audit-findings
 scope: faststream_outbox/ (package) + tests/ (test quality)
-prs: [61, 66, 67, 68, 69, 70]
+prs: [61, 66, 67, 68, 69, 70, 74]
 findings_doc_prs: [62, 65]
 releases: ["0.9.0", "0.9.1"]
 outcome: >
-  All findings remediated, nothing deferred. Bugs B1–B16 (#61) + test-holes
-  T1–T8 (#66) + improvements P1–P35 (#67) shipped in 0.9.0; suspected S1–S5
-  (#68; S3 was already resolved by P17) + warning-attribution P27 (#69) +
-  test-broker dedup/NOTIFY P29/P30 (#70) shipped in 0.9.1.
+  All findings remediated. Bugs B1–B16 (#61) + test-holes T1–T8 (#66) +
+  improvements P1–P35 (#67) shipped in 0.9.0; suspected S1–S5 (#68; S3 was
+  already resolved by P17) + warning-attribution P27 (#69) + test-broker
+  dedup/NOTIFY P29/P30 (#70) shipped in 0.9.1. The "Additional test findings"
+  prose tail below the T1–T8 table (never tracked as its own IDs) was closed
+  in #74.
 ---
 
 # Code audit findings — 2026-06-12
