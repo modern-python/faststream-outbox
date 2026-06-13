@@ -1,6 +1,8 @@
 import typing
 import warnings
+from pathlib import Path
 
+import faststream
 from faststream._internal.constants import EMPTY
 from faststream._internal.endpoint.subscriber.call_item import CallsCollection
 from faststream.middlewares import AckPolicy
@@ -13,6 +15,16 @@ from faststream_outbox.subscriber.usecase import OutboxSubscriber, OutboxSubscri
 if typing.TYPE_CHECKING:
     from faststream_outbox.configs import OutboxBrokerConfig
     from faststream_outbox.retry import RetryStrategyProto
+
+
+# P27: attribute the subscriber-config warnings to the user's ``@broker.subscriber(...)``
+# / ``@router.subscriber(...)`` call site by skipping frames inside this package and
+# faststream. A static ``stacklevel`` can't be correct for both the direct path and the
+# FastAPI-router path (the router adds frames); ``skip_file_prefixes`` (3.12+) is.
+_WARN_SKIP_PREFIXES = (
+    str(Path(__file__).parent.parent),  # the faststream_outbox package dir
+    str(Path(faststream.__file__).parent),  # the faststream package dir
+)
 
 
 def create_subscriber(
@@ -89,9 +101,9 @@ def _validate_subscriber_config(  # noqa: C901  # flat sequence of independent k
     Reject impossible knob values, warn on combos that silently misbehave.
 
     Errors are raised here (not deferred to runtime) so the user gets a
-    traceback pointing at the ``@broker.subscriber(...)`` decorator. Warnings
-    use ``stacklevel=4`` so they point at the same line (frames: user →
-    ``subscriber()`` → ``create_subscriber()`` → ``_validate_subscriber_config()``).
+    traceback pointing at the ``@broker.subscriber(...)`` decorator. Warnings use
+    ``skip_file_prefixes`` (see ``_WARN_SKIP_PREFIXES``) so they are attributed to the
+    user's call site on both the direct and FastAPI-router paths (P27).
     """
     if max_workers <= 0:
         msg = f"max_workers must be >= 1, got {max_workers}"
@@ -133,14 +145,14 @@ def _validate_subscriber_config(  # noqa: C901  # flat sequence of independent k
             "retry_strategy is ignored. Pass ack_policy=NACK_ON_ERROR (default) to "
             "honor retry, or drop retry_strategy if you really want first-error deletion.",
             UserWarning,
-            stacklevel=4,
+            skip_file_prefixes=_WARN_SKIP_PREFIXES,
         )
     if ack_policy is AckPolicy.NACK_ON_ERROR and is_no_retry:
         warnings.warn(
             "ack_policy=NACK_ON_ERROR with retry_strategy=NoRetry() has the same effect "
             "as REJECT_ON_ERROR (one attempt, then delete). Pick one for clarity.",
             UserWarning,
-            stacklevel=4,
+            skip_file_prefixes=_WARN_SKIP_PREFIXES,
         )
     if max_deliveries is not None and (retry_strategy is None or is_no_retry):
         warnings.warn(
@@ -148,7 +160,7 @@ def _validate_subscriber_config(  # noqa: C901  # flat sequence of independent k
             "passed); the delivery cap is unreachable on the happy path since the row "
             "is deleted after the first attempt.",
             UserWarning,
-            stacklevel=4,
+            skip_file_prefixes=_WARN_SKIP_PREFIXES,
         )
     if lease_ttl_seconds <= max_fetch_interval:
         warnings.warn(
@@ -158,5 +170,5 @@ def _validate_subscriber_config(  # noqa: C901  # flat sequence of independent k
             f"of healthy in-flight rows. Recommended: lease_ttl_seconds >= "
             f"2 * max_fetch_interval + P99(handler).",
             UserWarning,
-            stacklevel=4,
+            skip_file_prefixes=_WARN_SKIP_PREFIXES,
         )
