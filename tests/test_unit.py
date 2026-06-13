@@ -2363,6 +2363,32 @@ async def test_open_listen_connection_closes_conn_when_add_listener_fails() -> N
     fake_conn.close.assert_awaited_once()
 
 
+async def test_close_listen_connection_graceful_close_succeeds() -> None:
+    """S1: a healthy graceful close is awaited; terminate() is not used."""
+    sub = _make_subscriber_for_listener_test()
+    conn = MagicMock()
+    conn.close = AsyncMock()
+    conn.terminate = MagicMock()
+    await sub._close_listen_connection(conn)  # noqa: SLF001
+    conn.close.assert_awaited_once()
+    conn.terminate.assert_not_called()
+
+
+async def test_close_listen_connection_falls_back_to_terminate_on_hang(monkeypatch: pytest.MonkeyPatch) -> None:
+    """S1: a graceful close that hangs on a half-dead socket is bounded and falls back to terminate()."""
+    monkeypatch.setattr("faststream_outbox.subscriber.usecase._LISTEN_CLOSE_TIMEOUT", 0.05)
+    sub = _make_subscriber_for_listener_test()
+    conn = MagicMock()
+
+    async def _hang() -> None:
+        await asyncio.sleep(3600)
+
+    conn.close = _hang
+    conn.terminate = MagicMock()
+    await sub._close_listen_connection(conn)  # noqa: SLF001  # must return promptly, not hang
+    conn.terminate.assert_called_once()
+
+
 async def test_subscriber_start_resets_stopping_flag() -> None:
     """B2: start() clears _stopping so a stop()->start() cycle fetches again instead of hot-spinning."""
     sub = _make_subscriber_for_listener_test()

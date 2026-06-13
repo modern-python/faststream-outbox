@@ -392,6 +392,11 @@ class OutboxClient(AbstractOutboxClient):
         """
         async with self._engine.connect() as conn:
             errors = await conn.run_sync(_validate_schema_sync, self._table)
+            # S2: alembic's autogenerate diff compares index columns + uniqueness but NOT
+            # the partial-index WHERE predicate, so a wrong postgresql_where slips through
+            # and later breaks the producer's ON CONFLICT arbiter. Probe the predicates
+            # directly against the live catalog.
+            errors.extend(await conn.run_sync(_validate_index_predicates_sync, self._table))
             if self._dlq_table is not None:
                 errors.extend(await conn.run_sync(_validate_dlq_schema_sync, self._dlq_table))
         if errors:
@@ -423,6 +428,58 @@ def _row_to_message(row: dict) -> OutboxInnerMessage:
         acquired_token=row["acquired_token"],
         timer_id=row["timer_id"],
     )
+
+
+def _normalize_predicate(predicate: str) -> str:
+    """Canonicalize a Postgres partial-index predicate for comparison (lowercase, drop parens/space)."""
+    return " ".join(predicate.lower().replace("(", " ").replace(")", " ").split())
+
+
+# Expected partial-index predicates, keyed by the index-name suffix make_outbox_table uses.
+# These are what the fetch CTE and the producer's ON CONFLICT arbiter rely on (S2).
+_EXPECTED_INDEX_PREDICATES = {
+    "_pending_idx": "acquired_token is null",
+    "_timer_id_uq": "timer_id is not null",
+    "_lease_idx": "acquired_token is not null",
+}
+
+_INDEX_PREDICATE_QUERY = text(
+    "SELECT c.relname AS index_name, pg_get_expr(i.indpred, i.indrelid) AS predicate "
+    "FROM pg_index i "
+    "JOIN pg_class c ON c.oid = i.indexrelid "
+    "JOIN pg_class t ON t.oid = i.indrelid "
+    "JOIN pg_namespace n ON n.oid = t.relnamespace "
+    "WHERE t.relname = :table AND n.nspname = COALESCE(:schema, current_schema()) "
+    "AND i.indpred IS NOT NULL",
+)
+
+
+def _validate_index_predicates_sync(connection: "Connection", table: "Table") -> list[str]:
+    """
+    Compare the live partial-index WHERE predicates against what the package expects (S2).
+
+    Alembic's index diff ignores ``postgresql_where``, so a drifted predicate (e.g. a
+    ``{table}_timer_id_uq`` built ``WHERE timer_id IS NULL`` instead of ``IS NOT NULL``)
+    passes :func:`_run_validate` yet breaks ``ON CONFLICT`` arbiter inference at publish
+    time. Missing / non-partial indexes are left to the alembic diff; this only flags a
+    predicate mismatch on an index that does exist.
+    """
+    rows = (
+        connection.execute(
+            _INDEX_PREDICATE_QUERY,
+            {"table": table.name, "schema": table.schema},
+        )
+        .mappings()
+        .all()
+    )
+    live = {row["index_name"]: _normalize_predicate(row["predicate"]) for row in rows}
+    errors: list[str] = []
+    for suffix, want in _EXPECTED_INDEX_PREDICATES.items():
+        name = f"{table.name}{suffix}"
+        got = live.get(name)
+        if got is not None and got != want:
+            errors.append(f"index {name!r} has wrong partial predicate: expected '{want}', got '{got}'")
+    return errors
 
 
 def _validate_schema_sync(connection: "Connection", table: "Table") -> list[str]:

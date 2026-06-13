@@ -353,7 +353,11 @@ class FakeOutboxProducer:
         next_at = _compute_next_at_client_side(cmd.activate_in, cmd.activate_at)
         recorder = self._broker.config.broker_config.metrics_recorder
         total_size = 0
-        landed = 0
+        landed_ids: list[int] = []
+        # S5: insert the WHOLE batch first, then emit ``published``, then dispatch. In
+        # production the batch INSERT commits atomically before the subscriber fetches, so
+        # a handler never sees a half-inserted batch and ``published`` precedes delivery.
+        # Dispatching per-body mid-feed (the old shape) reproduced neither property.
         for body in bodies:
             payload, hdrs = _encode_payload(body, headers=cmd.headers, serializer=self._serializer)
             total_size += len(payload)
@@ -364,20 +368,21 @@ class FakeOutboxProducer:
                 next_attempt_at=next_at,
             )
             if row_id is not None:
-                landed += 1
-            if not self._run_loops and row_id is not None:
-                await _sync_dispatch(self._fake_client, self._broker, cmd.queue, row_id)
+                landed_ids.append(row_id)
         _safe_emit(
             recorder,
             "published",
             {
                 "queue": cmd.queue,
                 "status": "success",
-                "count": landed,
+                "count": len(landed_ids),
                 "size_bytes": total_size,
                 "duration_seconds": 0.0,
             },
         )
+        if not self._run_loops:
+            for row_id in landed_ids:
+                await _sync_dispatch(self._fake_client, self._broker, cmd.queue, row_id)
 
     async def request(self, cmd: OutboxPublishCommand) -> typing.NoReturn:
         msg = "OutboxBroker does not support request-reply"
@@ -476,7 +481,10 @@ def _build_fake_publish_batch(
         next_at = _compute_next_at_client_side(activate_in, activate_at)
         recorder = broker.config.broker_config.metrics_recorder
         total_size = 0
-        landed = 0
+        landed_ids: list[int] = []
+        # S5: insert the whole batch, emit ``published``, then dispatch — mirroring the
+        # production order (atomic batch INSERT → published → subscriber fetch) so handlers
+        # never observe a half-inserted batch and the event order isn't inverted.
         for body in bodies:
             payload, hdrs = _encode_payload(body, headers=headers, serializer=serializer)
             total_size += len(payload)
@@ -487,20 +495,21 @@ def _build_fake_publish_batch(
                 next_attempt_at=next_at,
             )
             if row_id is not None:
-                landed += 1
-            if not run_loops and row_id is not None:
-                await _sync_dispatch(fake_client, broker, queue, row_id)
+                landed_ids.append(row_id)
         _safe_emit(
             recorder,
             "published",
             {
                 "queue": queue,
                 "status": "success",
-                "count": landed,
+                "count": len(landed_ids),
                 "size_bytes": total_size,
                 "duration_seconds": 0.0,
             },
         )
+        if not run_loops:
+            for row_id in landed_ids:
+                await _sync_dispatch(fake_client, broker, queue, row_id)
 
     return fake_publish_batch
 
