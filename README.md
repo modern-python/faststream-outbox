@@ -1,8 +1,16 @@
-faststream-outbox
-==
+# faststream-outbox
 
-[![Supported versions](https://img.shields.io/pypi/pyversions/faststream-outbox.svg)](https://pypi.python.org/pypi/faststream-outbox)
-[![downloads](https://img.shields.io/pypi/dm/faststream-outbox.svg)](https://pypistats.org/packages/faststream-outbox)
+[![PyPI version](https://img.shields.io/pypi/v/faststream-outbox.svg)](https://pypi.org/project/faststream-outbox/)
+[![Supported Python versions](https://img.shields.io/pypi/pyversions/faststream-outbox.svg)](https://pypi.org/project/faststream-outbox/)
+[![Downloads](https://img.shields.io/pypi/dm/faststream-outbox.svg)](https://pypistats.org/packages/faststream-outbox)
+[![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen.svg)](https://github.com/modern-python/faststream-outbox/actions/workflows/ci.yml)
+[![CI](https://github.com/modern-python/faststream-outbox/actions/workflows/ci.yml/badge.svg)](https://github.com/modern-python/faststream-outbox/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/modern-python/faststream-outbox.svg)](https://github.com/modern-python/faststream-outbox/blob/main/LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/modern-python/faststream-outbox)](https://github.com/modern-python/faststream-outbox/stargazers)
+[![Context7](https://img.shields.io/badge/Context7-docs-blue)](https://context7.com/modern-python/faststream-outbox)
+[![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![ty](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ty/main/assets/badge/v0.json)](https://github.com/astral-sh/ty)
 
 `faststream-outbox` is a [FastStream](https://faststream.airt.ai) broker integration for the **transactional outbox pattern** — a Postgres table is the message queue.
 
@@ -101,14 +109,13 @@ See [How it works](https://faststream-outbox.modern-python.org/introduction/how-
 
 The architecture of this package is heavily informed by Arseniy Popov's [PR #2704](https://github.com/ag2ai/faststream/pull/2704) (`feat: add sqla broker`) on upstream FastStream — the FastStream broker/registrator/subscriber wiring, the `SELECT … FOR UPDATE SKIP LOCKED` fetch-and-claim CTE, the retry strategy hierarchy, and the in-transaction publish contract all originate from there. This package is a Postgres-only reimplementation that diverges in storage model (lease tokens instead of an explicit state column, archive table is opt-in), loop structure (two loops instead of four), wake-up mechanism (`LISTEN/NOTIFY`), and adds timer mechanics. Credit for the original design belongs to Arseniy.
 
+## 📚 [Documentation](https://faststream-outbox.modern-python.org)
+
+## 📦 [PyPI](https://pypi.org/project/faststream-outbox)
+
+## 📝 [License](LICENSE)
+
 ## Part of `modern-python`
 
 Browse the full list of templates and libraries in
-[`modern-python`](https://github.com/modern-python) — see the org profile for the
-categorized index.
-
-## 📚 [Documentation](https://faststream-outbox.modern-python.org)
-
-## 📦 [PyPi](https://pypi.org/project/faststream-outbox)
-
-## 📝 [License](LICENSE)
+[`modern-python`](https://github.com/modern-python) — see the org profile for the categorized index.
