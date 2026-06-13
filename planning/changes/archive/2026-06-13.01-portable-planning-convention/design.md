@@ -1,11 +1,11 @@
 ---
-status: approved
+status: shipped
 date: 2026-06-13
 slug: portable-planning-convention
 supersedes: planning-conventions
 superseded_by: null
-pr: null
-outcome: null
+pr: "77"
+outcome: merged 2026-06-13 as #77
 ---
 
 # Design: Portable OpenSpec-shaped planning convention

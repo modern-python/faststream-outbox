@@ -74,6 +74,11 @@ _None._
 
 ### Archived (shipped)
 
+- **[portable-planning-convention](changes/archive/2026-06-13.01-portable-planning-convention/design.md)**
+  (#77, 2026-06-13) — Two-axis OpenSpec-shaped convention: `architecture/`
+  truth + `changes/` folder bundles, `.NN` intra-day tiebreak, three lanes,
+  dedicated `audits/`+`retros/`, portable README. Supersedes
+  planning-conventions.
 - **[docs-tutorials](changes/archive/2026-06-12.01-docs-tutorials/design.md)**
   (#58, 2026-06-12) — The two tutorials deferred from #56: *Your first outbox
   app* and *Add a Kafka relay*. Kill-Kafka step folded into an at-least-once
