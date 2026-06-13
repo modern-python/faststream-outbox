@@ -615,6 +615,65 @@ async def test_fake_broker_retry_strategy_receives_handler_exception() -> None:
 # --- Loop-mode tests (run_loops=True) -------------------------------------------------
 
 
+async def test_loop_mode_feed_wakes_fetch_loop_via_notify() -> None:
+    """
+    P30: feeding a row in loop mode wakes the fetch loop via NOTIFY, not the full poll interval.
+
+    With a deliberately slow 5s poll, the handler should still run within 2s — only possible
+    if feed() set the subscriber's _notify_event (the production NOTIFY analogue).
+    """
+    broker = _make_broker()
+    handled = asyncio.Event()
+
+    @broker.subscriber("orders", min_fetch_interval=5.0, max_fetch_interval=5.0)
+    async def handle(body: str) -> None:
+        del body
+        handled.set()
+
+    test_broker = TestOutboxBroker(broker, run_loops=True)
+    async with test_broker:
+        await asyncio.sleep(0.05)  # let the loop do its first (empty) fetch and enter the idle wait
+        payload, hdrs = encode_payload("x")
+        test_broker.feed("orders", payload, headers=hdrs)
+        await asyncio.wait_for(handled.wait(), timeout=2.0)  # ~5s without the notify wakeup
+
+
+async def test_loop_mode_publish_wakes_fetch_loop_via_notify() -> None:
+    """P30: broker.publish in loop mode wakes the fetch loop (single-publish notify path)."""
+    broker = _make_broker()
+    handled = asyncio.Event()
+
+    @broker.subscriber("orders", min_fetch_interval=5.0, max_fetch_interval=5.0)
+    async def handle(body: str) -> None:
+        del body
+        handled.set()
+
+    test_broker = TestOutboxBroker(broker, run_loops=True)
+    async with test_broker:
+        await asyncio.sleep(0.05)
+        await broker.publish("x", queue="orders")  # ty: ignore[missing-argument]
+        await asyncio.wait_for(handled.wait(), timeout=2.0)
+
+
+async def test_loop_mode_publish_batch_wakes_fetch_loop_via_notify() -> None:
+    """P30: broker.publish_batch in loop mode wakes the fetch loop (batch notify path)."""
+    broker = _make_broker()
+    handled: list[str] = []
+    done = asyncio.Event()
+
+    @broker.subscriber("orders", min_fetch_interval=5.0, max_fetch_interval=5.0)
+    async def handle(body: str) -> None:
+        handled.append(body)
+        if len(handled) == 2:
+            done.set()
+
+    test_broker = TestOutboxBroker(broker, run_loops=True)
+    async with test_broker:
+        await asyncio.sleep(0.05)
+        await broker.publish_batch("a", "b", queue="orders")  # ty: ignore[missing-argument]
+        await asyncio.wait_for(done.wait(), timeout=2.0)
+
+
 async def test_loop_mode_failing_handler_with_retry_reschedules() -> None:
     broker = _make_broker()
     attempts: list[str] = []
