@@ -5,28 +5,42 @@ trade-offs. This page names the alternatives, says when each is the better
 choice, and ends each comparison with a one-line verdict so a scanning
 reader can lift the answer without reading the discussion.
 
+| Alternative | Pick *it* when… | Pick `faststream-outbox` when… |
+|---|---|---|
+| [Writing your own](#vs-writing-your-own-outbox-table-and-worker) | You only ever need the MVP shape | You expect the system to live for years |
+| [CDC / Debezium](#vs-cdc-debezium-logical-replication) | You already need WAL capture, or producers are outside your control | You own the producer and want retry / DLQ / timers in-process |
+| [Kafka txns / Rabbit confirms](#vs-kafka-transactions-or-rabbitmq-publisher-confirms) | The bus is already running and you need bus-scale throughput | Postgres is your only durable store |
+| [Plain `LISTEN/NOTIFY`](#vs-plain-listennotify) | You only need a wake-up, not a delivery guarantee | You need durability, replay, and retry |
+| [Celery / RQ / Dramatiq](#vs-celery-or-rq-dramatiq-with-a-db-backend) | You're modelling ad-hoc background jobs | You're modelling events that must commit with a DB write |
+| [FastStream foreign broker](#vs-faststream-kafkabroker-rabbitbroker-directly) | You have no DB write to commit alongside the publish | You need atomicity with a DB write (use *both*, via [Relay](../usage/relay.md)) |
+
 ## vs. writing your own outbox table and worker
 
 A bespoke outbox is the most common starting point — the pattern itself is
 straightforward, and an MVP can ship in an afternoon. What `faststream-outbox`
 buys you, in concrete terms, is the pile of pieces that turn that MVP into a
-production system: per-row **lease tokens** with a load-bearing invariant
-that any new fetch / terminal path must preserve; the **partial-index
-design** the fetch CTE depends on (without those, the disjunctive WHERE
-clause falls back to seq-scan as the table grows); the **fetch-and-claim
-CTE shape** with `FOR UPDATE SKIP LOCKED` that reclaims both unleased rows
-and expired leases without a separate reaper; the
-retry-strategy hierarchy (`ExponentialRetry`, `NoRetry`, …) enforcing
-`max_attempts` and `max_total_delay_seconds` uniformly; `validate_schema()` via
-Alembic's `autogenerate.compare_metadata`; **drain semantics** on stop with
-the `running` / `_stopping` two-flag dance and parallel-gathered subscriber
-shutdown; **`LISTEN/NOTIFY`** short-circuit on top of polling, with NOTIFY
-suppression on future-dated rows and `timer_id` conflict no-ops;
-**`timer_id` dedup** via a partial unique index plus
-`on_conflict_do_nothing`; the **DLQ atomicity CTE** that rolls back the
-DELETE when the DLQ insert fails. None of these is hard individually; in
-aggregate they decide whether the outbox survives the second year of
-production load.
+production system:
+
+- per-row **lease tokens** with a load-bearing invariant that any new
+  fetch / terminal path must preserve;
+- the **partial-index design** the fetch CTE depends on (without those, the
+  disjunctive WHERE clause falls back to seq-scan as the table grows);
+- the **fetch-and-claim CTE shape** with `FOR UPDATE SKIP LOCKED` that
+  reclaims both unleased rows and expired leases without a separate reaper;
+- the **retry-strategy hierarchy** (`ExponentialRetry`, `NoRetry`, …)
+  enforcing `max_attempts` and `max_total_delay_seconds` uniformly;
+- **`validate_schema()`** via Alembic's `autogenerate.compare_metadata`;
+- **drain semantics** on stop, with the `running` / `_stopping` two-flag
+  dance and parallel-gathered subscriber shutdown;
+- **`LISTEN/NOTIFY`** short-circuit on top of polling, with NOTIFY
+  suppression on future-dated rows and `timer_id` conflict no-ops;
+- **`timer_id` dedup** via a partial unique index plus
+  `on_conflict_do_nothing`;
+- the **DLQ atomicity CTE** that rolls back the DELETE when the DLQ insert
+  fails.
+
+None of these is hard individually; in aggregate they decide whether the
+outbox survives the second year of production load.
 
 You also pick up the [Subscriber](../usage/subscriber.md),
 [Publisher](../usage/publisher.md), [Dead-letter queue](../usage/dlq.md), and
@@ -57,9 +71,12 @@ outbox row is cheap to write inline with the domain write), when you
 need **handler-level retry, DLQ, and scheduled-delivery semantics
 inline** (CDC pushes those concerns to a separate consumer layer), and
 when the **async-Python logical-replication tooling gap** is too thin
-to lean on. The last point is the load-bearing one for this project — a
-2026-05-07 reassessment confirmed the gap had not closed sufficiently to
-make CDC the recommended path here.
+to lean on: there is no async-native logical-decoding client comparable
+to Debezium's JVM connectors, so a Python CDC path means either running
+the JVM stack alongside your app or driving `pg_recvlogical` / a thin
+`psycopg` replication-protocol wrapper yourself. That is the load-bearing
+point for this project — a 2026-05-07 reassessment confirmed the gap had
+not closed sufficiently to make CDC the recommended path here.
 
 **TL;DR.** Pick CDC when you already need WAL capture or have producers
 outside your control. Pick this when you own the producer and want

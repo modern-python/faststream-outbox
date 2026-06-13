@@ -102,8 +102,23 @@ async def checkout(order: Order, session: AsyncSession) -> None:
 Per-call `headers` are merged with the publisher's static headers
 (per-call wins).
 
+Constructor signature:
+
+```python
+broker.publisher(
+    queue: str,
+    *,
+    headers: dict[str, str] | None = None,
+    title: str | None = None,            # AsyncAPI operation title
+    description: str | None = None,      # AsyncAPI operation description
+    schema: Any | None = None,           # AsyncAPI payload schema override
+    include_in_schema: bool = True,      # exclude from the AsyncAPI spec when False
+) -> OutboxPublisher
+```
+
 The publisher exists primarily for AsyncAPI spec coverage and to
-encapsulate per-queue config (static headers, etc.).
+encapsulate per-queue config — hence the `title` / `description` / `schema`
+/ `include_in_schema` knobs above, alongside the static `headers`.
 
 ### Not a relay decorator
 
@@ -128,6 +143,16 @@ calling `broker.publish(...)` manually. FastStream's response-publisher
 flow routes the returned value through the producer; the same
 transactional contract applies (you provide the session, the row commits
 with your domain writes):
+
+!!! note "This pattern is FastAPI-specific"
+    The returned `OutboxResponse` is published **after** the handler
+    returns, so its `session` must outlive the handler call. FastAPI's
+    `Depends(get_session)` provides exactly that — a session torn down by
+    the dependency after the response flow. Opening your own `async with
+    session_factory() as session:` inside the handler does **not** work
+    here: the session closes on `return`, before the row is inserted.
+    Outside FastAPI, call `broker.publish(..., session=session)` directly
+    inside your handler instead (see [§ `broker.publisher`](#not-a-relay-decorator)).
 
 ```python
 from fastapi import Depends

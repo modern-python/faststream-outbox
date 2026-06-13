@@ -36,6 +36,29 @@ def recorder(event: str, tags: dict) -> None:
 broker = OutboxBroker(engine, outbox_table=outbox_table, metrics_recorder=recorder)
 ```
 
+### Bundled adapters
+
+You rarely need to hand-write the callable. Two ready-made recorders ship
+as optional extras and emit the `faststream_outbox_*` series the PromQL
+playbook below keys off:
+
+```python
+from prometheus_client import CollectorRegistry
+from faststream_outbox.metrics.prometheus import PrometheusRecorder
+
+registry = CollectorRegistry()
+broker = OutboxBroker(
+    engine,
+    outbox_table=outbox_table,
+    metrics_recorder=PrometheusRecorder(app_name="checkout", registry=registry),
+)
+```
+
+`OpenTelemetryRecorder` (`faststream_outbox.metrics.opentelemetry`) is the
+OTel equivalent. Full wiring — including running the recorder seam and the
+native middleware together — is in
+[Setup Prometheus and OpenTelemetry](./setup-prometheus-opentelemetry.md).
+
 ### Recorder must not block
 
 The recorder is called from the event loop. **Do not block in it.**

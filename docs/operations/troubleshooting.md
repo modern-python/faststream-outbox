@@ -54,7 +54,11 @@ pattern compounds.
 
 **Diagnose.** Run `await broker.validate_schema()` against the live
 DB (the `[validate]` extra is required). It will surface missing
-columns / indexes on the DLQ table.
+columns / indexes on the DLQ table. A frequent cause on older
+deployments is a hand-written DLQ migration missing the `timer_id`
+column — `validate_schema()` reports it as a missing column on the DLQ
+table. (The [Alembic guide](../operations/alembic.md#adding-the-dlq-after-the-fact)
+now includes it; pre-fix migrations may not.)
 
 **Fix.** Bring the DLQ schema up to spec (apply the missing migration,
 or rename / drop the drifted column / index). After the schema is

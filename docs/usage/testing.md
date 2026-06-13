@@ -10,14 +10,16 @@ matching `TestKafkaBroker` / `TestRabbitBroker`. No `_wait_until`, no
 
 ## Basic test
 
+The examples below assume `asyncio_mode = "auto"` (see
+[pytest-asyncio configuration](#pytest-asyncio-configuration) at the
+bottom), so async test functions need no `@pytest.mark.asyncio` marker.
+
 ```python
-import pytest
 from faststream_outbox import OutboxBroker, make_outbox_table
 from faststream_outbox.testing import TestOutboxBroker
 from sqlalchemy import MetaData
 
 
-@pytest.mark.asyncio
 async def test_handler() -> None:
     metadata = MetaData()
     outbox_table = make_outbox_table(metadata, table_name="outbox")
@@ -82,12 +84,32 @@ expiry / reclaim, `_fetch_loop` error recovery, or honoring `activate_in`
 delays — opt in with `run_loops=True`:
 
 ```python
-async with TestOutboxBroker(broker, run_loops=True):
-    ...  # use feed() / poll until handler observes the row
+import asyncio
+import json
+
+received: list[dict] = []
+
+
+@broker.subscriber("orders")
+async def handle(body: dict) -> None:
+    received.append(body)
+
+
+tb = TestOutboxBroker(broker, run_loops=True)
+async with tb:
+    tb.feed("orders", json.dumps({"order_id": 1}).encode())
+    # the real fetch + worker loops pick the row up asynchronously
+    async with asyncio.timeout(1.0):          # fail fast instead of hanging forever
+        while not received:
+            await asyncio.sleep(0.01)
+
+assert received == [{"order_id": 1}]
 ```
 
-In loop mode, the real `_fetch_loop` / `_worker_loop` run against the fake
-client. Subscribers without registered handlers are skipped in
+`feed(queue, payload, *, headers=None, next_attempt_at=None, timer_id=None)`
+inserts a row straight into the in-memory store and (in loop mode) wakes the
+fetch loop like a production NOTIFY would. In loop mode, the real
+`_fetch_loop` / `_worker_loop` run against the fake client. Subscribers without registered handlers are skipped in
 `_fake_start` (mirrors `OutboxSubscriber.start`'s `if not self.calls:
 return`).
 
