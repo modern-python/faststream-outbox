@@ -190,10 +190,13 @@ Indexes:
     "outbox_lease_idx" btree (queue, acquired_at) WHERE acquired_token IS NOT NULL
     "outbox_pending_idx" btree (queue, next_attempt_at) WHERE acquired_token IS NULL
     "outbox_timer_id_uq" UNIQUE, btree (queue, timer_id) WHERE timer_id IS NOT NULL
+Check constraints:
+    "outbox_lease_ck" CHECK ((acquired_token IS NULL) = (acquired_at IS NULL))
 ```
 
-Three partial indexes show up alongside the columns — the broker uses
-those at runtime; you don't need to think about them.
+Three partial indexes show up alongside the columns, plus a check
+constraint that keeps a lease either fully set or fully unset — the
+broker uses both at runtime; you don't need to think about them.
 
 ## Step 5: Define a handler
 

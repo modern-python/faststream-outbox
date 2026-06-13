@@ -16,8 +16,8 @@ design** the fetch CTE depends on (without those, the disjunctive WHERE
 clause falls back to seq-scan as the table grows); the **fetch-and-claim
 CTE shape** with `FOR UPDATE SKIP LOCKED` that reclaims both unleased rows
 and expired leases without a separate reaper; the
-`_RetryStrategyTemplate` hierarchy enforcing `max_attempts` and
-`max_total_delay_seconds` uniformly; `validate_schema()` via
+retry-strategy hierarchy (`ExponentialRetry`, `NoRetry`, …) enforcing
+`max_attempts` and `max_total_delay_seconds` uniformly; `validate_schema()` via
 Alembic's `autogenerate.compare_metadata`; **drain semantics** on stop with
 the `running` / `_stopping` two-flag dance and parallel-gathered subscriber
 shutdown; **`LISTEN/NOTIFY`** short-circuit on top of polling, with NOTIFY
@@ -83,8 +83,10 @@ the "single transaction with arbitrary domain writes" contract is harder
 to preserve, because the transactional boundary belongs to two different
 systems.
 
-`faststream-outbox` is a strict subset of what a real bus can do —
-one-process producer, one Postgres table — at the price of being
+`faststream-outbox` covers a focused subset of a real bus's delivery
+surface — one-process producer, one Postgres table — while adding
+outbox-native features a bare bus lacks (`cancel_timer`, `timer_id`
+producer-side dedup, scheduled delivery), at the price of being
 Postgres-only and polling-based.
 
 **TL;DR.** Kafka transactions / Rabbit confirms win at scale where the

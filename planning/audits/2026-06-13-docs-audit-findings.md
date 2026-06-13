@@ -5,10 +5,9 @@ slug: 2026-06-13-docs-audit-findings
 scope: docs/ (22 user-facing mkdocs pages)
 prs: []
 outcome: >
-  In progress. The timer_id DLQ cluster (B1–B3, I1), the three CLAUDE.md
-  source-of-truth drifts (C1–C3), and the basic.md runnability bugs
-  (B4, B5) are fixed; the inaccuracy (I2–I15) and improvement (P1–P18)
-  tails are pending. Successor to the
+  In progress. All bugs (B1–B5), the three CLAUDE.md source-of-truth
+  drifts (C1–C3), and the full inaccuracy tail (I1–I15) are fixed; the
+  improvement tail (P1–P18) is pending. Successor to the
   2026-06-12 docs audit (I1–I22, B1–B16) — that pass closed clean; this
   pass re-swept all 22 pages on convenience / readability / consistency /
   factual drift and surfaced a new high-severity DLQ-migration bug plus a
@@ -67,20 +66,20 @@ confusion.
 | B4 | bug | usage/basic.md §Full quickstart | ✅ **fixed** — added the `asyncpg` + `faststream[cli]` prereqs, the required table-creation step (dev `metadata.create_all` + Alembic/tutorial pointers), and gated the run line on the table existing |
 | B5 | bug | usage/basic.md:60 §4 | ✅ **fixed** — annotated `Order` as the reader's own ORM model / domain write |
 | I1 | inaccuracy | usage/dlq.md:55-66 | DLQ "Schema reference" table omits the `timer_id` column (lists 10 of 11) |
-| I2 | inaccuracy | usage/observability.md:61; usage/dlq.md:144 | `exception_type` tag described "always present / `None`"; source **omits the key** for `max_deliveries` and manual `reject()` (usecase.py:721-730) |
-| I3 | inaccuracy | usage/observability.md | "The first eight [PromQL]…" — only **seven** queries precede the DLQ-divergence one |
-| I4 | inaccuracy | usage/observability.md:67-106 | PromQL series (`faststream_outbox_*_total`) come from `PrometheusRecorder` (recorder seam); page never says so — reader assumes native middleware, which emits a different set |
-| I5 | inaccuracy | usage/observability.md:77-80 | "Handler error rate" `status!="acked"` silently counts `lease_lost` (mapped to `status="error"`, prometheus.py:273-278) |
-| I6 | inaccuracy | concepts/comparison.md:86-88 | "strict subset of what a real bus can do" contradicts the bus-gap list (`cancel_timer`, `timer_id` dedup) two lines above |
-| I7 | inaccuracy | concepts/comparison.md | Names private `_RetryStrategyTemplate` in user-facing prose; public surface is `ExponentialRetry` / `NoRetry` |
-| I8 | inaccuracy | tutorials/add-kafka-relay.md:34-37,52,206 | Prose "reaches the host listener at `kafka:9092`" vs advertised `HOST://localhost:9092`; works in-container only by coincidence — explanation is misleading |
-| I9 | inaccuracy | usage/subscriber.md | `TransientOnly` retry example uses `**kw` swallow, hiding the real `get_next_attempt_delay(*, first_attempt_at, last_attempt_at, attempts_count, exception=None)` signature |
-| I10 | inaccuracy | usage/subscriber.md | "get_one()/`async for` not supported" never names `NotImplementedError`; `get_one` also takes `timeout=5.0` |
-| I11 | inaccuracy | usage/router.md | Calls `broker._subscribers` a "list" — it's a `WeakSet` (broker.py:127-129) |
-| I12 | inaccuracy | introduction/how-it-works.md | Worker loop "dispatches via the handler" — vague; the named seam is `dispatch_one(row)` |
-| I13 | inaccuracy | introduction/installation.md:26 | "PostgreSQL 12+" while every example + CI use `postgres:17`; gap unexplained |
-| I14 | inaccuracy | usage/basic.md §1 | "three indexes the broker needs" omits the load-bearing `outbox_lease_ck` CHECK constraint |
-| I15 | inaccuracy | tutorials/first-outbox-app.md Step 4 | Sample `\d outbox` output omits the `Check constraints:` block psql actually prints |
+| I2 ✅ | inaccuracy | usage/observability.md:61; usage/dlq.md:144 | `exception_type` tag described "always present / `None`"; source **omits the key** for `max_deliveries` and manual `reject()` (usecase.py:728-729). **Fixed** in both observability.md:61 and dlq.md:144 |
+| I3 ✅ | inaccuracy | usage/observability.md | "The first eight [PromQL]…" — only **seven** queries precede the DLQ-divergence one. **Fixed** → "first seven" |
+| I4 ✅ | inaccuracy | usage/observability.md:67-106 | PromQL series (`faststream_outbox_*_total`) come from `PrometheusRecorder` (recorder seam); page never says so. **Fixed** — playbook lead-in now names `PrometheusRecorder` and contrasts the native middleware |
+| I5 ✅ | inaccuracy | usage/observability.md:77-80 | "Handler error rate" `status!="acked"` silently counts `lease_lost` (mapped to `status="error"`, prometheus.py:273-278). **Fixed** — caveat added to the query |
+| I6 ✅ | inaccuracy | concepts/comparison.md:86-88 | "strict subset of what a real bus can do" contradicts the bus-gap list two lines above. **Fixed** → "covers a focused subset … while adding outbox-native features a bare bus lacks" |
+| I7 ✅ | inaccuracy | concepts/comparison.md | Names private `_RetryStrategyTemplate` in user-facing prose. **Fixed** → public `ExponentialRetry`/`NoRetry` (also cleaned the adjacent mention in subscriber.md) |
+| I8 ✅ | inaccuracy | tutorials/add-kafka-relay.md:34-37,206 | Prose "reaches the host listener at `kafka:9092`" vs advertised `HOST://localhost:9092`. **Fixed** — consumer bootstrap → `localhost:9092` and prose now matches the advertised address |
+| I9 ✅ | inaccuracy | usage/subscriber.md | `TransientOnly` retry example used a `**kw` swallow, hiding the real signature. **Fixed** — full `get_next_attempt_delay(*, first_attempt_at, last_attempt_at, attempts_count, exception=None)` spelled out |
+| I10 ✅ | inaccuracy | usage/subscriber.md | "get_one()/`async for` not supported" never named the exception. **Fixed** — now states both raise `NotImplementedError` |
+| I11 ✅ | inaccuracy | usage/router.md | Called `broker._subscribers` a "list" — it's a `WeakSet` (broker.py:127-129). **Fixed** |
+| I12 ✅ | inaccuracy | introduction/how-it-works.md | Worker loop "dispatches via the handler" — vague. **Fixed** → names the `dispatch_one` seam |
+| I13 ✅ | inaccuracy | introduction/installation.md:26 | "PostgreSQL 12+" while examples + CI use 17; gap unexplained. **Fixed** — notes the features predate 12 and that 17 is what's exercised |
+| I14 ✅ | inaccuracy | usage/basic.md §1 | "three indexes the broker needs" omitted the `outbox_lease_ck` CHECK. **Fixed** — constraint now named |
+| I15 ✅ | inaccuracy | tutorials/first-outbox-app.md Step 4 | Sample `\d outbox` output omitted the `Check constraints:` block. **Fixed** — block added |
 
 ## Improvements (convenience / readability / gaps)
 

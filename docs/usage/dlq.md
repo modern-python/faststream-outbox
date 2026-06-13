@@ -142,7 +142,7 @@ Tags:
 | `subscriber` | Subscriber handler name (`call_name`). |
 | `deliveries_count` | Attempt count at terminal flush. |
 | `failure_reason` | Same value set as the schema column. |
-| `exception_type` | Always present; the exception class name, or `None` for terminals with no exception (`max_deliveries`, or a manual `reject()` without one). Custom recorders always see the key. |
+| `exception_type` | The exception class name. **Omitted** (not set to `None`) for terminals with no exception — `max_deliveries`, or a manual `reject()` without one — so a custom recorder should treat the key as optional. |
 
 The bundled adapters surface the event without further wiring:
 

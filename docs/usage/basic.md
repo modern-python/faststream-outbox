@@ -17,7 +17,9 @@ outbox_table = make_outbox_table(metadata, table_name="outbox")
 The returned `Table` carries three indexes the broker needs at runtime — a
 partial index for the fetch CTE's unleased branch, a partial index for the
 expired-lease reclaim branch, and a partial unique index for `timer_id`
-deduplication. Alembic autogenerate picks them up alongside the table itself.
+deduplication — plus a `CHECK ((acquired_token IS NULL) = (acquired_at IS
+NULL))` constraint that makes a half-set lease unrepresentable. Alembic
+autogenerate picks them all up alongside the table itself.
 
 ## 2. Create the broker and app
 

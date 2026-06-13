@@ -32,9 +32,10 @@ ZooKeeper service, and Confluent's `cp-kafka:7.6.0` image is known to
 run well on Apple Silicon. Two listeners: one on the host at `localhost:9092`
 (for your `faststream run` process) and one inside the Docker network at
 `kafka:29092` (inter-broker traffic). The Step 5 console consumer runs
-*inside* the broker container via `docker compose exec`, so it reaches the
-host listener at `kafka:9092` directly — no separate in-network client
-listener is needed for it.
+*inside* the broker container via `docker compose exec`, so it bootstraps
+against the host listener at its advertised address `localhost:9092` —
+inside the container the loopback reaches the same `0.0.0.0:9092` listener,
+so no separate in-network client listener is needed for it.
 
 ```yaml title="docker-compose.yml"
 services:
@@ -203,7 +204,7 @@ In a second terminal, attach a console consumer to the topic:
 
 ```bash
 docker compose exec kafka kafka-console-consumer \
-    --bootstrap-server kafka:9092 --topic orders.kafka --from-beginning
+    --bootstrap-server localhost:9092 --topic orders.kafka --from-beginning
 ```
 
 You should see:
