@@ -8,7 +8,9 @@ User-facing: `docs/usage/testing.md`. Invariant summary: `CLAUDE.md` § Test bro
 
 ### Sync (default, `run_loops=False`)
 
-`broker.publish` synchronously routes through `OutboxSubscriber.dispatch_one` — matches the FastStream test-broker idiom (`TestKafkaBroker` / `TestRabbitBroker`). The handler runs before `publish` returns; no background loops. `broker.publish_batch`, `cancel_timer`, and `fetch_unprocessed` are also patched to operate on the fake client (the `session` argument is ignored).
+`broker.publish` synchronously routes through `OutboxSubscriber.dispatch_one` — matches the FastStream test-broker idiom (`TestKafkaBroker` / `TestRabbitBroker`). The handler runs before `publish` returns; no background loops. `broker.publish_batch`, `cancel_timer`, and `fetch_unprocessed` are also patched to operate on the fake client (the `session` argument is **ignored** — `del session` — which diverges from production's `isinstance(session, AsyncSession)` `TypeError`; tests needing the session contract must use a real `OutboxClient`). `OutboxResponse` is *not* faked, so its eager session/queue/activate validation still fires under the test broker.
+
+`_sync_dispatch` claims the just-fed row via the shared `_claim_fake_row` (the same lease + `deliveries_count++` mechanics `FakeOutboxClient.fetch` uses), so the `max_deliveries` boundary runs on one path; only the eligibility gate (`next_attempt_at <= now`) lives in `fetch`, which is why sync mode fires future-dated rows immediately.
 
 The broker's `producer` slot is swapped for `FakeOutboxProducer` (`testing.py`) so `publisher.publish()` lands rows in the same fake store via the FastStream `_basic_publish` flow — tests using `broker.publisher("q").publish(...)` work identically to `broker.publish(queue="q", ...)`.
 
