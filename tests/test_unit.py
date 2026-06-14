@@ -657,6 +657,27 @@ async def test_broker_ping_when_engine_query_fails() -> None:
     assert await broker.ping() is False
 
 
+async def test_broker_ping_times_out_on_hung_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    """F2-12: ping() bounds SELECT 1 with a timeout so a half-dead socket can't hang the liveness probe."""
+    monkeypatch.setattr("faststream_outbox.client._PING_TIMEOUT_SECONDS", 0.01)
+
+    class _HangConn:
+        async def execute(self, *_args: object, **_kwargs: object) -> None:
+            await asyncio.sleep(1.0)  # longer than the patched timeout → asyncio.timeout cancels it
+
+    class _ConnCtx:
+        async def __aenter__(self) -> "_HangConn":
+            return _HangConn()
+
+        async def __aexit__(self, *_exc: object) -> bool:
+            return False
+
+    engine = AsyncMock()
+    engine.connect = _ConnCtx  # AsyncEngine.connect() returns an async CM (sync call)
+    broker = _make_broker(engine)
+    assert await broker.ping() is False
+
+
 async def test_broker_stop_logs_subscriber_failure_and_completes() -> None:
     """A raising sub.stop must be logged via the helper, swallowed, and not re-raised."""
     broker = _make_broker()
@@ -3593,6 +3614,14 @@ async def test_broker_publish_batch_empty_rejects_empty_queue() -> None:
     broker = _make_broker()
     with pytest.raises(ValueError, match="non-empty"):
         await broker.publish_batch(queue="", session=_make_session_mock())  # no bodies
+
+
+async def test_fetch_unprocessed_rejects_non_positive_limit() -> None:
+    """F4-04: a non-positive limit raises rather than hitting SQL (limit=-1) or silently returning none (limit=0)."""
+    broker = _make_broker()
+    for bad in (0, -1):
+        with pytest.raises(ValueError, match="limit"):
+            await broker.fetch_unprocessed(session=_make_session_mock(), limit=bad)
 
 
 def test_asyncapi_document_populates_channels_and_operations() -> None:

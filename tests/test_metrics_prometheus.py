@@ -132,6 +132,20 @@ def test_prometheus_published_event_uses_destination_label() -> None:
     )
 
 
+def test_prometheus_published_without_count_defaults_to_zero() -> None:
+    """F6-02: a published success event missing ``count`` records no message (default 0, matching the OTel adapter)."""
+    reg, rec = _make_recorder()
+    rec("published", {"queue": "q", "status": "success", "duration_seconds": 0.001})
+    assert (
+        _sample(
+            reg,
+            "faststream_published_messages_total",
+            {"app_name": "", "broker": "outbox", "destination": "q", "status": "success"},
+        )
+        is None
+    )
+
+
 def test_prometheus_published_error_status_total_fires_at_count_zero() -> None:
     """
     P28: a status="error" published event (count=0) must increment the error-status total.
