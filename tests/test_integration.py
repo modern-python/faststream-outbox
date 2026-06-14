@@ -25,6 +25,7 @@ from faststream_outbox import (
 )
 from faststream_outbox.client import OutboxClient
 from faststream_outbox.envelope import _encode_payload as encode_payload
+from faststream_outbox.publisher.fake import OutboxFakePublisher
 from faststream_outbox.testing import FakeOutboxClient
 
 
@@ -485,6 +486,37 @@ async def test_publish_inserts_in_caller_transaction(pg_engine, outbox_table) ->
         # After commit (exited session.begin()): the row is visible.
         count_after = await _row_count(pg_engine, outbox_table)
         assert count_after == 1
+
+
+async def test_outbox_response_followon_row_commits_with_handler_transaction(pg_engine, outbox_table) -> None:
+    """
+    F7-02: a returned OutboxResponse's follow-on row commits with the handler's transaction.
+
+    The worker loop publishes a returned OutboxResponse through ``OutboxFakePublisher``
+    (``result_msg.as_publish_command()`` → ``producer.publish`` on the response's own
+    session). This drives that exact path on real Postgres and pins that the resulting
+    INSERT participates in the caller's open transaction: invisible to a separate
+    connection until commit, then committed atomically with the handler's writes —
+    mirroring ``test_publish_inserts_in_caller_transaction`` for the direct path. A
+    regression that published the follow-on row on a fresh connection would make the
+    mid-transaction count non-zero.
+    """
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    response_publisher = OutboxFakePublisher(broker.config.producer)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+
+    async with session_factory() as session:
+        async with session.begin():
+            response = OutboxResponse(body={"chained": True}, queue="downstream", session=session)
+            await response_publisher._publish(response.as_publish_command(), _extra_middlewares=[])  # noqa: SLF001
+            # Mid-transaction: a separate connection must not see the follow-on row.
+            assert await _row_count(pg_engine, outbox_table) == 0
+        # After the handler's transaction commits, exactly the chained row is visible.
+        assert await _row_count(pg_engine, outbox_table) == 1
+
+    async with session_factory() as session:
+        rows = await broker.fetch_unprocessed(session=session, queue="downstream")
+    assert [r.queue for r in rows] == ["downstream"]
 
 
 async def test_publish_payload_is_decodable_by_subscriber(pg_engine, outbox_table) -> None:
