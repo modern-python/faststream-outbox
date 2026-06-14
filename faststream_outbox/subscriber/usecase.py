@@ -106,15 +106,30 @@ def _compute_backoff(attempt: int, ceiling: float, *, base: float = 1.0) -> floa
     return min(base * (2.0 ** (attempt - 1)) * random.uniform(0.5, 1.5), ceiling)  # noqa: S311
 
 
-def _truncate_exception(exc: BaseException | None) -> str | None:
-    """Render *exc* via ``repr`` and bound it to ``_LAST_EXCEPTION_MAX_CHARS``."""
-    if exc is None:
-        return None
-    rendered = repr(exc)
+def _truncate_str(rendered: str) -> str:
+    """Bound *rendered* to ``_LAST_EXCEPTION_MAX_CHARS``, appending ``…[truncated]`` if cut."""
     if len(rendered) <= _LAST_EXCEPTION_MAX_CHARS:
         return rendered
     keep = _LAST_EXCEPTION_MAX_CHARS - len(_TRUNCATION_SUFFIX)
     return rendered[:keep] + _TRUNCATION_SUFFIX
+
+
+def _render_last_exception(
+    exc: BaseException | None,
+    renderer: "Callable[[BaseException], str | None] | None",
+) -> str | None:
+    """
+    Render *exc* for the DLQ ``last_exception`` column, then bound its length.
+
+    Default (``renderer is None``) is ``repr(exc)`` — full forensic detail. A deployment
+    handling PII can pass ``last_exception_renderer`` to redact (e.g. ``type(exc).__name__``)
+    or drop it entirely (return ``None``) so payload/credential-bearing reprs never land in
+    the audit table (F3-01). The custom renderer's output is still length-capped.
+    """
+    if exc is None:
+        return None
+    rendered = renderer(exc) if renderer is not None else repr(exc)
+    return None if rendered is None else _truncate_str(rendered)
 
 
 if typing.TYPE_CHECKING:
@@ -719,7 +734,10 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         if row.terminal_failure_reason is not None and self._outer_config.dlq_table is not None:
             dlq_payload = {
                 "failure_reason": row.terminal_failure_reason,
-                "last_exception": _truncate_exception(row.last_exception),
+                "last_exception": _render_last_exception(
+                    row.last_exception,
+                    self._outer_config.last_exception_renderer,
+                ),
             }
         deleted = await self._client.delete_with_lease(
             writer_conn,

@@ -120,6 +120,27 @@ poison row by hundreds of milliseconds and bloat the DLQ table. 8 KiB
 preserves the traceback and any structured detail while bounding worst
 case.
 
+## Redacting `last_exception` (PII / secrets)
+
+That same `repr` is exactly why a poison-message exception can embed a
+request body, a rejected row, or a credential — and the DLQ persists it.
+For deployments handling sensitive data, pass `last_exception_renderer` to
+transform (or drop) the stored text:
+
+```python
+# Store only the exception class — no message, no payload.
+broker = OutboxBroker(engine, outbox_table=t, dlq_table=dlq,
+                      last_exception_renderer=lambda exc: type(exc).__name__)
+
+# Or drop the detail entirely:
+broker = OutboxBroker(engine, outbox_table=t, dlq_table=dlq,
+                      last_exception_renderer=lambda exc: None)
+```
+
+The renderer runs per terminal failure; its output is still length-capped
+at 8 KiB. The default (`None`) keeps the full `repr` for forensic detail.
+The same kwarg is available on the FastAPI `OutboxRouter`.
+
 ## Schema validation
 
 When `dlq_table` is set, `await broker.validate_schema()` checks both

@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from faststream_outbox._time import utcnow
 from faststream_outbox.client import AbstractOutboxClient, OutboxClient, _row_to_message
-from faststream_outbox.configs import OutboxBrokerConfig
+from faststream_outbox.configs import LastExceptionRenderer, OutboxBrokerConfig
 from faststream_outbox.message import OutboxInnerMessage
 from faststream_outbox.metrics import MetricsRecorder, _noop_recorder
 from faststream_outbox.publisher.producer import OutboxProducer
@@ -161,6 +161,8 @@ class OutboxBroker(
         routers: Sequence[Registrator[OutboxInnerMessage]] = (),
         # Metrics
         metrics_recorder: MetricsRecorder | None = None,
+        # DLQ exception rendering (F3-01): None → repr(exc); set to redact PII/secrets or drop it.
+        last_exception_renderer: "LastExceptionRenderer | None" = None,
         # Logging
         logger: LoggerProto | None = EMPTY,
         log_level: int = logging.INFO,
@@ -187,6 +189,7 @@ class OutboxBroker(
             client=client,
             metrics_recorder=recorder,
             dlq_table=dlq_table,
+            last_exception_renderer=last_exception_renderer,
             broker_middlewares=(_CaptureExceptionMiddleware, *middlewares),
             broker_parser=parser,
             broker_decoder=decoder,

@@ -1751,6 +1751,7 @@ def _make_broker_with_dlq(
     max_deliveries: int | None = None,
     retry_strategy: RetryStrategyProto | None = None,
     ack_policy: AckPolicy | None = None,
+    last_exception_renderer: Callable[[BaseException], str | None] | None = None,
 ) -> tuple[OutboxBroker, list[str], list[Exception]]:
     """Build a broker with DLQ wired in. Returns (broker, received_payloads, raised)."""
     metadata = MetaData()
@@ -1759,6 +1760,8 @@ def _make_broker_with_dlq(
     kwargs: dict[str, typing.Any] = {"outbox_table": table, "dlq_table": dlq}
     if recorder is not None:
         kwargs["metrics_recorder"] = recorder
+    if last_exception_renderer is not None:
+        kwargs["last_exception_renderer"] = last_exception_renderer
     broker = OutboxBroker(**kwargs)
 
     received: list[str] = []
@@ -1800,6 +1803,38 @@ async def test_fake_dlq_captures_retry_terminal_failure() -> None:
     # F7-05: the headers audit column must round-trip into the DLQ (the str body's
     # envelope content-type is the off-Postgres guard for the fake's DLQ header copy).
     assert row["headers"]["content-type"] == "text/plain"
+
+
+async def test_fake_dlq_redacts_last_exception_with_renderer() -> None:
+    """F3-01: last_exception_renderer transforms the DLQ exception text (here, to the class name only)."""
+    broker, _received, raised = _make_broker_with_dlq(
+        retry_strategy=NoRetry(),
+        last_exception_renderer=lambda exc: type(exc).__name__,
+    )
+    raised.append(RuntimeError("secret-token=abc123"))  # message would leak under the default repr
+    test_broker = TestOutboxBroker(broker)
+
+    async with test_broker:
+        await broker.publish("audit-me", queue="orders")  # ty: ignore[missing-argument]
+
+    row = test_broker.fake_client.dlq_rows[0]
+    assert row["last_exception"] == "RuntimeError"  # redacted: no message, no payload
+    assert "secret-token" not in row["last_exception"]
+
+
+async def test_fake_dlq_drops_last_exception_when_renderer_returns_none() -> None:
+    """F3-01: a renderer returning None stores no exception detail at all."""
+    broker, _received, raised = _make_broker_with_dlq(
+        retry_strategy=NoRetry(),
+        last_exception_renderer=lambda _exc: None,
+    )
+    raised.append(RuntimeError("boom"))
+    test_broker = TestOutboxBroker(broker)
+
+    async with test_broker:
+        await broker.publish("audit-me", queue="orders")  # ty: ignore[missing-argument]
+
+    assert test_broker.fake_client.dlq_rows[0]["last_exception"] is None
 
 
 async def test_fake_dlq_captures_rejected_failure() -> None:
