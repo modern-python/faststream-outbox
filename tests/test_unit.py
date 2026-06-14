@@ -3,6 +3,7 @@ import datetime as _dt
 import json
 import logging
 import math
+import re
 import typing
 import uuid
 import warnings
@@ -3058,7 +3059,9 @@ async def test_producer_emit_metric_swallows_recorder_exceptions(caplog: pytest.
     session = _make_session_mock(scalar_return=99)
     cmd = OutboxPublishCommand({"x": 1}, queue="orders", session=session)
 
-    with caplog.at_level(logging.DEBUG, logger="faststream_outbox.publisher.producer"):
+    # The producer now delegates to faststream_outbox.metrics._safe_emit, so the
+    # swallow-and-DEBUG-log fires on that logger rather than the producer's own.
+    with caplog.at_level(logging.DEBUG, logger="faststream_outbox.metrics"):
         row_id = await producer.publish(cmd)
 
     # publish completes despite the raising recorder.
@@ -3504,3 +3507,37 @@ def test_default_retry_strategy_pins_documented_parameters() -> None:
     assert strategy.max_delay_seconds == 300.0
     assert strategy.max_attempts == 10
     assert strategy.jitter_factor == 0.2
+
+
+async def test_dlq_cte_insert_columns_match_make_dlq_table() -> None:
+    """
+    Guard the hardcoded DLQ INSERT column list against drift from ``make_dlq_table``.
+
+    ``_build_dlq_cte_stmt`` hardcodes the DLQ column list as an f-string with nothing
+    linking it to the table definition (audit 2026-06-14). A future NOT-NULL-without-
+    default column added to ``make_dlq_table`` would make every terminal DLQ write fail
+    (poison rows that retry forever); a nullable one would silently drop audit data. Pin
+    the two together: the CTE's INSERT columns must equal the DLQ table's columns minus
+    the autoincrement ``id`` and the server-default ``failed_at`` (the two the CTE omits
+    on purpose).
+    """
+    metadata = MetaData()
+    outbox = make_outbox_table(metadata, table_name="outbox")
+    dlq = make_dlq_table(metadata, table_name="outbox_dlq")
+    engine = create_async_engine("postgresql+asyncpg://u:p@localhost/db")  # never connected
+    try:
+        client = OutboxClient(engine, outbox, dlq_table=dlq)
+        stmt, _ = client._build_dlq_cte_stmt(  # noqa: SLF001
+            1,
+            uuid.uuid4(),
+            {"failure_reason": "x", "last_exception": "y"},
+        )
+        sql = str(stmt)
+    finally:
+        await engine.dispose()
+
+    match = re.search(r"INSERT INTO [^(]+\(([^)]+)\)", sql)
+    assert match is not None, f"could not find INSERT column list in: {sql}"
+    insert_cols = {c.strip() for c in match.group(1).split(",")}
+    expected = {c.name for c in dlq.columns} - {"id", "failed_at"}
+    assert insert_cols == expected, f"DLQ CTE INSERT columns {insert_cols} drifted from table columns {expected}"

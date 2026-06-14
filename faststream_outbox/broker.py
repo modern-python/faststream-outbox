@@ -47,6 +47,7 @@ if typing.TYPE_CHECKING:
 
     from fast_depends.dependencies import Dependant
     from fast_depends.library.serializer import SerializerProto
+    from faststream._internal.basic_types import SendableMessage
     from faststream._internal.context.repository import ContextRepo
     from sqlalchemy import Table
     from sqlalchemy.ext.asyncio import AsyncEngine
@@ -518,6 +519,15 @@ class OutboxBroker(
         result = await session.execute(stmt)
         return [_row_to_message(dict(row)) for row in result.mappings().all()]
 
-    async def request(self, *args: typing.Any, **kwargs: typing.Any) -> typing.NoReturn:
-        msg = "OutboxBroker does not support request-reply"
+    async def request(
+        self,
+        message: "SendableMessage" = None,
+        queue: str = "",
+        /,
+        timeout: float = 0.5,  # noqa: ASYNC109  # mirrors upstream BrokerUsecase.request; never used (always raises)
+    ) -> typing.NoReturn:
+        # Mirror upstream BrokerUsecase.request's signature (message, queue, /, timeout)
+        # so callers and IDEs see the real contract — the outbox is fire-and-forget, so
+        # the only surprise is the NotImplementedError, not an opaque (*args, **kwargs).
+        msg = "OutboxBroker does not support request-reply (the outbox is fire-and-forget)"
         raise NotImplementedError(msg)

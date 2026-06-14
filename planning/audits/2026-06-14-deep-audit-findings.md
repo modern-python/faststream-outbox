@@ -69,6 +69,8 @@ None.
 
 ### [LOW][bug] `validate_schema()` cannot detect a missing/wrong `_lease_ck` CHECK constraint; docstring falsely claims the table declares no CHECK
 
+> **PARTIALLY RESOLVED (2026-06-14)** — the false `_drift_entry_to_error` docstring is corrected. The actual `pg_constraint` probe (a new failure mode in `validate_schema`) is **deferred to the behavior-change PR**, since it can make a DB that passed before start failing.
+
 `faststream_outbox/client.py:587-621` (docstring at 597-599); constraint declared at `schema.py:92-95`.
 
 **Problem.** `validate_schema()` never verifies the load-bearing `<table>_lease_ck` CHECK `(acquired_token IS NULL) = (acquired_at IS NULL)`. Alembic's `compare_metadata` registers no check-constraint comparator (verified against installed alembic 1.18.4: only indexes/uniques, FKs, nullability), so `_run_validate` emits no op for a missing/wrong CHECK; `_drift_entry_to_error` has no `add_constraint` branch anyway; and `_validate_index_predicates_sync` probes only the three partial *indexes*. So a DB lacking (or with a disabled/wrong) `_lease_ck` passes `validate_schema()` clean. The `_drift_entry_to_error` docstring compounds this: it asserts "The canonical outbox table declares no CHECK / FK / UNIQUE constraints (only the autoincrement PK)" — flatly false (`schema.py` declares both the CHECK and a unique index). The 0.9.0 release note (`planning/releases/0.9.0.md:93`) similarly over-claims that autogenerate will add the CHECK.
@@ -89,6 +91,8 @@ None.
 
 ### [LOW][refactor] DLQ INSERT column list is a hardcoded SQL string that can silently drift from `make_dlq_table`
 
+> **RESOLVED (2026-06-14)** — `tests/test_unit.py::test_dlq_cte_insert_columns_match_make_dlq_table` pins the CTE's INSERT columns to `make_dlq_table`'s columns minus `id`/`failed_at`, so adding a column to the table without updating the CTE fails the test. (Took the guard-test option, not the CTE rewrite.)
+
 `faststream_outbox/client.py:318-331` (`_build_dlq_cte_stmt`) vs `schema.py:148-166` (`make_dlq_table`).
 
 **Problem.** The DLQ CTE hardcodes the column list (`original_id, queue, payload, headers, deliveries_count, created_at, failure_reason, last_exception, timer_id`) as an f-string. `make_dlq_table()` independently declares those columns plus `id` (autoincrement PK) and `failed_at` (NOT NULL, server-default). Nothing programmatically links the two — the P9 `timer_id` comment in both files confirms they were already hand-edited in lockstep once. The only unit test asserts on schema-qualified table *names*, never the column list.
@@ -98,6 +102,8 @@ None.
 **Fix.** Derive the INSERT/SELECT column list from `self._dlq_table.c` (excluding the autoincrement PK and server-default-only columns), or add a unit test asserting the CTE column list equals `make_dlq_table(...).columns` minus `id`/`failed_at`. At minimum, cross-reference comments on both sites flagging the drift hazard.
 
 ### [LOW][refactor] Recorder swallow-and-log logic duplicated instead of reusing `_safe_emit`
+
+> **RESOLVED (2026-06-14)** — `OutboxProducer._emit_metric` now delegates to `metrics._safe_emit`; the now-dead module logger/import were removed. The producer test's caplog logger moved to `faststream_outbox.metrics` accordingly.
 
 `faststream_outbox/publisher/producer.py:64-68` vs `metrics/__init__.py:74-85`.
 
@@ -109,6 +115,8 @@ None.
 
 ### [LOW][design] Inconsistent `body` type hint across the three publish entry points
 
+> **RESOLVED (2026-06-14)** — `OutboxPublisher.publish` now uses `body: typing.Any`, matching `broker.publish` and `OutboxResponse`.
+
 `broker.py:373` (`body: typing.Any`), `publisher/usecase.py:70` (`body: SendableMessage`), `response.py:136` (`body: typing.Any`); `publish_batch` uses `*bodies: typing.Any`.
 
 **Problem.** The same logical `body` parameter is typed three ways, with the *narrowest* (`SendableMessage`) on the publisher — even though all three converge on `OutboxPublishCommand.__init__(body: typing.Any)` and the identical `_encode_payload` path. Both publish methods already carry `# ty: ignore[invalid-method-override]`, so the publisher is not forced to match an upstream type. No documented rationale; CLAUDE.md calls the publisher a "typed wrapper around `broker.publish` with the same transactional contract," implying parity.
@@ -118,6 +126,8 @@ None.
 **Fix.** Use `typing.Any` consistently on `broker.publish`, `OutboxPublisher.publish`, and `OutboxResponse.__init__`.
 
 ### [LOW][design] `broker.request` override is `*args, **kwargs` — drops the typed contract and IDE help
+
+> **RESOLVED (2026-06-14)** — `OutboxBroker.request` now mirrors upstream `BrokerUsecase.request`'s signature `(message, queue, /, timeout=0.5)` and still raises `NotImplementedError`.
 
 `faststream_outbox/broker.py:521-523` vs the typed sibling `OutboxPublisher.request` at `publisher/usecase.py:118-127`.
 
@@ -129,6 +139,8 @@ None.
 
 ### [LOW][test] Worker-loop reconnect on a poisoned writer connection only mock-tested
 
+> **RESOLVED (2026-06-14)** — `tests/test_integration.py::test_worker_rebuilds_writer_connection_after_flush_failure` makes a real terminal `delete_with_lease` raise once against live Postgres, then asserts the rebuilt writer connection drains the redelivered row.
+
 `tests/test_unit.py:2164-2330`; production path `_run_with_reconnect` at `subscriber/usecase.py:471-516`, AUTOCOMMIT re-applied at `468`.
 
 **Problem.** The "flush exception propagates → worker rebuilds its cached AUTOCOMMIT writer connection" path is exercised only with MagicMock engines (`test_worker_loop_reconnects_after_error` asserts `connect.call_count == 2`). No integration test injects a real DB error/connection drop mid-flush and verifies the worker rebuilds the writer conn and resumes draining against live Postgres.
@@ -139,6 +151,8 @@ None.
 
 ### [LOW][test] LISTEN-failure fallback to polling never verified end-to-end against real Postgres
 
+> **RESOLVED (2026-06-14)** — `tests/test_integration.py::test_listen_failure_falls_back_to_polling_against_real_postgres` patches `_open_listen_connection` to return None against live Postgres and asserts the row is still delivered via polling.
+
 `tests/test_unit.py:1682-1745, 2333-2352`; fallback path `subscriber/usecase.py:282-298, 363-369`.
 
 **Problem.** "LISTEN failures log once and fall back to polling" is tested only by mocking `asyncpg.connect`/`add_listener` to fail. No integration test runs a real subscriber whose LISTEN connection can't be established and confirms it still delivers rows via the polling interval against live Postgres.
@@ -148,6 +162,8 @@ None.
 **Fix.** Add an integration test that patches `_open_listen_connection` to return `None` while running against real Postgres, publishes a row, and asserts delivery within ~`max_fetch_interval`.
 
 ### [LOW][refactor] Stale comment references a renamed method (`_build_dlq_cte`)
+
+> **RESOLVED (2026-06-14)** — comment now references `_build_dlq_cte_stmt`.
 
 `faststream_outbox/client.py:541`.
 
