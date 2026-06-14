@@ -397,6 +397,10 @@ class OutboxClient(AbstractOutboxClient):
             # and later breaks the producer's ON CONFLICT arbiter. Probe the predicates
             # directly against the live catalog.
             errors.extend(await conn.run_sync(_validate_index_predicates_sync, self._table))
+            # Alembic's compare_metadata has no check-constraint comparator, so a missing
+            # or altered <table>_lease_ck (the half-set-lease guard) passes the diff above
+            # silently. Probe pg_constraint directly, mirroring the partial-index probe.
+            errors.extend(await conn.run_sync(_validate_check_constraints_sync, self._table))
             if self._dlq_table is not None:
                 errors.extend(await conn.run_sync(_validate_dlq_schema_sync, self._dlq_table))
         if errors:
@@ -490,6 +494,57 @@ def _validate_index_predicates_sync(connection: "Connection", table: "Table") ->
             elif _normalize_predicate(predicate) != want:
                 got = _normalize_predicate(predicate)
                 errors.append(f"index {name!r} has wrong partial predicate: expected '{want}', got '{got}'")
+    return errors
+
+
+_CHECK_CONSTRAINT_QUERY = text(
+    "SELECT con.conname AS name, pg_get_constraintdef(con.oid) AS definition "
+    "FROM pg_constraint con "
+    "JOIN pg_class t ON t.oid = con.conrelid "
+    "JOIN pg_namespace n ON n.oid = t.relnamespace "
+    "WHERE t.relname = :table AND n.nspname = COALESCE(:schema, current_schema()) "
+    "AND con.contype = 'c'",
+)
+
+# Expected CHECK-constraint predicates, keyed by the constraint-name suffix make_outbox_table
+# uses. Normalized form (lowercased, parens/whitespace collapsed, leading ``check`` stripped)
+# of ``(acquired_token IS NULL) = (acquired_at IS NULL)``.
+_EXPECTED_CHECK_CONSTRAINTS = {
+    "_lease_ck": "acquired_token is null = acquired_at is null",
+}
+
+
+def _validate_check_constraints_sync(connection: "Connection", table: "Table") -> list[str]:
+    """
+    Compare the live CHECK constraint(s) against what the package expects.
+
+    Alembic's ``compare_metadata`` registers no check-constraint comparator, so a missing
+    or altered ``<table>_lease_ck`` — the ``(acquired_token IS NULL) = (acquired_at IS NULL)``
+    invariant that makes a half-set lease unrepresentable — slips through :func:`_run_validate`
+    entirely. Probe ``pg_constraint`` directly, mirroring :func:`_validate_index_predicates_sync`.
+
+    Flags both a **missing** constraint and one whose normalized predicate **drifted**.
+    """
+    rows = (
+        connection.execute(
+            _CHECK_CONSTRAINT_QUERY,
+            {"table": table.name, "schema": table.schema},
+        )
+        .mappings()
+        .all()
+    )
+    live = {row["name"]: row["definition"] for row in rows}
+    errors: list[str] = []
+    for suffix, want in _EXPECTED_CHECK_CONSTRAINTS.items():
+        name = f"{table.name}{suffix}"
+        if name not in live:
+            errors.append(f"missing CHECK constraint {name!r} (expected '{want}')")
+            continue
+        # pg_get_constraintdef returns e.g. ``CHECK (((a IS NULL) = (b IS NULL)))``; strip the
+        # leading ``check`` keyword after normalizing away parens/case/whitespace.
+        got = _normalize_predicate(live[name]).removeprefix("check ").strip()
+        if got != want:
+            errors.append(f"CHECK constraint {name!r} has wrong predicate: expected '{want}', got '{got}'")
     return errors
 
 
@@ -598,8 +653,8 @@ def _drift_entry_to_error(entry: "tuple[typing.Any, ...]", table_name: str) -> s
     a CHECK (``<table>_lease_ck``) and a partial unique index (``<table>_timer_id_uq``):
     the unique index surfaces as ``add_index`` above, but Alembic's ``compare_metadata``
     has no check-constraint comparator, so a missing or altered CHECK never appears in
-    this diff at all (a known ``validate_schema`` blind spot — detecting it needs a
-    separate ``pg_constraint`` catalog probe).
+    this diff at all. That gap is covered separately by
+    :func:`_validate_check_constraints_sync` (a direct ``pg_constraint`` probe).
     """
     op = entry[0]
     if op == "add_table":

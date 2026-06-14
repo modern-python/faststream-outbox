@@ -13,6 +13,7 @@ The subscriber carries two flags during shutdown: `self.running` (FastStream's e
 - `_fetch_inner`'s loop guard checks both: `while self.running and not self._stopping:`
 - The worker loop only checks `running`.
 - `stop()` flips `_stopping`, kicks the fetch loop awake via `_notify_event` (in case it's parked in an idle `_wait_for_notify_or_timeout`), waits up to `graceful_timeout` for `_inflight.join()`, then flips `running=False` and cancels the spawned tasks.
+- **`graceful_timeout=None`** stays unbounded where FastStream uses it that way (e.g. `ping()`), but the drain wait clamps `None` to a finite fallback (`_DEFAULT_DRAIN_TIMEOUT_SECONDS = 15.0`). `anyio.move_on_after(None)` has deadline `inf`, so without the clamp a single wedged handler would make `_inflight.join()` — and thus `stop()` — never return.
 
 **Why we skip `super().stop()`.** Its `MultiLock.wait_release(graceful_timeout)` would either return instantly (healthy path; `_inflight.join()` already waited a stricter condition) or re-wait the same stuck handlers for another full budget (wedged path; **2× shutdown regression**). The subscriber inlines `TasksMixin.stop`'s cleanup body instead. Per-subscriber shutdown bound: `graceful_timeout`.
 

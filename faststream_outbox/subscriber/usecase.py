@@ -57,6 +57,11 @@ _BACKOFF_MAX_SECONDS = 30.0
 # failing is treated as recovered: the next failure starts a fresh backoff
 # sequence instead of inheriting the lifetime error count (B3).
 _BACKOFF_RESET_THRESHOLD_SECONDS = 60.0
+# Fallback drain budget when graceful_timeout is None. None means "unbounded" for
+# ping(), but an unbounded drain lets a single wedged handler hang stop() forever
+# (anyio.move_on_after(None) has deadline=inf), so the drain path clamps to this.
+# Mirrors OutboxBroker/OutboxRouter's graceful_timeout=15.0 default.
+_DEFAULT_DRAIN_TIMEOUT_SECONDS = 15.0
 
 
 # Marker exception raised by programming guards inside ``process_message`` (e.g.
@@ -241,7 +246,13 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         #   SubscriberUsecase.stop -> faststream/_internal/endpoint/subscriber/usecase.py
         self._stopping = True
         self._notify_event.set()
-        with anyio.move_on_after(self._outer_config.graceful_timeout):
+        # graceful_timeout=None stays "unbounded" for ping(), but the drain must be
+        # strict-bound or one wedged handler hangs stop() forever — clamp None to a
+        # finite fallback so move_on_after always has a real deadline (audit 2026-06-14).
+        drain_timeout = self._outer_config.graceful_timeout
+        if drain_timeout is None:
+            drain_timeout = _DEFAULT_DRAIN_TIMEOUT_SECONDS
+        with anyio.move_on_after(drain_timeout):
             await self._inflight.join()
         self.running = False
         tasks = list(self.tasks)

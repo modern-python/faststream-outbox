@@ -1777,3 +1777,73 @@ async def test_worker_rebuilds_writer_connection_after_flush_failure(
 
     assert calls["n"] >= 2, "the terminal write must be retried after the connection rebuild"
     assert received  # handler ran (at least once; redelivery may run it again)
+
+
+# --- behavior-change Lows (audit 2026-06-14) ----------------------------------
+
+
+async def test_graceful_timeout_none_still_bounds_drain(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+) -> None:
+    """
+    ``graceful_timeout=None`` must not hang ``stop()`` on a wedged handler.
+
+    None stays "unbounded" for ``ping()``, but the drain clamps it to a finite fallback so
+    a single stuck handler can't make ``stop()`` (hence pod shutdown) hang forever. Without
+    the clamp ``anyio.move_on_after(None)`` has deadline=inf and this test would hang. The
+    module fallback is patched down so the test stays fast.
+    """
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table, graceful_timeout=None)
+    started = asyncio.Event()
+
+    @broker.subscriber("orders", min_fetch_interval=0.02, max_fetch_interval=0.05)
+    async def handle(body: dict[str, Any]) -> None:
+        del body
+        started.set()
+        await asyncio.sleep(60.0)  # wedged — never returns voluntarily
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    with mock.patch("faststream_outbox.subscriber.usecase._DEFAULT_DRAIN_TIMEOUT_SECONDS", 0.3):
+        async with broker:
+            async with session_factory() as session, session.begin():
+                await broker.publish({"i": 0}, queue="orders", session=session)
+            await asyncio.wait_for(started.wait(), timeout=3.0)
+            start = asyncio.get_event_loop().time()
+            await broker.stop()
+            elapsed = asyncio.get_event_loop().time() - start
+
+    assert elapsed < 0.7, f"broker.stop() took {elapsed:.3f}s — graceful_timeout=None did not clamp the drain"
+    # Row preserved with its lease set; another replica reclaims after lease_ttl.
+    assert await _row_count(pg_engine, outbox_table) == 1
+
+
+async def test_validate_schema_fails_when_lease_check_constraint_missing(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+) -> None:
+    """A dropped ``<table>_lease_ck`` CHECK must be caught — alembic's diff can't see it (audit 2026-06-14)."""
+    drop_sql = f'ALTER TABLE "{outbox_table.name}" DROP CONSTRAINT "{outbox_table.name}_lease_ck"'
+    async with pg_engine.begin() as conn:
+        await conn.exec_driver_sql(drop_sql)
+    client = OutboxClient(pg_engine, outbox_table)
+    with pytest.raises(RuntimeError, match="missing CHECK constraint"):
+        await client.validate_schema()
+
+
+async def test_validate_schema_fails_when_lease_check_constraint_predicate_wrong(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+) -> None:
+    """A ``<table>_lease_ck`` with a drifted predicate must be caught by the pg_constraint probe."""
+    name = outbox_table.name
+    async with pg_engine.begin() as conn:
+        await conn.exec_driver_sql(f'ALTER TABLE "{name}" DROP CONSTRAINT "{name}_lease_ck"')
+        # Re-add under the same name with a different (wrong) predicate.
+        await conn.exec_driver_sql(
+            f'ALTER TABLE "{name}" ADD CONSTRAINT "{name}_lease_ck" '
+            f"CHECK (acquired_token IS NOT NULL OR acquired_at IS NULL)",
+        )
+    client = OutboxClient(pg_engine, outbox_table)
+    with pytest.raises(RuntimeError, match="wrong predicate"):
+        await client.validate_schema()
