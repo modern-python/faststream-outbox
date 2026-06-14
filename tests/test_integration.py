@@ -13,7 +13,7 @@ import pytest
 from faststream.kafka import KafkaBroker, TestKafkaBroker
 from sqlalchemy import MetaData, Table, event, insert, select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from faststream_outbox import (
     ConstantRetry,
@@ -1658,7 +1658,8 @@ async def test_relay_dual_fire_guard_through_worker_loop_leaves_row_and_logs(
         lease_ttl_seconds=30.0,  # long: keep redelivery noise out of the assertion window
     )
     async def relay(body: dict[str, Any]) -> OutboxResponse:
-        return OutboxResponse(body=body, queue="next_queue", session=None)  # ty: ignore[invalid-argument-type]
+        # Valid session so eager validation passes; the dual-fire guard fires before it is used.
+        return OutboxResponse(body=body, queue="next_queue", session=mock.AsyncMock(spec=AsyncSession))
 
     errors: list[str] = []
     session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)

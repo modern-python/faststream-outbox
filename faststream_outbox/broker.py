@@ -36,7 +36,7 @@ from faststream_outbox.message import OutboxInnerMessage
 from faststream_outbox.metrics import MetricsRecorder, _noop_recorder
 from faststream_outbox.publisher.producer import OutboxProducer
 from faststream_outbox.registrator import OutboxRegistrator
-from faststream_outbox.response import OutboxPublishCommand
+from faststream_outbox.response import OutboxPublishCommand, _validate_publish_args
 
 
 _logger = logging.getLogger(__name__)
@@ -450,9 +450,16 @@ class OutboxBroker(
             msg = "broker.publish_batch requires an sqlalchemy.ext.asyncio.AsyncSession"
             raise TypeError(msg)
         if not bodies:
-            # Validate the activate args even when there's no work so callers
-            # get the same misuse error on empty batches as on real ones.
-            _validate_activate_args("broker.publish_batch", activate_in, activate_at)
+            # Validate queue + activate args even when there's no work so an empty
+            # batch rejects the same misconfigurations a non-empty one does (F4-06).
+            # (session is already checked above; the re-check here is a no-op.)
+            _validate_publish_args(
+                "broker.publish_batch",
+                queue=queue,
+                session=session,
+                activate_in=activate_in,
+                activate_at=activate_at,
+            )
             return
         first, *rest = bodies
         cmd = OutboxPublishCommand(

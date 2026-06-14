@@ -24,6 +24,47 @@ from sqlalchemy.ext.asyncio import AsyncSession
 _MAX_QUEUE_LENGTH = 255
 
 
+def _validate_publish_args(
+    context: str,
+    *,
+    queue: object,
+    session: object,
+    activate_in: _dt.timedelta | None,
+    activate_at: _dt.datetime | None,
+) -> None:
+    """
+    Fail-fast validation shared by every real outbox publish entry point.
+
+    ``OutboxPublishCommand``, ``OutboxResponse`` and ``broker.publish_batch`` all
+    route through here so a misconfigured ``session`` / ``queue`` / ``activate_*``
+    is rejected identically and at the earliest possible moment (F4-01/02/06/10).
+    Checks run in a fixed order — activate-args, then session, then queue — so that
+    ``OutboxResponse``'s eager activate-args check still fires before the session
+    check (a returned response may carry a deliberately-missing session that only
+    matters once it actually publishes, but a bad activate_at is always wrong).
+    """
+    if activate_in is not None and activate_at is not None:
+        msg = f"{context} accepts at most one of activate_in / activate_at"
+        raise ValueError(msg)
+    if activate_at is not None and activate_at.tzinfo is None:
+        msg = f"{context} requires activate_at to be timezone-aware"
+        raise ValueError(msg)
+    if not isinstance(session, AsyncSession):
+        msg = f"{context} requires an sqlalchemy.ext.asyncio.AsyncSession"
+        raise TypeError(msg)
+    # ``queue`` reaches SQL otherwise unvalidated — empty / non-str / over the
+    # ``String(255)`` column would surface as an opaque DB error or silent truncation.
+    if not isinstance(queue, str):
+        msg = f"queue must be a str, got {type(queue).__name__}"
+        raise TypeError(msg)
+    if not queue:
+        msg = "queue must be a non-empty string"
+        raise ValueError(msg)
+    if len(queue) > _MAX_QUEUE_LENGTH:
+        msg = f"queue must be at most {_MAX_QUEUE_LENGTH} characters (got {len(queue)})"
+        raise ValueError(msg)
+
+
 class OutboxPublishCommand(BatchPublishCommand):
     """Outbox-specific publish command: carries session + scheduling fields end-to-end."""
 
@@ -41,27 +82,13 @@ class OutboxPublishCommand(BatchPublishCommand):
         timer_id: str | None = None,
         _publish_type: PublishType = PublishType.PUBLISH,
     ) -> None:
-        if not isinstance(session, AsyncSession):
-            msg = "OutboxPublishCommand requires an sqlalchemy.ext.asyncio.AsyncSession"
-            raise TypeError(msg)
-        if activate_in is not None and activate_at is not None:
-            msg = "OutboxPublishCommand accepts at most one of activate_in / activate_at"
-            raise ValueError(msg)
-        if activate_at is not None and activate_at.tzinfo is None:
-            msg = "OutboxPublishCommand requires activate_at to be timezone-aware"
-            raise ValueError(msg)
-        # P5: ``queue`` reaches SQL unvalidated — empty / non-str / over the
-        # ``String(255)`` column would surface as an opaque DB error (or silent
-        # truncation). Reject at the single-source-of-truth constructor instead.
-        if not isinstance(queue, str):
-            msg = f"queue must be a str, got {type(queue).__name__}"
-            raise TypeError(msg)
-        if not queue:
-            msg = "queue must be a non-empty string"
-            raise ValueError(msg)
-        if len(queue) > _MAX_QUEUE_LENGTH:
-            msg = f"queue must be at most {_MAX_QUEUE_LENGTH} characters (got {len(queue)})"
-            raise ValueError(msg)
+        _validate_publish_args(
+            "OutboxPublishCommand",
+            queue=queue,
+            session=session,
+            activate_in=activate_in,
+            activate_at=activate_at,
+        )
         # P4: timer_id / correlation_id are per-row single-publish concepts the batch
         # path silently drops (each batched row gets its own auto correlation_id and
         # no dedup key). Reject them on a batch command rather than accept-and-ignore.
@@ -124,12 +151,13 @@ class OutboxResponse(Response):
     ``session=...`` for the same reason ``broker.publish`` does — the new row must
     commit with the caller's domain writes.
 
-    The activate-args mutex + tz-aware checks run **eagerly** in ``__init__`` so a
-    misconfigured response raises at the ``return OutboxResponse(...)`` site. Deferring
-    them to ``as_publish_command()`` (dispatch time) made the error masquerade as a
-    handler failure and exhaust the inbound row's retry budget (audit 2026-06-14).
-    ``OutboxPublishCommand.__init__`` re-checks on ``as_publish_command()``, so it stays
-    the authoritative single source of truth (these eager checks are a fail-fast mirror).
+    The session / queue / activate-args checks run **eagerly** in ``__init__`` (via the
+    shared ``_validate_publish_args``) so a misconfigured response raises at the
+    ``return OutboxResponse(...)`` site. Deferring them to ``as_publish_command()``
+    (dispatch time) made the error masquerade as a handler failure and exhaust the
+    inbound row's retry budget (audit 2026-06-14 / F4-01/02). ``OutboxPublishCommand``
+    re-runs the same validator on ``as_publish_command()``, so it stays the authoritative
+    single source of truth and the eager checks can never drift from it.
 
     ``correlation_id`` defaults to the inbound message's correlation_id when not set
     — FastStream's ``SubscriberUsecase.process_message`` does the inheritance before
@@ -148,12 +176,13 @@ class OutboxResponse(Response):
         activate_at: _dt.datetime | None = None,
         timer_id: str | None = None,
     ) -> None:
-        if activate_in is not None and activate_at is not None:
-            msg = "OutboxResponse accepts at most one of activate_in / activate_at"
-            raise ValueError(msg)
-        if activate_at is not None and activate_at.tzinfo is None:
-            msg = "OutboxResponse requires activate_at to be timezone-aware"
-            raise ValueError(msg)
+        _validate_publish_args(
+            "OutboxResponse",
+            queue=queue,
+            session=session,
+            activate_in=activate_in,
+            activate_at=activate_at,
+        )
         super().__init__(body=body, headers=headers, correlation_id=correlation_id)
         self.queue = queue
         self.session = session

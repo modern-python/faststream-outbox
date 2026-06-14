@@ -6,6 +6,7 @@ import pytest
 from faststream.kafka import KafkaBroker, KafkaRouter, TestKafkaBroker
 from faststream.response import Response
 from sqlalchemy import MetaData
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from faststream_outbox import OutboxBroker, OutboxResponse, OutboxRouter, make_outbox_table
 from faststream_outbox.testing import TestOutboxBroker
@@ -221,7 +222,7 @@ async def test_outbox_response_with_foreign_publisher_raises() -> None:
     @publisher_kafka
     @broker_outbox.subscriber("relay_queue")
     async def relay(body: dict[str, Any]) -> OutboxResponse:
-        return OutboxResponse(body=body, queue="next_queue", session=None)  # ty: ignore[invalid-argument-type]
+        return OutboxResponse(body=body, queue="next_queue", session=mock.AsyncMock(spec=AsyncSession))
 
     async with TestKafkaBroker(broker_kafka), TestOutboxBroker(broker_outbox, run_loops=False) as outbox:
         with pytest.raises(RuntimeError, match="OutboxResponse"):
@@ -245,7 +246,7 @@ async def test_outbox_response_with_foreign_publisher_fires_guard_before_side_ef
     @publisher_kafka
     @broker_outbox.subscriber("relay_queue")
     async def relay(body: dict[str, Any]) -> OutboxResponse:
-        return OutboxResponse(body=body, queue="next_queue", session=None)  # ty: ignore[invalid-argument-type]
+        return OutboxResponse(body=body, queue="next_queue", session=mock.AsyncMock(spec=AsyncSession))
 
     test_outbox = TestOutboxBroker(broker_outbox, run_loops=False)
     async with TestKafkaBroker(broker_kafka), test_outbox as outbox:
