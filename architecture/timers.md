@@ -6,12 +6,15 @@ User-facing: `docs/usage/timers.md`. Invariant summary: `CLAUDE.md` § Timers.
 
 `activate_in: timedelta` / `activate_at: datetime` (mutually exclusive) set `next_attempt_at` so the row is invisible to fetch until the gate opens — the `next_attempt_at <= now()` predicate in the fetch CTE is what gates eligibility, so no subscriber-side change is needed for scheduling.
 
-- `publish`: `next_attempt_at` is computed **server-side** via `now() + make_interval(secs => :s)` to stay clock-skew-safe.
-- `publish_batch`: client-side (`datetime.now(UTC) + activate_in`) because executemany doesn't compose cleanly with column-level SQL expressions. The few-ms drift is harmless for user-supplied scheduling.
+- `publish` + `activate_in`: `next_attempt_at` is computed **server-side** via `now() + make_interval(secs => :s)` to stay clock-skew-safe.
+- `publish` + `activate_at`: bound as the caller's **absolute literal** datetime (worker clock) — there's nothing to make skew-safe, it's an exact instant the user supplied. Note the NOTIFY future-dating decision for `activate_at` therefore compares against the worker clock, not the DB's.
+- `publish_batch`: fully client-side (`datetime.now(UTC) + activate_in`, or the `activate_at` literal) because executemany doesn't compose cleanly with column-level SQL expressions. The few-ms drift is harmless for user-supplied scheduling.
 
 ## `timer_id` dedup
 
 `timer_id` (single `publish` only) flows into a `String(255)` column with a partial unique index on `(queue, timer_id) WHERE timer_id IS NOT NULL`. The producer switches to `pg_insert(...).on_conflict_do_nothing(index_elements=[queue, timer_id], index_where=timer_id IS NOT NULL)` so re-publishing the same id is a silent no-op (returns `None`).
+
+The dedup window is **one *live* row per `(queue, timer_id)`** — the partial unique index constrains only rows still in the outbox. Once a timer row is delivered (DELETEd) or terminally fails, a later `publish` with the same id inserts a fresh row. So `timer_id` is "at most one in flight", not a global once-ever idempotency key; the DLQ keeps `timer_id` non-unique, so audit consumers can see repeats.
 
 ## NOTIFY-skip conditions
 

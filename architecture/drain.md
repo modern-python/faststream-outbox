@@ -13,6 +13,7 @@ The subscriber carries two flags during shutdown: `self.running` (FastStream's e
 - `_fetch_inner`'s loop guard checks both: `while self.running and not self._stopping:`
 - The worker loop only checks `running`.
 - `stop()` flips `_stopping`, kicks the fetch loop awake via `_notify_event` (in case it's parked in an idle `_wait_for_notify_or_timeout`), waits up to `graceful_timeout` for `_inflight.join()`, then flips `running=False` and cancels the spawned tasks.
+- **A timed-out drain is observable.** If `_inflight.join()` doesn't finish within the budget (`move_on_after`'s `cancelled_caught`), `stop()` emits a `WARNING` and a `drain_timeout` recorder metric (`faststream_outbox_drain_timeout_total` / `messaging.outbox.drain_timeout`) before cancelling — abandoned in-flight rows are left to lease-expiry retry, and an operator can now tell a timed-out drain from a clean one.
 - **`graceful_timeout=None`** stays unbounded where FastStream uses it that way (e.g. `ping()`), but the drain wait clamps `None` to a finite fallback (`_DEFAULT_DRAIN_TIMEOUT_SECONDS = 15.0`). `anyio.move_on_after(None)` has deadline `inf`, so without the clamp a single wedged handler would make `_inflight.join()` — and thus `stop()` — never return.
 
 **Why we skip `super().stop()`.** Its `MultiLock.wait_release(graceful_timeout)` would either return instantly (healthy path; `_inflight.join()` already waited a stricter condition) or re-wait the same stuck handlers for another full budget (wedged path; **2× shutdown regression**). The subscriber inlines `TasksMixin.stop`'s cleanup body instead. Per-subscriber shutdown bound: `graceful_timeout`.
@@ -24,6 +25,8 @@ The subscriber carries two flags during shutdown: `self.running` (FastStream's e
 **Why.** Sequential N × `graceful_timeout` exceeds K8s default `terminationGracePeriodSeconds=30s` once a service has 2+ subscribers at the default 15s budget. Gather collapses total shutdown to ≈ `max(per-sub) ≈ graceful_timeout` regardless of N.
 
 `return_exceptions=True` (not `TaskGroup`) so a stuck subscriber doesn't cancel the others mid-drain. Exception results are logged via `_log_subscriber_stop_error` and never re-raised — shutdown must complete even when individual subscribers misbehave.
+
+`OutboxBroker.stop` sets `self.running = False` **before** the gather (shutdown is irreversible at that point), so an external cancellation of `stop()` mid-gather can't leave the broker advertising `running=True` over already-stopped subscribers (which `ping()` reads).
 
 ## Phase interaction with `dispatch_one` guard
 
@@ -37,6 +40,7 @@ Both overrides replace upstream FastStream methods. Stable for years upstream, b
 
 - `tests/test_fake.py::test_drain_finishes_inflight_rows_before_returning_in_fake_mode` — drain waits for in-flight rows (off-Postgres)
 - `tests/test_fake.py::test_broker_stop_cancels_wedged_handler_within_graceful_timeout_in_fake_mode` — graceful-timeout bound (off-Postgres)
+- `tests/test_fake.py::test_drain_timeout_emits_warning_and_metric_in_fake_mode` — timed-out drain surfaces a WARNING + `drain_timeout` metric (off-Postgres)
 - `tests/test_integration.py` — the Postgres-backed drain + parallel-gather coverage
 
 ## Test-broker gotcha
