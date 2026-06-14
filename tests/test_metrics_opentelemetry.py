@@ -123,6 +123,15 @@ def test_otel_unknown_event_is_silently_ignored() -> None:
     assert _collect_metrics(reader) == {}
 
 
+def test_otel_drain_timeout_emits_counter() -> None:
+    """The subscriber-emitted drain_timeout event increments its dedicated meter counter."""
+    reader, rec = _reader_and_recorder()
+    rec("drain_timeout", {"queue": "q", "subscriber": "h", "drain_timeout_seconds": 0.2})
+    metrics = _collect_metrics(reader)
+    assert "messaging.outbox.drain_timeout" in metrics
+    assert sum(p.value for p in metrics["messaging.outbox.drain_timeout"].data_points) == 1
+
+
 def test_otel_dlq_written_emits_counter_with_reason_attr() -> None:
     reader, rec = _reader_and_recorder()
     rec(

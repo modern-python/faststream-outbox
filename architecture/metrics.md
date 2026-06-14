@@ -6,7 +6,7 @@ User-facing: `docs/usage/observability.md`. Invariant summary: `CLAUDE.md` § Me
 
 `OutboxBroker(..., metrics_recorder=...)` accepts a `MetricsRecorder = Callable[[str, Mapping[str, Any]], None]`. The default (`_noop_recorder`) lets instrumentation sites call unconditionally. The recorder threads through `OutboxBrokerConfig.metrics_recorder` to two places:
 
-- **Subscriber emission points** (`OutboxSubscriber._emit_metric`): `fetched`, `dispatched`, `acked`, `nacked_retried`, `nacked_terminal`, `lease_lost`, plus `dlq_written` when `dlq_table` is configured.
+- **Subscriber emission points** (`OutboxSubscriber._emit_metric`): `fetched`, `dispatched`, `acked`, `nacked_retried`, `nacked_terminal`, `lease_lost`, `drain_timeout` (a `stop()` drain that exceeded `graceful_timeout`), plus `dlq_written` when `dlq_table` is configured.
 - **Producer emission point** (`OutboxProducer._emit_metric`): `published`.
 
 The producer reads the recorder from its own constructor kwarg (passed in alongside the config field) so the canonical insert path doesn't have to reach through the broker config at call time.

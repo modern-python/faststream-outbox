@@ -219,6 +219,13 @@ def test_prometheus_unknown_event_is_silently_ignored() -> None:
     rec("future_event_not_yet_added", {"queue": "q", "subscriber": "h"})  # forward-compat
 
 
+def test_prometheus_drain_timeout_increments() -> None:
+    """The subscriber-emitted drain_timeout event increments its dedicated counter."""
+    reg, rec = _make_recorder()
+    rec("drain_timeout", {"queue": "q", "subscriber": "h", "drain_timeout_seconds": 0.2})
+    assert _sample(reg, "faststream_outbox_drain_timeout_total", _base_labels()) == 1.0
+
+
 def test_prometheus_dlq_written_records_reason_label() -> None:
     reg, rec = _make_recorder()
     rec(
