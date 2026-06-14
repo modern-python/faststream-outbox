@@ -83,6 +83,8 @@ None.
 
 ### Low
 
+> **Behavior/robustness batch RESOLVED (2026-06-14, PR #92)** — **F2-10** (`validate_schema` now probes `indisunique`; a non-unique `timer_id_uq` is flagged — integration test recreates the index non-unique), **F1-03** (`OutboxBroker.stop` sets `running=False` *before* the subscriber-stop gather), **F1-04** (a timed-out drain emits a WARNING + `drain_timeout` metric instead of silently abandoning rows), **F1-06** (`_run_with_reconnect` captures `started` only after `open_resources` succeeds, so a slow-failing open no longer resets the backoff), **F3-02** (`validate_table_identifiers` extracted in `schema.py` and called from `OutboxClient.__init__`, so a directly-constructed/reflected over-long `Table` is rejected). `just test` → 514 passed, 100% coverage.
+
 > **Safe-Lows batch RESOLVED (2026-06-14, PR #89)** — code: **F4-04** (`fetch_unprocessed` rejects `limit < 1`, real + fake), **F2-12** (`ping()` bounded by `asyncio.timeout(_PING_TIMEOUT_SECONDS)`), **F6-02** (Prometheus `published` count default unified to `0`, matching OTel), **F6-17** (removed the dead `outer is self.config` branch). Docs/comments: **F6-01** (stale "Task 5"), **F6-04** (`_run_validate` phrasing), **F6-13** (CLAUDE.md `make_interval`/`activate_at`), **F6-15** (`fetch_unprocessed` docstring), **F1-05** (`cancel_timer` commit-contingent return), **F2-06** (`timer_id` dedup window). Still open after this batch: **F2-10** (validate `indisunique` — needs a drifted-schema integration test, own change), **F6-05** (`_utcnow` dedup — needs a shared-module decision), **F5-04** (parser correlation_id fallback — subtle), and the larger refactor / test-hardening Lows below.
 
 **Validation symmetry (gaps left by PR #83's eager-validation fix):**

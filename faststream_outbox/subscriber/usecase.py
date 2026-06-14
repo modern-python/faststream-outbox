@@ -259,8 +259,21 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         drain_timeout = self._outer_config.graceful_timeout
         if drain_timeout is None:
             drain_timeout = _DEFAULT_DRAIN_TIMEOUT_SECONDS
-        with anyio.move_on_after(drain_timeout):
+        with anyio.move_on_after(drain_timeout) as drain_scope:
             await self._inflight.join()
+        if drain_scope.cancelled_caught:
+            # F1-04: the drain timed out — in-flight rows are abandoned to lease-expiry
+            # retry. Surface it (otherwise a timed-out drain is indistinguishable from a
+            # clean one) so operators can tell a rolling deploy left work behind.
+            queue = self._config.queues[0] if self._config.queues else ""
+            self._log(
+                log_level=logging.WARNING,
+                message=(
+                    f"Outbox drain timed out after {drain_timeout}s; in-flight rows abandoned "
+                    "to lease-expiry retry (another replica/restart reclaims them)"
+                ),
+            )
+            self._emit_metric("drain_timeout", {**self._base_tags(queue), "drain_timeout_seconds": drain_timeout})
         self.running = False
         tasks = list(self.tasks)
         for task in tasks:
@@ -513,9 +526,14 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             client = self._outer_config.client
             if client is None:  # pragma: no cover  # defensive teardown race
                 return
-            started = time.monotonic()
+            # F1-06: measure "healthy duration" from a *live* connection, not from before
+            # open_resources — a slow pool checkout that blocks then fails would otherwise
+            # count as healthy and reset the backoff, defeating escalation under a storm.
+            # started stays None if open itself fails, so that path does not reset.
+            started: float | None = None
             try:
                 async with open_resources(client.engine) as kwargs:
+                    started = time.monotonic()
                     await inner(**kwargs)
             except Exception as e:  # noqa: BLE001
                 # Reset the backoff counter when the connection was healthy for a
@@ -523,7 +541,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                 # accrues and every transient blip after the first handful costs the
                 # full capped delay, while min(..., cap) annihilates the jitter and
                 # synchronizes a reconnect herd (B3).
-                if time.monotonic() - started >= _BACKOFF_RESET_THRESHOLD_SECONDS:
+                if started is not None and time.monotonic() - started >= _BACKOFF_RESET_THRESHOLD_SECONDS:
                     error_attempt = 0
                 self._log(
                     log_level=logging.ERROR,

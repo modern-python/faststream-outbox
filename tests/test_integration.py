@@ -85,6 +85,24 @@ async def test_validate_schema_detects_non_partial_index_on_present_index(
         await client.validate_schema()
 
 
+async def test_validate_schema_detects_non_unique_timer_id_index(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+) -> None:
+    """F2-10: a same-named timer_id index recreated NON-unique (right predicate) breaks ON CONFLICT — caught."""
+    idx = f"{outbox_table.name}_timer_id_uq"
+    async with pg_engine.begin() as conn:
+        await conn.execute(text(f'DROP INDEX "{idx}"'))
+        # Correct partial predicate but NOT unique → the producer's ON CONFLICT (queue, timer_id)
+        # arbiter has no unique index to bind to and raises at publish time.
+        await conn.execute(
+            text(f'CREATE INDEX "{idx}" ON {outbox_table.name} (queue, timer_id) WHERE timer_id IS NOT NULL'),
+        )
+    client = OutboxClient(pg_engine, outbox_table)
+    with pytest.raises(RuntimeError, match="not UNIQUE"):
+        await client.validate_schema()
+
+
 async def test_validate_schema_passes_for_correct_table(pg_engine, outbox_table) -> None:
     client = OutboxClient(pg_engine, outbox_table)
     await client.validate_schema()  # should not raise

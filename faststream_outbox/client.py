@@ -49,6 +49,7 @@ from faststream_outbox.schema import (
     _TIMER_ID_UQ_SUFFIX,
     make_dlq_table,
     make_outbox_table,
+    validate_table_identifiers,
 )
 
 
@@ -142,6 +143,10 @@ class OutboxClient(AbstractOutboxClient):
         *,
         dlq_table: "Table | None" = None,
     ) -> None:
+        # F3-02: the 63-byte identifier guard otherwise lives only in make_outbox_table;
+        # validate here too so a directly-constructed or reflected Table can't slip an
+        # over-long NOTIFY channel / index name past it.
+        validate_table_identifiers(outbox_table.name)
         self._engine = engine
         self._table = outbox_table
         self._dlq_table = dlq_table
@@ -462,12 +467,15 @@ _EXPECTED_INDEX_PREDICATES = {
     _LEASE_IDX_SUFFIX: "acquired_token is not null",
 }
 
+# Suffixes whose index must be UNIQUE — the timer_id arbiter relies on it for ON CONFLICT (F2-10).
+_EXPECTED_UNIQUE_INDEXES = {_TIMER_ID_UQ_SUFFIX}
+
 # No ``indpred IS NOT NULL`` filter: we must also catch an expected index that exists but
 # was created NON-partial (predicate NULL) — that breaks ON CONFLICT inference the same way
 # a wrong predicate does, and alembic's diff won't flag it either. ``pg_get_expr`` returns
 # NULL for a non-partial index, which we treat as a distinct error below.
 _INDEX_PREDICATE_QUERY = text(
-    "SELECT c.relname AS index_name, pg_get_expr(i.indpred, i.indrelid) AS predicate "
+    "SELECT c.relname AS index_name, pg_get_expr(i.indpred, i.indrelid) AS predicate, i.indisunique AS is_unique "
     "FROM pg_index i "
     "JOIN pg_class c ON c.oid = i.indexrelid "
     "JOIN pg_class t ON t.oid = i.indrelid "
@@ -499,17 +507,21 @@ def _validate_index_predicates_sync(connection: "Connection", table: "Table") ->
         .mappings()
         .all()
     )
-    live = {row["index_name"]: row["predicate"] for row in rows}  # predicate is None for a non-partial index
+    live = {row["index_name"]: row for row in rows}  # predicate is None for a non-partial index
     errors: list[str] = []
     for suffix, want in _EXPECTED_INDEX_PREDICATES.items():
         name = f"{table.name}{suffix}"
         if name in live:
-            predicate = live[name]
+            predicate = live[name]["predicate"]
             if predicate is None:
                 errors.append(f"index {name!r} is not a partial index (expected predicate '{want}')")
             elif _normalize_predicate(predicate) != want:
                 got = _normalize_predicate(predicate)
                 errors.append(f"index {name!r} has wrong partial predicate: expected '{want}', got '{got}'")
+            # F2-10: a same-named but NON-unique timer_id index passes the predicate check
+            # yet breaks the producer's ON CONFLICT arbiter inference at publish time.
+            if suffix in _EXPECTED_UNIQUE_INDEXES and not live[name]["is_unique"]:
+                errors.append(f"index {name!r} is not UNIQUE (required for the timer_id ON CONFLICT arbiter)")
     return errors
 
 

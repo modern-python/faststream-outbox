@@ -1,10 +1,11 @@
 import asyncio
 import datetime as _dt
+import logging
 import typing
 import uuid
 import warnings as _warnings
 from collections.abc import Callable, Mapping
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from faststream import Context as _Context
@@ -1085,6 +1086,42 @@ async def test_broker_stop_cancels_wedged_handler_within_graceful_timeout_in_fak
     # bound separates them with generous slack so CI load can't flake it.
     assert elapsed < graceful_timeout * 1.6, f"sub.stop() took {elapsed:.3f}s — 2x-drain regression"
     assert len(test_broker.fake_client.rows) == 1  # handler cancelled pre-ack → row preserved (lease set)
+
+
+async def test_drain_timeout_emits_warning_and_metric_in_fake_mode() -> None:
+    """F1-04: a drain that times out on a wedged handler surfaces a WARNING + drain_timeout metric."""
+    events: list[str] = []
+
+    def recorder(event: str, fields: Mapping[str, typing.Any]) -> None:
+        del fields
+        events.append(event)
+
+    metadata = MetaData()
+    t = make_outbox_table(metadata)
+    broker = OutboxBroker(outbox_table=t, graceful_timeout=0.2, metrics_recorder=recorder)
+    started = asyncio.Event()
+
+    @broker.subscriber("orders", min_fetch_interval=0.01, max_fetch_interval=0.05)
+    async def handle(body: dict) -> None:
+        del body
+        started.set()
+        await asyncio.sleep(60.0)  # wedged — drain will time out
+
+    test_broker = TestOutboxBroker(broker, run_loops=True)
+    async with test_broker:
+        payload, hdrs = encode_payload({"i": 0})
+        test_broker.feed("orders", payload, headers=hdrs)
+        await asyncio.wait_for(started.wait(), timeout=3.0)
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        with patch.object(sub, "_log", wraps=sub._log) as log_spy:  # noqa: SLF001
+            await sub.stop()
+
+    assert "drain_timeout" in events  # the recorder seam fired
+    warned = any(
+        call.kwargs.get("log_level") == logging.WARNING and "drain timed out" in str(call.kwargs.get("message", ""))
+        for call in log_spy.call_args_list
+    )
+    assert warned, "expected a WARNING naming the timed-out drain"
 
 
 async def test_sync_publish_skips_callless_subscriber() -> None:
