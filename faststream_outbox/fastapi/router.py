@@ -47,6 +47,7 @@ if typing.TYPE_CHECKING:
     from starlette.routing import BaseRoute
     from starlette.types import ASGIApp, Lifespan
 
+    from faststream_outbox.configs import LastExceptionRenderer
     from faststream_outbox.metrics import MetricsRecorder
     from faststream_outbox.publisher.usecase import OutboxPublisher
     from faststream_outbox.retry import RetryStrategyProto
@@ -82,6 +83,7 @@ class OutboxRouter(StreamRouter[OutboxInnerMessage]):
         serializer: "SerializerProto | None" = EMPTY,
         # Metrics (recorder seam — mirrors ``OutboxBroker.__init__``)
         metrics_recorder: "MetricsRecorder | None" = None,
+        last_exception_renderer: "LastExceptionRenderer | None" = None,
         # AsyncAPI / Specification
         specification: typing.Optional["SpecificationFactory"] = None,
         description: str | None = None,
@@ -120,6 +122,7 @@ class OutboxRouter(StreamRouter[OutboxInnerMessage]):
             outbox_table=outbox_table,
             dlq_table=dlq_table,
             metrics_recorder=metrics_recorder,
+            last_exception_renderer=last_exception_renderer,
             decoder=decoder,
             parser=parser,
             graceful_timeout=graceful_timeout,

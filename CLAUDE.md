@@ -88,7 +88,7 @@ Atomicity: `delete_with_lease` switches to a single CTE `WITH deleted AS (DELETE
 
 **The `DLQFailureReason` `Literal` (`message.py`) is the public contract** — operator queries / dashboards key off these values; changes are API-breaking.
 
-`last_exception` is `repr()` bounded by `_LAST_EXCEPTION_MAX_CHARS=8192` (`subscriber/usecase.py`); truncation appends `…[truncated]`. DLQ `failure_reason` is `String(64)`. No built-in retention.
+`last_exception` defaults to `repr()` bounded by `_LAST_EXCEPTION_MAX_CHARS=8192` (`subscriber/usecase.py`); truncation appends `…[truncated]`. Because a `repr` can embed the payload / request body / credentials, `OutboxBroker(..., last_exception_renderer=...)` (F3-01) lets PII-sensitive deployments redact (e.g. `lambda exc: type(exc).__name__`) or drop it (return `None`); the rendered string is still length-capped. Rendering happens in `_render_last_exception` (`subscriber/usecase.py`), read from `OutboxBrokerConfig.last_exception_renderer`. DLQ `failure_reason` is `String(64)`. No built-in retention.
 
 Deep dive: `architecture/dlq.md`. User-facing: `docs/usage/dlq.md`.
 
