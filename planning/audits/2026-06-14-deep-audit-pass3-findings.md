@@ -167,4 +167,23 @@ None.
 **Verifiers (default-refute):** F5 cluster (reproduced) · F2 data-layer cluster · F4 API cluster · F1 concurrency cluster · F3-01 + F8-01 + structural (F6-06/F6-11) · F7 test-correctness cluster.
 **Examined and clean** (beyond the verification-only list): envelope encode/decode round-trip, header merge precedence, batch-bodies leading-`None` handling, future-dated NOTIFY-skip logic, the retry-vs-lease-expiry distinction, and the metrics recorder-vs-middleware seam separation.
 
-**Net vs prior passes:** the fresh re-sweep found a real HIGH (F5-01) and an incomplete prior fix (F4-01/02) that two same-day passes missed — validating the blind, no-anchor approach. No new findings touched the core invariants. No code changes made (findings-doc-only, per request).
+**Net vs prior passes:** the fresh re-sweep found a real HIGH (F5-01) and an incomplete prior fix (F4-01/02) that two same-day passes missed — validating the blind, no-anchor approach. No new findings touched the core invariants.
+
+## Tail disposition (2026-06-14, PRs #85–#94)
+
+Every confirmed finding is now resolved, documented, consciously dropped, or deferred. Ledger:
+
+**Resolved (code/test):** F5-01/02 (#85) · F4-01/02/06/10 (#86) · F7-02 (#87) · F8-01/02 (#88) · F4-04, F2-12, F6-02, F6-17 + doc-Lows (#89) · F6-11/05/03/12, F4-05/F6-09 DRY (#90) · F7-04/05/06/10/11, F3-05 test-hardening (#91) · F2-10, F1-03/04/06, F3-02 (#92) · F3-01 redaction hook (#93).
+
+**Resolved (documentation, PR #94):** F2-07 (`deliveries_count` counts claims) · F2-09 (within-batch dispatch order unspecified) · F2-04/F2-05 (`activate_at`/batch worker-clock NOTIFY timing) · F1-07 (NOTIFY lost in reconnect window) · F1-01 (true lease bound `fetch_batch_size + max_workers`) · F2-01 (`max_total_delay_seconds` is a lower bound) · F4-09 (test-broker session leniency) · F3-03 (recommended alerts on row count / `lease_lost` / `dlq_written` divergence) · F5-03 residual (chained-publish failure looks like a handler failure — troubleshooting entry).
+
+**Won't-do (closed with rationale):**
+- **F4-03** (`title_`/`description_` asymmetry) — mirrors upstream FastStream's kwarg convention; "fixing" it diverges from upstream.
+- **F6-06** (two `OutboxRouter` classes) — namespaced (`…` vs `….fastapi`), standard Python; renaming a public class is a breaking change for cosmetic gain.
+- **F1-02** (health-probe interruptibility) — the probe is already cancellable, so drain stays bounded by `graceful_timeout`; racing it adds complexity for marginal benefit.
+- **F2-02 residual** (server-default probe) — the only *silent* outage variant is already caught by the nullability comparator; default-only drift fails loudly.
+- **F5-03 residual** (distinct relay-publish-failure signal) — code change is invasive in the middleware unwind for rare cases; common trigger fixed in #85, residual documented instead.
+- **F5-04 code** (`correlation_id` fallback → `gen_cor_id`) — `str(msg.id)` is *better* (stable across re-fetch); fallback unreachable for canonical rows. Doc-only.
+- **F3-04** (structured logging) — `!r` already neutralizes CRLF/log-injection; converting many log sites is churn for marginal benefit.
+
+**Deferred to a follow-up (PR #95):** F7-07 (NOTIFY-wakeup determinism), F7-09 (telemetry exact bounds, 4 files), F1-08 (sync dispatch via `fake_client.fetch` — higher risk).

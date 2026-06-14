@@ -16,6 +16,7 @@ and a link into the reference page that owns the underlying design.
 | [`activate_in` / `activate_at` fires immediately in tests](#activate_in-activate_at-fires-immediately-in-tests) | `TestOutboxBroker(run_loops=False)` ignores scheduling |
 | [`AckPolicy.ACK_FIRST` raises `ValueError` at registration](#ackpolicyack_first-raises-valueerror-at-registration) | By design (would defeat outbox reliability) |
 | [`OutboxResponse(...)` + foreign-publisher decorator gets nacked](#outboxresponse-foreign-publisher-decorator-gets-nacked) | By design (dual-fire footgun) |
+| [Chained `OutboxResponse` retries after the handler "succeeded"](#outboxresponse-relay-publish-failure) | Follow-on publish fails post-handler; nacks the inbound row |
 | [`validate_schema()` raises `ImportError`](#validate_schema-raises-importerror) | `[validate]` extra not installed |
 
 ## `event=lease_lost` recurring in logs { #event-lease_lost-recurring-in-logs }
@@ -64,6 +65,14 @@ now includes it; pre-fix migrations may not.)
 or rename / drop the drifted column / index). After the schema is
 correct, the next claim of each stuck row flushes through the CTE
 and the outbox drains naturally.
+
+**Recommended alerts.** A persistent DLQ misconfiguration (or a permanent
+relay config error) is the one way a config bug degrades into a
+storage-exhaustion outage — the affected rows cycle through fetch/fail
+forever while new rows accumulate. There is no built-in circuit breaker,
+so **alert on outbox row count (trend / absolute ceiling) and on the
+`lease_lost` rate**, and watch `dlq_written` vs `nacked_terminal`
+divergence (a gap means terminal failures aren't reaching the DLQ).
 
 **Reference.** [DLQ § Atomicity](../usage/dlq.md#atomicity), [Schema
 validation](../usage/schema-validation.md).
@@ -257,6 +266,33 @@ session=...)` (an outbox-internal chain) but not both.
 **Reference.** [Relay § What not to do](../usage/relay.md#what-not-to-do),
 [Publisher § Chained
 publishing](../usage/publisher.md#chained-publishing).
+
+## A chained `OutboxResponse` row's handler keeps retrying after the handler "succeeded" { #outboxresponse-relay-publish-failure }
+
+**Symptom.** A handler that returns `OutboxResponse(...)` completes its
+own logic, yet the inbound row keeps nacking/retrying (and may DLQ as
+`retry_terminal`), with an exception that's about the *publish*, not the
+handler's work.
+
+**Likely cause.** The follow-on `OutboxResponse` row is published **after**
+the handler returns, inside the same consume scope — so a failure there
+(e.g. a DB error on the follow-on insert) unwinds through the
+`AcknowledgementMiddleware` and nacks the inbound row. There is currently
+**no distinct signal** separating "handler OK, relay-publish failed" from
+an ordinary handler exception (F5-03): the metric reads as a normal
+`nacked_retried`/`retry_terminal`, and the ERROR log shows the publish
+exception rather than a handler one. (The most common trigger — header
+propagation re-encoding conflicts — was removed in #85.)
+
+**Diagnose.** Read the logged exception: a `sqlalchemy`/`asyncpg` error or
+an envelope `ValueError` naming `content-type`/`correlation_id` points at
+the relay publish, not the handler body.
+
+**Fix.** Resolve the underlying publish failure (schema/connection for the
+follow-on insert; drop conflicting headers). For non-idempotent chains,
+pass a deterministic `timer_id` so a redelivery's insert is a no-op.
+
+**Reference.** [Publisher § Chained publishing](../usage/publisher.md#chained-publishing).
 
 ## `validate_schema()` raises `ImportError` { #validate_schema-raises-importerror }
 
