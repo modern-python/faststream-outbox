@@ -141,20 +141,27 @@ on `OutboxRouter.__init__`:
 - `dependencies` — on the router signature this means FastAPI
   `Depends(...)` only; the broker's FastStream `Dependant` list is the
   wrong shape for this flow.
-- `dlq_table`, `metrics_recorder`, and `routers` — simply not forwarded
-  through the router today.
+- `routers` — not forwarded through the router; its semantics through the
+  FastAPI lifespan are unsettled. Register subscribers directly on the
+  `OutboxRouter` instead.
 
-The router builds the broker for you and gives you no handle to a
-pre-constructed `OutboxBroker`, and all three of those arguments are
-constructor-only on the broker (no setters). So a FastAPI user **cannot**
-enable the [DLQ](./dlq.md) or the [metrics-recorder
-seam](./observability.md) through `OutboxRouter` today — there is no
-router-based workaround. Use the standalone `OutboxBroker` for those.
+The [DLQ](./dlq.md) and the [metrics-recorder seam](./observability.md)
+**are** available through the router: pass `dlq_table=` and
+`metrics_recorder=` to `OutboxRouter(...)` exactly as you would to
+`OutboxBroker(...)` — they forward to the inner broker.
 
-If you need broker-level FastStream middlewares, pass them to
-`OutboxRouter(middlewares=[...])` — the router builds the broker for you, so
-there is no separate broker to configure. Use the FastAPI `Depends(...)`
-mechanism in handlers for dependencies.
+```python
+outbox_router = OutboxRouter(
+    engine,
+    outbox_table=outbox_table,
+    dlq_table=make_dlq_table(metadata),
+    metrics_recorder=my_recorder,
+)
+```
+
+Native Prometheus/OpenTelemetry middleware also works via
+`OutboxRouter(middlewares=[...])`. Use the FastAPI `Depends(...)` mechanism
+in handlers for dependencies.
 
 ## Engine ownership
 
