@@ -21,6 +21,7 @@ from unittest import mock
 
 from faststream._internal.testing.broker import TestBroker, patch_broker_calls
 
+from faststream_outbox._time import utcnow
 from faststream_outbox.broker import (
     OutboxBroker,
     _compute_next_at_client_side,
@@ -30,17 +31,13 @@ from faststream_outbox.client import AbstractOutboxClient
 from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.message import OutboxInnerMessage
 from faststream_outbox.metrics import _safe_emit
-from faststream_outbox.response import OutboxPublishCommand
+from faststream_outbox.response import _REQUEST_UNSUPPORTED_MSG, OutboxPublishCommand
 
 
 if typing.TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
     from faststream_outbox.subscriber.usecase import OutboxSubscriber
-
-
-def _utcnow() -> _dt.datetime:
-    return _dt.datetime.now(tz=_dt.UTC)
 
 
 @dataclass
@@ -51,8 +48,8 @@ class _FakeRow:
     headers: dict[str, str] | None
     attempts_count: int = 0
     deliveries_count: int = 0
-    created_at: _dt.datetime = field(default_factory=_utcnow)
-    next_attempt_at: _dt.datetime = field(default_factory=_utcnow)
+    created_at: _dt.datetime = field(default_factory=utcnow)
+    next_attempt_at: _dt.datetime = field(default_factory=utcnow)
     first_attempt_at: _dt.datetime | None = None
     last_attempt_at: _dt.datetime | None = None
     acquired_at: _dt.datetime | None = None
@@ -98,7 +95,7 @@ class FakeOutboxClient(AbstractOutboxClient):
             # "persisted" row (the real client round-trips through the DB; the fake must
             # not share the dict by reference).
             headers=dict(headers) if headers is not None else None,
-            next_attempt_at=next_attempt_at or _utcnow(),
+            next_attempt_at=next_attempt_at or utcnow(),
             timer_id=timer_id,
         )
         self._rows.append(row)
@@ -133,7 +130,7 @@ class FakeOutboxClient(AbstractOutboxClient):
     ) -> list[OutboxInnerMessage]:
         if not queues:
             return []
-        now = _utcnow()
+        now = utcnow()
         lease_cutoff = now - _dt.timedelta(seconds=max(0.0, lease_ttl_seconds))
         token = uuid.uuid4()
         out: list[OutboxInnerMessage] = []
@@ -179,7 +176,7 @@ class FakeOutboxClient(AbstractOutboxClient):
                             "headers": row.headers,
                             "deliveries_count": row.deliveries_count,
                             "created_at": row.created_at,
-                            "failed_at": _utcnow(),
+                            "failed_at": utcnow(),
                             "failure_reason": dlq_payload["failure_reason"],
                             "last_exception": dlq_payload["last_exception"],
                             "timer_id": row.timer_id,  # P9 parity with the real DLQ CTE
@@ -203,7 +200,7 @@ class FakeOutboxClient(AbstractOutboxClient):
         for row in self._rows:
             # Mirror SQL ``NULL = NULL`` semantics — see ``delete_with_lease``.
             if row.id == message_id and acquired_token is not None and row.acquired_token == acquired_token:
-                row.next_attempt_at = _utcnow() + _dt.timedelta(seconds=max(0.0, delay_seconds))
+                row.next_attempt_at = utcnow() + _dt.timedelta(seconds=max(0.0, delay_seconds))
                 row.attempts_count = attempts_count
                 row.first_attempt_at = first_attempt_at
                 row.last_attempt_at = last_attempt_at
@@ -283,7 +280,7 @@ async def _sync_dispatch(fake_client: FakeOutboxClient, broker: OutboxBroker, qu
     if fake_row is None:  # pragma: no cover  # defensive: feed just returned this id
         return
     fake_row.acquired_token = uuid.uuid4()
-    fake_row.acquired_at = _utcnow()
+    fake_row.acquired_at = utcnow()
     fake_row.deliveries_count += 1
     await subscriber.dispatch_one(_to_inner(fake_row))
 
@@ -438,8 +435,7 @@ class FakeOutboxProducer:
         )
 
     async def request(self, cmd: OutboxPublishCommand) -> typing.NoReturn:
-        msg = "OutboxBroker does not support request-reply"
-        raise NotImplementedError(msg)
+        raise NotImplementedError(_REQUEST_UNSUPPORTED_MSG)
 
     def connect(self, connection: typing.Any = None, serializer: typing.Any = None) -> None:  # noqa: ARG002
         if serializer is not None:

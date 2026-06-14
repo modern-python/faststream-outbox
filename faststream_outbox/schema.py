@@ -42,6 +42,16 @@ if TYPE_CHECKING:
 # the LISTEN/NOTIFY channel name `outbox_<table>`.
 _POSTGRES_IDENT_MAX_BYTES = 63
 
+# Single source for the identifiers derived from a table name. Used by the length
+# guard and the Index/CheckConstraint names below, and imported by ``client.py``'s
+# schema-validation probes — so adding/renaming an index touches exactly one place
+# (F6-11). The NOTIFY channel is ``f"{_CHANNEL_PREFIX}{table_name}"``.
+_CHANNEL_PREFIX = "outbox_"
+_PENDING_IDX_SUFFIX = "_pending_idx"
+_TIMER_ID_UQ_SUFFIX = "_timer_id_uq"
+_LEASE_IDX_SUFFIX = "_lease_idx"
+_LEASE_CK_SUFFIX = "_lease_ck"
+
 
 def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table:
     """
@@ -60,13 +70,15 @@ def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table
     # up to ~12 bytes). The index suffixes are longer than the channel prefix, so a
     # table_name that fits the channel can still overflow an index name and fail at
     # CREATE INDEX time (P7).
-    name_bytes = table_name.encode("utf-8")
-    derived = (
-        b"outbox_" + name_bytes,
-        name_bytes + b"_pending_idx",
-        name_bytes + b"_timer_id_uq",
-        name_bytes + b"_lease_idx",
-        name_bytes + b"_lease_ck",
+    derived = tuple(
+        ident.encode("utf-8")
+        for ident in (
+            f"{_CHANNEL_PREFIX}{table_name}",
+            f"{table_name}{_PENDING_IDX_SUFFIX}",
+            f"{table_name}{_TIMER_ID_UQ_SUFFIX}",
+            f"{table_name}{_LEASE_IDX_SUFFIX}",
+            f"{table_name}{_LEASE_CK_SUFFIX}",
+        )
     )
     longest = max(derived, key=len)
     if len(longest) > _POSTGRES_IDENT_MAX_BYTES:
@@ -98,14 +110,14 @@ def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table
         # CHECK makes that state unrepresentable.
         CheckConstraint(
             "(acquired_token IS NULL) = (acquired_at IS NULL)",
-            name=f"{table_name}_lease_ck",
+            name=f"{table_name}{_LEASE_CK_SUFFIX}",
         ),
     )
     # Partial index that backs the fetch query's hot branch
     # (`WHERE acquired_token IS NULL AND queue = ? AND next_attempt_at <= now()`).
     # The expired-lease branch is covered by `_lease_idx` below.
     Index(
-        f"{table_name}_pending_idx",
+        f"{table_name}{_PENDING_IDX_SUFFIX}",
         table.c.queue,
         table.c.next_attempt_at,
         postgresql_where=table.c.acquired_token.is_(None),
@@ -114,7 +126,7 @@ def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table
     # and the (queue, timer_id) lookup in `cancel_timer`. Only enforced when timer_id is set,
     # so non-timer rows remain unconstrained.
     Index(
-        f"{table_name}_timer_id_uq",
+        f"{table_name}{_TIMER_ID_UQ_SUFFIX}",
         table.c.queue,
         table.c.timer_id,
         unique=True,
@@ -128,7 +140,7 @@ def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table
     # UPDATE rewrites (acquired_token, acquired_at), so this index pays write amplification
     # proportional to the claim rate.
     Index(
-        f"{table_name}_lease_idx",
+        f"{table_name}{_LEASE_IDX_SUFFIX}",
         table.c.queue,
         table.c.acquired_at,
         postgresql_where=table.c.acquired_token.is_not(None),

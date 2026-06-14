@@ -42,7 +42,14 @@ from sqlalchemy import (
 # don't call validate_schema() never trigger the runtime import path.
 from faststream_outbox._import_checker import is_alembic_installed
 from faststream_outbox.message import OutboxInnerMessage
-from faststream_outbox.schema import make_dlq_table, make_outbox_table
+from faststream_outbox.schema import (
+    _LEASE_CK_SUFFIX,
+    _LEASE_IDX_SUFFIX,
+    _PENDING_IDX_SUFFIX,
+    _TIMER_ID_UQ_SUFFIX,
+    make_dlq_table,
+    make_outbox_table,
+)
 
 
 if TYPE_CHECKING:
@@ -450,9 +457,9 @@ def _normalize_predicate(predicate: str) -> str:
 # Expected partial-index predicates, keyed by the index-name suffix make_outbox_table uses.
 # These are what the fetch CTE and the producer's ON CONFLICT arbiter rely on (S2).
 _EXPECTED_INDEX_PREDICATES = {
-    "_pending_idx": "acquired_token is null",
-    "_timer_id_uq": "timer_id is not null",
-    "_lease_idx": "acquired_token is not null",
+    _PENDING_IDX_SUFFIX: "acquired_token is null",
+    _TIMER_ID_UQ_SUFFIX: "timer_id is not null",
+    _LEASE_IDX_SUFFIX: "acquired_token is not null",
 }
 
 # No ``indpred IS NOT NULL`` filter: we must also catch an expected index that exists but
@@ -519,7 +526,7 @@ _CHECK_CONSTRAINT_QUERY = text(
 # uses. Normalized form (lowercased, parens/whitespace collapsed, leading ``check`` stripped)
 # of ``(acquired_token IS NULL) = (acquired_at IS NULL)``.
 _EXPECTED_CHECK_CONSTRAINTS = {
-    "_lease_ck": "acquired_token is null = acquired_at is null",
+    _LEASE_CK_SUFFIX: "acquired_token is null = acquired_at is null",
 }
 
 

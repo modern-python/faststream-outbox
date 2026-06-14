@@ -17,10 +17,11 @@ from faststream._internal.parser import DefaultCodec
 from sqlalchemy import Float, Table, bindparam, func, insert, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from faststream_outbox._time import utcnow
 from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.metrics import MetricsRecorder, _noop_recorder, _safe_emit
 from faststream_outbox.parser.parser import OutboxParser
-from faststream_outbox.response import OutboxPublishCommand
+from faststream_outbox.response import _REQUEST_UNSUPPORTED_MSG, OutboxPublishCommand
 
 
 if typing.TYPE_CHECKING:
@@ -29,6 +30,19 @@ if typing.TYPE_CHECKING:
     from fast_depends.library.serializer import SerializerProto
     from faststream._internal.parser import CodecProto
     from faststream._internal.types import AsyncCallable, CustomCallable
+
+
+def _is_future_dated(
+    activate_in: _dt.timedelta | None,
+    activate_at: _dt.datetime | None,
+    now: _dt.datetime,
+) -> bool:
+    """Whether a row is genuinely future-dated (so NOTIFY is skipped — polling fires it at the gate)."""
+    if activate_in is not None:
+        return activate_in > _dt.timedelta(0)
+    if activate_at is not None:
+        return activate_at > now
+    return False
 
 
 class OutboxProducer:
@@ -134,10 +148,8 @@ class OutboxProducer:
             values["timer_id"] = cmd.timer_id
         # Skip NOTIFY only when the row is genuinely future-dated. A past activate_at
         # (e.g. a recovered idempotency token) is immediately eligible — fire NOTIFY.
-        now = _dt.datetime.now(tz=_dt.UTC)
-        is_future = (cmd.activate_in is not None and cmd.activate_in > _dt.timedelta(0)) or (
-            cmd.activate_at is not None and cmd.activate_at > now
-        )
+        now = utcnow()
+        is_future = _is_future_dated(cmd.activate_in, cmd.activate_at, now)
 
         if cmd.timer_id is not None:
             stmt = (
@@ -165,7 +177,7 @@ class OutboxProducer:
         # Client-side time for batch: executemany doesn't compose cleanly with
         # column-level SQL expressions, and a few-ms drift versus the DB is
         # harmless for user-supplied scheduling. Retries still use server time.
-        now = _dt.datetime.now(tz=_dt.UTC)
+        now = utcnow()
         if cmd.activate_in is not None:
             next_at: _dt.datetime | None = now + cmd.activate_in
         else:
@@ -185,7 +197,7 @@ class OutboxProducer:
                 rows.append(row)
             await cmd.session.execute(insert(self._table), rows)
             # Skip NOTIFY only when genuinely future-dated; past times are eligible.
-            if next_at is None or next_at <= now:
+            if not _is_future_dated(cmd.activate_in, cmd.activate_at, now):
                 await self._notify(cmd.session, cmd.queue)
         except Exception as exc:
             self._emit_metric(
@@ -212,8 +224,7 @@ class OutboxProducer:
         )
 
     async def request(self, cmd: OutboxPublishCommand) -> typing.NoReturn:
-        msg = "OutboxBroker does not support request-reply"
-        raise NotImplementedError(msg)
+        raise NotImplementedError(_REQUEST_UNSUPPORTED_MSG)
 
     async def _notify(self, session: typing.Any, queue: str) -> None:
         # ``pg_notify(:channel, :payload)`` — parameterized so channel and payload

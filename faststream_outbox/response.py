@@ -23,6 +23,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # Matches the ``queue`` column width in ``make_outbox_table`` (``String(255)``).
 _MAX_QUEUE_LENGTH = 255
 
+# Single source for the ``request()`` rejection message, shared by the broker, producer,
+# publisher, and the test fake so the four ``NotImplementedError``s read identically.
+_REQUEST_UNSUPPORTED_MSG = "OutboxBroker does not support request-reply (the outbox is fire-and-forget)"
+
 
 def _validate_publish_args(
     context: str,
