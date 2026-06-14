@@ -59,6 +59,8 @@ None.
 
 ### [LOW][design] `graceful_timeout=None` makes drain wait forever on a wedged handler
 
+> **RESOLVED (2026-06-14)** — the drain path clamps `None` to a finite fallback (`_DEFAULT_DRAIN_TIMEOUT_SECONDS = 15.0`, mirroring the broker default) so `stop()` is always strict-bound; `None` stays unbounded for `ping()`. Test: `tests/test_integration.py::test_graceful_timeout_none_still_bounds_drain`.
+
 `faststream_outbox/subscriber/usecase.py:244-245`; accepted at `broker.py:141` and `fastapi/router.py:79`, forwarded unchanged.
 
 **Problem.** `OutboxBroker`/`OutboxRouter` accept `graceful_timeout: float | None = 15.0` and forward `None` straight through. In subscriber `stop()`, `with anyio.move_on_after(self._outer_config.graceful_timeout): await self._inflight.join()` — `anyio.move_on_after(None)` produces an *unbounded* scope (deadline `inf`). With `graceful_timeout=None` and a wedged handler, `_inflight.join()` never returns, so `running` is never flipped to False, tasks are never cancelled, and `stop()` (hence `broker.stop()`) hangs. This silently defeats the documented "strict-bound drain" contract (architecture/drain.md:15-17).
@@ -69,7 +71,7 @@ None.
 
 ### [LOW][bug] `validate_schema()` cannot detect a missing/wrong `_lease_ck` CHECK constraint; docstring falsely claims the table declares no CHECK
 
-> **PARTIALLY RESOLVED (2026-06-14)** — the false `_drift_entry_to_error` docstring is corrected. The actual `pg_constraint` probe (a new failure mode in `validate_schema`) is **deferred to the behavior-change PR**, since it can make a DB that passed before start failing.
+> **RESOLVED (2026-06-14)** — docstring corrected (safe PR), and `validate_schema()` now runs `_validate_check_constraints_sync`, a `pg_constraint` probe that flags a missing or drifted `<table>_lease_ck`. Tests: `tests/test_integration.py::test_validate_schema_fails_when_lease_check_constraint_{missing,predicate_wrong}` (+ the existing passes-for-correct-table happy path). Note: this is a new failure mode — a DB lacking the CHECK that passed `validate_schema()` before will now fail it (intended).
 
 `faststream_outbox/client.py:587-621` (docstring at 597-599); constraint declared at `schema.py:92-95`.
 
@@ -80,6 +82,8 @@ None.
 **Fix.** Add a `pg_constraint` (contype='c') catalog probe for `<table>_lease_ck` parallel to `_validate_index_predicates_sync`, comparing `pg_get_constraintdef` against the expected normalized predicate. Correct the `_drift_entry_to_error` docstring. Optionally revisit the 0.9.0 release-note claim.
 
 ### [LOW][design] Handler returning `OutboxResponse` with a naive/invalid `activate_at` retries the inbound message to exhaustion
+
+> **RESOLVED (2026-06-14)** — `OutboxResponse.__init__` now runs the activate-mutex + tz-aware checks eagerly, so a misconfigured response raises at the `return OutboxResponse(...)` site instead of masquerading as a handler failure at dispatch. `OutboxPublishCommand` re-checks on `as_publish_command()` (still the authoritative source). Tests: `tests/test_unit.py::test_outbox_response_rejects_{naive_activate_at,both_activate_args}_eagerly`.
 
 `faststream_outbox/subscriber/usecase.py:905-919` (publish loop), `response.py:134-161` (deferred validation).
 

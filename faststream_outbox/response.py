@@ -122,9 +122,14 @@ class OutboxResponse(Response):
 
     Idiomatic FastStream shape: ``async def h(...) -> OutboxResponse``. Requires
     ``session=...`` for the same reason ``broker.publish`` does — the new row must
-    commit with the caller's domain writes. Validation (session type, activate
-    args mutex, tz-aware datetime) is deferred to ``OutboxPublishCommand.__init__``
-    on ``as_publish_command()`` so there's a single source of truth.
+    commit with the caller's domain writes.
+
+    The activate-args mutex + tz-aware checks run **eagerly** in ``__init__`` so a
+    misconfigured response raises at the ``return OutboxResponse(...)`` site. Deferring
+    them to ``as_publish_command()`` (dispatch time) made the error masquerade as a
+    handler failure and exhaust the inbound row's retry budget (audit 2026-06-14).
+    ``OutboxPublishCommand.__init__`` re-checks on ``as_publish_command()``, so it stays
+    the authoritative single source of truth (these eager checks are a fail-fast mirror).
 
     ``correlation_id`` defaults to the inbound message's correlation_id when not set
     — FastStream's ``SubscriberUsecase.process_message`` does the inheritance before
@@ -143,6 +148,12 @@ class OutboxResponse(Response):
         activate_at: _dt.datetime | None = None,
         timer_id: str | None = None,
     ) -> None:
+        if activate_in is not None and activate_at is not None:
+            msg = "OutboxResponse accepts at most one of activate_in / activate_at"
+            raise ValueError(msg)
+        if activate_at is not None and activate_at.tzinfo is None:
+            msg = "OutboxResponse requires activate_at to be timezone-aware"
+            raise ValueError(msg)
         super().__init__(body=body, headers=headers, correlation_id=correlation_id)
         self.queue = queue
         self.session = session

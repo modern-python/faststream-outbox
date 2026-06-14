@@ -30,6 +30,7 @@ from faststream_outbox import (
     NoRetry,
     OutboxBroker,
     OutboxPublisher,
+    OutboxResponse,
     OutboxRouter,
     TestOutboxBroker,
     make_dlq_table,
@@ -3541,3 +3542,28 @@ async def test_dlq_cte_insert_columns_match_make_dlq_table() -> None:
     insert_cols = {c.strip() for c in match.group(1).split(",")}
     expected = {c.name for c in dlq.columns} - {"id", "failed_at"}
     assert insert_cols == expected, f"DLQ CTE INSERT columns {insert_cols} drifted from table columns {expected}"
+
+
+def test_outbox_response_rejects_naive_activate_at_eagerly() -> None:
+    """OutboxResponse must reject a naive activate_at at construction, not defer it to dispatch time."""
+    naive = _dt.datetime(2030, 1, 1, 12, 0, 0)  # noqa: DTZ001  # deliberately tz-naive
+    with pytest.raises(ValueError, match="OutboxResponse requires activate_at to be timezone-aware"):
+        OutboxResponse(
+            {"x": 1},
+            queue="q",
+            session=None,  # ty: ignore[invalid-argument-type]  # error raises before session is used
+            activate_at=naive,
+        )
+
+
+def test_outbox_response_rejects_both_activate_args_eagerly() -> None:
+    """OutboxResponse must reject activate_in + activate_at together at construction."""
+    aware = _dt.datetime(2030, 1, 1, 12, 0, 0, tzinfo=_dt.UTC)
+    with pytest.raises(ValueError, match="OutboxResponse accepts at most one of activate_in / activate_at"):
+        OutboxResponse(
+            {"x": 1},
+            queue="q",
+            session=None,  # ty: ignore[invalid-argument-type]  # error raises before session is used
+            activate_in=_dt.timedelta(seconds=5),
+            activate_at=aware,
+        )
