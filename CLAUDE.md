@@ -54,9 +54,9 @@ Deep dive: `architecture/relay.md`. User-facing: `docs/usage/relay.md`.
 
 ### Timers (delayed delivery)
 
-`activate_in: timedelta` / `activate_at: datetime` (mutually exclusive) set `next_attempt_at`; the fetch CTE's `next_attempt_at <= now()` gates eligibility. `publish` computes server-side via `make_interval` (clock-skew-safe); `publish_batch` is client-side.
+`activate_in: timedelta` / `activate_at: datetime` (mutually exclusive) set `next_attempt_at`; the fetch CTE's `next_attempt_at <= now()` gates eligibility. For `publish`, `activate_in` is computed server-side via `make_interval` (clock-skew-safe) while `activate_at` is bound as the caller's absolute literal; `publish_batch` is fully client-side.
 
-`timer_id` (single `publish` only) → partial unique index `(queue, timer_id) WHERE timer_id IS NOT NULL`. Producer uses `pg_insert(...).on_conflict_do_nothing(...)` — re-publishing the same id is a no-op (returns `None`). NOTIFY is skipped when future-dated OR the conflict suppressed the insert.
+`timer_id` (single `publish` only) → partial unique index `(queue, timer_id) WHERE timer_id IS NOT NULL`. Producer uses `pg_insert(...).on_conflict_do_nothing(...)` — re-publishing the same id is a no-op (returns `None`). NOTIFY is skipped when future-dated OR the conflict suppressed the insert. The dedup window is **one *live* row per `(queue, timer_id)`** — it resets once the row is delivered (DELETEd) or terminally fails, so `timer_id` is "at most one in flight", not a global once-ever idempotency key (the DLQ keeps `timer_id` non-unique).
 
 `broker.cancel_timer(*, queue, timer_id, session)` issues `DELETE WHERE queue=? AND timer_id=? AND acquired_token IS NULL` — **the `acquired_token IS NULL` guard is load-bearing** (preserves the lease-token invariant; returns `False` if a handler is in flight).
 

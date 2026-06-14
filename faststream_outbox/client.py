@@ -16,6 +16,7 @@ can no longer mutate that row.
 """
 
 import abc
+import asyncio
 import datetime as _dt
 import uuid
 from typing import TYPE_CHECKING
@@ -56,6 +57,10 @@ if TYPE_CHECKING:
 if is_alembic_installed:
     from alembic.autogenerate import compare_metadata as _alembic_compare_metadata
     from alembic.migration import MigrationContext as _AlembicMigrationContext
+
+
+# Upper bound on the ``ping()`` liveness probe so a half-dead socket can't hang it.
+_PING_TIMEOUT_SECONDS = 5.0
 
 
 class AbstractOutboxClient(abc.ABC):
@@ -408,10 +413,13 @@ class OutboxClient(AbstractOutboxClient):
             raise RuntimeError(msg)
 
     async def ping(self) -> bool:
+        # Bound the probe: an unwrapped connect+SELECT 1 against a half-dead TCP socket
+        # can hang on the kernel keepalive default (~hours), defeating ping()'s purpose
+        # as a liveness check (F2-12; mirrors the LISTEN health probe's wait_for).
         try:
-            async with self._engine.connect() as conn:
+            async with asyncio.timeout(_PING_TIMEOUT_SECONDS), self._engine.connect() as conn:
                 await conn.execute(text("SELECT 1"))
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # includes TimeoutError on a hung probe
             return False
         return True
 
@@ -465,8 +473,9 @@ def _validate_index_predicates_sync(connection: "Connection", table: "Table") ->
     """
     Compare the live partial-index WHERE predicates against what the package expects (S2).
 
-    Alembic's index diff ignores ``postgresql_where``, so two drifts pass :func:`_run_validate`
-    yet break the producer's ``ON CONFLICT`` arbiter inference at publish time, both flagged here:
+    Alembic's index diff ignores ``postgresql_where``, so the alembic autogenerate pass
+    (:func:`_run_validate`) does not catch two drifts that break the producer's ``ON CONFLICT``
+    arbiter inference at publish time — both flagged by this separate probe:
 
     * a **wrong** predicate (e.g. ``{table}_timer_id_uq`` built ``WHERE timer_id IS NULL``
       instead of ``IS NOT NULL``), and

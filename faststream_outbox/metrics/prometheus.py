@@ -291,7 +291,7 @@ class PrometheusRecorder:
             # below is the canonical error counter; ``_published_duration`` records
             # every attempt (with the status label) so failed-publish latency stays
             # observable.
-            count = tags.get("count", 1)
+            count = tags.get("count", 0)  # default 0 matches the OTel adapter (F6-02); producer always sets it
             if status == "error":
                 # P28: an error lands 0 messages but is one failed publish. Increment the
                 # status="error" series (the exact label dashboards alert on) by 1, rather

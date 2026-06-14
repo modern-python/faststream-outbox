@@ -856,8 +856,8 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         Outbox-specific process_message — header propagation (G3) hook.
 
         Optionally fills empty Response headers with the inbound message's
-        headers when ``propagate_inbound_headers=True``. Task 5 adds the
-        OutboxResponse + foreign-publisher dual-fire guard (G1) here too.
+        headers when ``propagate_inbound_headers=True``, and runs the
+        OutboxResponse + foreign-publisher dual-fire guard here too.
 
         # Upstream equivalent (replaced):
         #   SubscriberUsecase.process_message

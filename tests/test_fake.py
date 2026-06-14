@@ -440,6 +440,16 @@ async def test_fake_broker_fetch_unprocessed_respects_limit() -> None:
         assert len(all_rows) == 5
 
 
+async def test_fake_broker_fetch_unprocessed_rejects_non_positive_limit() -> None:
+    """F4-04: the test broker mirrors the real limit validation (no silent rows[:-1] divergence on limit=-1)."""
+    broker = _make_broker()
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        for bad in (0, -1):
+            with pytest.raises(ValueError, match="limit"):
+                await broker.fetch_unprocessed(limit=bad)  # ty: ignore[missing-argument]
+
+
 async def test_fake_broker_router_subscriber_receives_publish() -> None:
     received: list[str] = []
     router = OutboxRouter()

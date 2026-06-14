@@ -549,6 +549,11 @@ def _build_fake_fetch_unprocessed(
         limit: int = 1000,
     ) -> list[OutboxInnerMessage]:
         del session
+        if limit < 1:
+            # Mirror the real broker's validation so a non-positive limit can't
+            # silently mis-slice (rows[:-1]) under the test broker (F4-04).
+            msg = f"limit must be >= 1, got {limit}"
+            raise ValueError(msg)
         rows = sorted(fake_client.rows, key=lambda r: r.id)
         if queue is not None:
             rows = [r for r in rows if r.queue == queue]

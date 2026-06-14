@@ -292,12 +292,9 @@ class OutboxBroker(
             for call in sub.calls:
                 for pub in call.handler._publishers:  # noqa: SLF001
                     outer = pub._outer_config  # noqa: SLF001  # ty: ignore[unresolved-attribute]
-                    if outer is self.config:  # pragma: no cover
-                        # Internal outbox publisher in a decorator chain — not intended.
-                        # Handlers should use broker.publish() directly, not decorate with
-                        # an internal publisher. This branch exists for completeness but is
-                        # unreachable in normal usage.
-                        continue  # pragma: no cover
+                    # An internal outbox publisher's ``outer`` is this broker's own config,
+                    # which carries a (truthy) ``producer`` — so the wired-producer check
+                    # below already skips it; no separate ``outer is self.config`` branch needed.
                     producer = getattr(outer, "producer", None)
                     if producer:
                         continue  # already wired / started
@@ -502,6 +499,10 @@ class OutboxBroker(
 
         Treat ``False`` as "no cancellation needed from your transaction", not as
         "cancellation failed".
+
+        Like :meth:`publish`, this runs on your session **without committing** — a returned
+        ``True`` only becomes durable when your transaction commits. If you branch on it and
+        then roll back, the cancellation rolls back with you.
         """
         if not isinstance(session, AsyncSession):
             msg = "broker.cancel_timer requires an sqlalchemy.ext.asyncio.AsyncSession"
@@ -525,8 +526,9 @@ class OutboxBroker(
         """
         Return outbox rows currently in the table — pending, in-flight, or future-dated.
 
-        Intended for test assertions: a successful delivery deletes the row, so anything
-        still in the table is "unprocessed". Pass *queue* to filter to a single queue;
+        Intended for test assertions and lease-free operator inspection (the lease-free
+        read path `get_one()`/`__aiter__()` point you here): a successful delivery deletes
+        the row, so anything still in the table is "unprocessed". Pass *queue* to filter to a single queue;
         omit it to return rows across all queues. *limit* caps the result set
         (default 1000) so an accidental call against a backlogged production table
         does not OOM the process. Runs on the caller's session (same transactional
@@ -536,6 +538,12 @@ class OutboxBroker(
         if not isinstance(session, AsyncSession):
             msg = "broker.fetch_unprocessed requires an sqlalchemy.ext.asyncio.AsyncSession"
             raise TypeError(msg)
+        if limit < 1:
+            # F4-04: a non-positive limit otherwise hits SQL (LIMIT -1 → DB error) or
+            # silently returns nothing (LIMIT 0); reject it up front, consistently with
+            # the fake.
+            msg = f"limit must be >= 1, got {limit}"
+            raise ValueError(msg)
         t = self._outbox_table
         stmt = select(*t.c).order_by(t.c.id).limit(limit)
         if queue is not None:
