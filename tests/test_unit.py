@@ -3570,6 +3570,31 @@ def test_outbox_response_rejects_both_activate_args_eagerly() -> None:
         )
 
 
+def test_outbox_response_rejects_empty_queue_eagerly() -> None:
+    """F4-01: OutboxResponse must reject an empty queue at construction, not defer to dispatch."""
+    with pytest.raises(ValueError, match="non-empty"):
+        OutboxResponse({"x": 1}, queue="", session=_make_session_mock())
+
+
+def test_outbox_response_rejects_non_str_queue_eagerly() -> None:
+    """F4-01: a non-str queue is a TypeError at construction, not an opaque dispatch-time error."""
+    with pytest.raises(TypeError, match="queue must be a str"):
+        OutboxResponse({"x": 1}, queue=123, session=_make_session_mock())  # ty: ignore[invalid-argument-type]
+
+
+def test_outbox_response_rejects_non_async_session_eagerly() -> None:
+    """F4-02: OutboxResponse must reject a non-AsyncSession at construction, like broker.publish."""
+    with pytest.raises(TypeError, match="AsyncSession"):
+        OutboxResponse({"x": 1}, queue="q", session=object())  # ty: ignore[invalid-argument-type]
+
+
+async def test_broker_publish_batch_empty_rejects_empty_queue() -> None:
+    """F4-06: an empty batch validates queue the same way a non-empty one does."""
+    broker = _make_broker()
+    with pytest.raises(ValueError, match="non-empty"):
+        await broker.publish_batch(queue="", session=_make_session_mock())  # no bodies
+
+
 def test_asyncapi_document_populates_channels_and_operations() -> None:
     """
     Regression: ``BrokerSpec(url=[])`` produced a structurally empty AsyncAPI document.
