@@ -1,9 +1,9 @@
 ---
-status: open
+status: shipped
 date: 2026-06-13
 slug: 2026-06-13-docs-audit-findings
 scope: docs/ (22 user-facing mkdocs pages)
-prs: []
+prs: [79, 80]
 outcome: >
   All findings resolved. Bugs B1–B5, CLAUDE.md drifts C1–C3, the
   inaccuracy tail I1–I15, and the improvement tail P1–P18 are all fixed
