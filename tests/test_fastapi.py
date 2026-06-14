@@ -22,7 +22,6 @@ from sqlalchemy import MetaData
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from faststream_outbox import NoRetry, OutboxMessage, OutboxResponse, make_dlq_table, make_outbox_table
-from faststream_outbox.client import AbstractOutboxClient
 from faststream_outbox.fastapi import (
     OutboxBroker as AnnotatedOutboxBroker,
 )
@@ -38,7 +37,7 @@ from faststream_outbox.fastapi import (
 from faststream_outbox.fastapi import (
     OutboxRouter,
 )
-from faststream_outbox.testing import FakeOutboxProducer, TestOutboxBroker
+from faststream_outbox.testing import TestOutboxBroker
 
 
 def _make_outbox_table() -> Any:
@@ -169,15 +168,26 @@ async def test_annotated_context_shortcuts_resolve_in_router_handler() -> None:
         captured["producer"] = producer
         captured["client"] = client
 
-    app = _make_app_with_router(router)
+    test_broker = TestOutboxBroker(router.broker)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        del app
+        async with test_broker:
+            yield
+
+    app = FastAPI(lifespan=lifespan)
+    app.include_router(router)
     with TestClient(app):
         await router.broker.publish({"x": 1}, queue="orders")  # ty: ignore[missing-argument]
 
     assert isinstance(captured["msg"], OutboxMessage)
     assert captured["broker"] is router.broker
-    # Test broker swaps the producer slot with FakeOutboxProducer during the lifespan.
-    assert isinstance(captured["producer"], FakeOutboxProducer)
-    assert isinstance(captured["client"], AbstractOutboxClient)
+    # F7-10: identity-check the injected producer/client against the swapped fakes — the
+    # ``Context("broker.config.broker_config.client")`` annotation *string* is the load-bearing
+    # artifact, and an isinstance check would pass even if it resolved to a different instance.
+    assert captured["producer"] is test_broker.fake_producer
+    assert captured["client"] is test_broker.fake_client
 
 
 def test_outbox_router_construction_requires_outbox_table() -> None:

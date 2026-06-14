@@ -1869,7 +1869,7 @@ async def test_fake_client_fetch_ties_break_on_id() -> None:
 
 @pytest.mark.parametrize("writer_conn", [None, "sentinel"])
 async def test_dispatch_one_threads_writer_conn_into_delete(writer_conn: object) -> None:
-    """``dispatch_one`` forwards ``writer_conn`` (sentinel or ``None``) into ``delete_with_lease``."""
+    """``dispatch_one`` forwards ``writer_conn`` AND the row's id + lease token into ``delete_with_lease``."""
     fake = FakeOutboxClient()
     broker, test_broker = _make_broker_for_dispatch(fake)
     msg = _make_msg_over_max_deliveries()
@@ -1883,6 +1883,11 @@ async def test_dispatch_one_threads_writer_conn_into_delete(writer_conn: object)
     spy.assert_awaited_once()
     assert spy.await_args is not None
     assert spy.await_args.args[0] is conn_arg
+    # F7-06: the lease-token guard is load-bearing — assert id + acquired_token are threaded
+    # from the row, not just the connection. A regression passing a stale/None token would
+    # silently break the WHERE acquired_token = :token invariant.
+    assert spy.await_args.args[1] == msg.id
+    assert spy.await_args.args[2] == msg.acquired_token
 
 
 async def test_dispatch_one_propagates_flush_error_when_writer_conn_set() -> None:
@@ -3114,6 +3119,29 @@ async def test_dlq_cte_uses_schema_qualified_table_names() -> None:
         # carries the schema → "app.outbox" / "app.outbox_dlq" (B10).
         assert "DELETE FROM app.outbox " in sql
         assert "INSERT INTO app.outbox_dlq " in sql
+    finally:
+        await engine.dispose()
+
+
+async def test_dlq_cte_quotes_adversarial_table_names() -> None:
+    """F3-05: the DLQ CTE is the one raw-SQL identifier site — assert adversarial names stay quoted/escaped."""
+    engine = create_async_engine("postgresql+asyncpg://u:p@localhost/db")  # constructed, never connected
+    try:
+        metadata = MetaData()
+        outbox = make_outbox_table(metadata, table_name='ob"x')
+        dlq = make_dlq_table(metadata, table_name="dlq;drop")
+        client = OutboxClient(engine, outbox, dlq_table=dlq)
+        stmt, _params = client._build_dlq_cte_stmt(  # noqa: SLF001
+            1,
+            uuid.uuid4(),
+            {"failure_reason": "rejected", "last_exception": None},
+        )
+        sql = str(stmt)
+        # The embedded double-quote is doubled (escaped) and the ';' name stays wrapped in
+        # quotes — the identifier cannot break out of its quoting into injectable SQL. A
+        # refactor dropping ``format_table`` for bare ``table.name`` would fail here.
+        assert '"ob""x"' in sql
+        assert '"dlq;drop"' in sql
     finally:
         await engine.dispose()
 
