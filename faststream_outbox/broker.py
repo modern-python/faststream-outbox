@@ -30,13 +30,14 @@ from faststream.specification.schema.extra import Tag, TagDict
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from faststream_outbox._time import utcnow
 from faststream_outbox.client import AbstractOutboxClient, OutboxClient, _row_to_message
 from faststream_outbox.configs import OutboxBrokerConfig
 from faststream_outbox.message import OutboxInnerMessage
 from faststream_outbox.metrics import MetricsRecorder, _noop_recorder
 from faststream_outbox.publisher.producer import OutboxProducer
 from faststream_outbox.registrator import OutboxRegistrator
-from faststream_outbox.response import OutboxPublishCommand, _validate_publish_args
+from faststream_outbox.response import _REQUEST_UNSUPPORTED_MSG, OutboxPublishCommand, _validate_publish_args
 
 
 _logger = logging.getLogger(__name__)
@@ -75,7 +76,7 @@ def _compute_next_at_client_side(
 ) -> _dt.datetime | None:
     """Resolve activate_in / activate_at to a single ``next_attempt_at`` value (client clock)."""
     if activate_in is not None:
-        return _dt.datetime.now(tz=_dt.UTC) + activate_in
+        return utcnow() + activate_in
     return activate_at
 
 
@@ -561,5 +562,4 @@ class OutboxBroker(
         # Mirror upstream BrokerUsecase.request's signature (message, queue, /, timeout)
         # so callers and IDEs see the real contract — the outbox is fire-and-forget, so
         # the only surprise is the NotImplementedError, not an opaque (*args, **kwargs).
-        msg = "OutboxBroker does not support request-reply (the outbox is fire-and-forget)"
-        raise NotImplementedError(msg)
+        raise NotImplementedError(_REQUEST_UNSUPPORTED_MSG)

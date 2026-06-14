@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from faststream.message.message import StreamMessage
 
+from faststream_outbox._time import utcnow
+
 
 if TYPE_CHECKING:
     from faststream._internal.basic_types import LoggerProto
@@ -33,10 +35,6 @@ _logger = logging.getLogger("faststream_outbox.message")
 # literals (and dashboards key labels off them) — adding a new value is a public
 # API change. The DLQ column is sized to accommodate growth; see ``schema.py``.
 DLQFailureReason = Literal["max_deliveries", "retry_terminal", "rejected"]
-
-
-def _utcnow() -> _dt.datetime:
-    return _dt.datetime.now(tz=_dt.UTC)
 
 
 @dataclass(kw_only=True)
@@ -147,7 +145,7 @@ class OutboxInnerMessage:
 
     def _record_attempt(self) -> None:
         self.attempts_count += 1
-        now = _utcnow()
+        now = utcnow()
         self.last_attempt_at = now
         if self.first_attempt_at is None:
             self.first_attempt_at = now

@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from faststream_outbox.publisher.config import OutboxPublisherConfig
 from faststream_outbox.publisher.specification import OutboxPublisherSpecification
-from faststream_outbox.response import OutboxPublishCommand
+from faststream_outbox.response import _REQUEST_UNSUPPORTED_MSG, OutboxPublishCommand
 
 
 if typing.TYPE_CHECKING:
@@ -123,5 +123,4 @@ class OutboxPublisher(PublisherUsecase):
         *,
         correlation_id: str | None = None,
     ) -> typing.NoReturn:
-        msg = "OutboxBroker does not support request-reply"
-        raise NotImplementedError(msg)
+        raise NotImplementedError(_REQUEST_UNSUPPORTED_MSG)

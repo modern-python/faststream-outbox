@@ -197,6 +197,13 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         # tag so adapters can map it to FastStream's ``handler`` label.
         return {"queue": queue, "subscriber": self.specification.call_name}
 
+    @staticmethod
+    def _with_exception_type(tags: dict[str, typing.Any], row: OutboxInnerMessage) -> dict[str, typing.Any]:
+        """Add the ``exception_type`` tag iff the row captured a handler exception (terminal/retry metrics)."""
+        if row.last_exception is not None:
+            tags["exception_type"] = type(row.last_exception).__name__
+        return tags
+
     def _emit_metric(self, event: str, tags: Mapping[str, typing.Any]) -> None:
         try:
             self._outer_config.metrics_recorder(event, tags)
@@ -551,7 +558,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             finally:
                 self._inflight.task_done()
 
-    async def dispatch_one(  # noqa: C901  # linear pipeline: guard, consume, branch on outcome, flush
+    async def dispatch_one(  # linear pipeline: guard, consume, branch on outcome, flush
         self,
         row: OutboxInnerMessage,
         *,
@@ -632,14 +639,10 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         # incorrect ``"retry_terminal"`` they got under the old ``last_exception``-first
         # ordering. Successful handlers leave ``terminal_failure_reason=None``.
         if row.terminal_failure_reason is not None:
-            terminal_tags: dict[str, typing.Any] = {**common, "reason": row.terminal_failure_reason}
-            if row.last_exception is not None:
-                terminal_tags["exception_type"] = type(row.last_exception).__name__
+            terminal_tags = self._with_exception_type({**common, "reason": row.terminal_failure_reason}, row)
             outcome: tuple[str, dict[str, typing.Any]] = ("nacked_terminal", terminal_tags)
         elif row.pending_delay_seconds is not None:
-            retry_tags: dict[str, typing.Any] = {**common, "next_delay_seconds": row.pending_delay_seconds}
-            if row.last_exception is not None:
-                retry_tags["exception_type"] = type(row.last_exception).__name__
+            retry_tags = self._with_exception_type({**common, "next_delay_seconds": row.pending_delay_seconds}, row)
             outcome = ("nacked_retried", retry_tags)
         else:
             outcome = ("acked", common)
