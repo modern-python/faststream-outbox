@@ -33,6 +33,8 @@ None.
 
 ### [MEDIUM][test] No end-to-end test of lease expiry DURING an in-flight handler
 
+> **RESOLVED (2026-06-14)** — `tests/test_integration.py::test_lease_expiry_during_inflight_handler_redelivers_without_clobber` races a real running handler past its `lease_ttl_seconds` through the live `_fetch_loop`/`_worker_loop`, asserts exactly one `acked` (new holder) and a `lease_lost(phase=terminal)` (stale holder dropped), and the row deleted exactly once.
+
 `tests/test_integration.py` (lease tests at 159-262, 297-315; duplicate-delivery assert at 1045) — production token threading at `faststream_outbox/subscriber/usecase.py:674-747`.
 
 **Problem.** The load-bearing lease-token invariant is tested only as isolated units (`delete_with_lease`/`mark_pending_with_lease` fed a synthetic `uuid.uuid4()`) and lease reclaim only by backdating `acquired_at` on an *idle* row with no handler running. No test drives the full live interleaving: a real running handler outlives `lease_ttl_seconds`, a second fetch reclaims + redelivers the same row mid-flight, and the test asserts the slow handler's terminal DELETE is correctly dropped (rowcount 0 / `lease_lost` fires) so the new holder is not clobbered. The one duplicate-delivery assertion lives in the 8-worker drain where all handlers finish in microseconds and no lease ever expires.
@@ -42,6 +44,8 @@ None.
 **Fix.** Add an integration test with small `lease_ttl_seconds` (~0.3s) and `max_workers>=2`: a handler gated on an `asyncio.Event` that sleeps past the TTL; publish one row; let worker A claim it; wait past TTL so a second fetch reclaims+redelivers; release both; assert the row is processed exactly once (new holder wins), exactly one terminal DELETE lands, and `lease_lost(phase=terminal)` fired for the stale holder.
 
 ### [MEDIUM][test] Relay-chain guardrails only tested in fake-sync mode, never through the real worker loop
+
+> **RESOLVED (2026-06-14)** — `tests/test_integration.py::test_relay_dual_fire_guard_through_worker_loop_leaves_row_and_logs` drives a foreign-publisher-decorated subscriber returning `OutboxResponse` through the real worker loop against live Postgres, asserting the `_worker_inner` catch path: foreign publish never fires, the row is left in place (not deleted), and the `_OutboxConfigError` is logged at ERROR.
 
 `tests/test_relay.py:208-258` — production paths at `faststream_outbox/subscriber/usecase.py:588-595` (dispatch_one re-raises) vs `529-539` (`_worker_inner` catches, logs ERROR, leaves row for lease-expiry).
 
