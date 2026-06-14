@@ -1683,3 +1683,97 @@ async def test_relay_dual_fire_guard_through_worker_loop_leaves_row_and_logs(
     assert await _row_count(pg_engine, outbox_table) == 1, "config-error row must be left for lease-expiry, not deleted"
     # And the _OutboxConfigError was logged at ERROR by the worker loop.
     assert errors, "worker loop must log the _OutboxConfigError at ERROR"
+
+
+async def test_listen_failure_falls_back_to_polling_against_real_postgres(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+) -> None:
+    """
+    With the LISTEN connection unavailable, delivery still happens via polling.
+
+    Prior coverage stubbed ``asyncpg.connect``/``add_listener`` to fail in unit tests;
+    this drives a real subscriber against live Postgres whose ``_open_listen_connection``
+    returns None (the documented fallback) and asserts the row is still delivered within
+    the polling interval — proving the fetch loop does not wedge without LISTEN.
+    """
+    received: list[dict[str, Any]] = []
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+
+    @broker.subscriber("orders", min_fetch_interval=0.05, max_fetch_interval=0.3)
+    async def handle(body: dict[str, Any]) -> None:
+        received.append(body)
+
+    sub = next(iter(broker._subscribers))  # noqa: SLF001
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    # Force the LISTEN setup to report failure → polling-only path.
+    with mock.patch.object(sub, "_open_listen_connection", new=mock.AsyncMock(return_value=None)):
+        async with broker:
+            async with session_factory() as session, session.begin():
+                await broker.publish({"order_id": 7}, queue="orders", session=session)
+            await _wait_until(lambda: bool(received), timeout=5.0)
+
+    assert received == [{"order_id": 7}]
+    assert await _row_count(pg_engine, outbox_table) == 0
+
+
+async def test_worker_rebuilds_writer_connection_after_flush_failure(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+) -> None:
+    """
+    A terminal-write failure poisons the worker's writer connection; it must rebuild and recover.
+
+    Prior coverage only drove this with MagicMock engines (asserting ``connect`` was called
+    twice). Here a real terminal ``delete_with_lease`` raises once against live Postgres,
+    forcing ``_run_with_reconnect`` to tear down and reopen the AUTOCOMMIT writer connection.
+    The row then redelivers via lease expiry and clears on the second, successful attempt —
+    proving the rebuilt connection actually drains rows.
+    """
+    received: list[int] = []
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+
+    @broker.subscriber(
+        "orders",
+        min_fetch_interval=0.05,
+        max_fetch_interval=0.2,
+        max_workers=1,
+        lease_ttl_seconds=1.0,  # short so the un-deleted row is reclaimed quickly
+    )
+    async def handle(body: dict[str, Any]) -> None:
+        received.append(body["i"])
+
+    client = broker.client
+    original_delete = client.delete_with_lease
+    calls = {"n": 0}
+
+    async def flaky_delete(*args: Any, **kwargs: Any) -> bool:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            msg = "simulated writer-connection flush failure"
+            raise RuntimeError(msg)
+        return await original_delete(*args, **kwargs)
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    with mock.patch.object(client, "delete_with_lease", side_effect=flaky_delete):
+        async with broker:
+            async with session_factory() as session, session.begin():
+                await broker.publish({"i": 0}, queue="orders", session=session)
+            # First delete raises (poisons the writer conn); after reconnect + lease-expiry
+            # reclaim, the second delete lands and the row clears.
+            await _wait_until(lambda: calls["n"] >= 2, timeout=15.0)
+
+            async def _deleted() -> bool:
+                return await _row_count(pg_engine, outbox_table) == 0
+
+            deadline = asyncio.get_event_loop().time() + 15.0
+            while asyncio.get_event_loop().time() < deadline:
+                if await _deleted():
+                    break
+                await asyncio.sleep(0.1)  # pragma: no cover  # slow-hardware safety valve
+            else:  # pragma: no cover
+                msg = "row not cleared after writer-connection rebuild"
+                raise AssertionError(msg)
+
+    assert calls["n"] >= 2, "the terminal write must be retried after the connection rebuild"
+    assert received  # handler ran (at least once; redelivery may run it again)

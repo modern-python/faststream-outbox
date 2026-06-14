@@ -9,7 +9,6 @@ producer never opens its own session — every command carries the caller's
 """
 
 import datetime as _dt
-import logging
 import time
 import typing
 
@@ -19,12 +18,9 @@ from sqlalchemy import Float, Table, bindparam, func, insert, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from faststream_outbox.envelope import _encode_payload
-from faststream_outbox.metrics import MetricsRecorder, _noop_recorder
+from faststream_outbox.metrics import MetricsRecorder, _noop_recorder, _safe_emit
 from faststream_outbox.parser.parser import OutboxParser
 from faststream_outbox.response import OutboxPublishCommand
-
-
-_logger = logging.getLogger(__name__)
 
 
 if typing.TYPE_CHECKING:
@@ -62,10 +58,10 @@ class OutboxProducer:
         self._metrics_recorder = metrics_recorder
 
     def _emit_metric(self, event: str, tags: "Mapping[str, typing.Any]") -> None:
-        try:
-            self._metrics_recorder(event, tags)
-        except Exception:  # noqa: BLE001
-            _logger.log(logging.DEBUG, "metrics recorder raised", exc_info=True)
+        # Delegate to the shared swallow-and-DEBUG-log helper so the recorder-isolation
+        # contract lives in exactly one place (the subscriber's _emit_metric is the one
+        # deliberate exception — it routes through self._log for handler-scoped context).
+        _safe_emit(self._metrics_recorder, event, tags)
 
     def connect(
         self,

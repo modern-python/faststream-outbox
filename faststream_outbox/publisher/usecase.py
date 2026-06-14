@@ -67,7 +67,7 @@ class OutboxPublisher(PublisherUsecase):
 
     async def publish(  # ty: ignore[invalid-method-override]
         self,
-        body: "SendableMessage",
+        body: typing.Any,  # parity with broker.publish (both build OutboxPublishCommand(body: Any))
         *,
         session: AsyncSession,
         headers: dict[str, str] | None = None,

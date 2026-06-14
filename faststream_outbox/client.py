@@ -538,7 +538,7 @@ def _run_validate(
     # domain tables (in their own MetaData) don't show up in the diff. Carry the
     # user's schema onto the canonical copy so the autogenerate diff compares
     # ``app.outbox`` against ``app.outbox`` rather than the default search_path —
-    # matching the schema-qualified DLQ CTE in ``_build_dlq_cte`` (B10).
+    # matching the schema-qualified DLQ CTE in ``_build_dlq_cte_stmt`` (B10).
     canonical_metadata = MetaData(schema=table.schema)
     canonical_factory(canonical_metadata, table.name)
 
@@ -594,9 +594,12 @@ def _drift_entry_to_error(entry: "tuple[typing.Any, ...]", table_name: str) -> s
       modify_nullable  -> (op, schema, table_name, column_name, opts, existing_null, metadata_null)
       add_index        -> (op, Index)
 
-    The canonical outbox table declares no CHECK / FK / UNIQUE constraints
-    (only the autoincrement PK, which Alembic emits as part of ``add_table``),
-    so ``add_constraint`` is not a reachable op here.
+    ``add_constraint`` is intentionally not mapped. The canonical table *does* declare
+    a CHECK (``<table>_lease_ck``) and a partial unique index (``<table>_timer_id_uq``):
+    the unique index surfaces as ``add_index`` above, but Alembic's ``compare_metadata``
+    has no check-constraint comparator, so a missing or altered CHECK never appears in
+    this diff at all (a known ``validate_schema`` blind spot — detecting it needs a
+    separate ``pg_constraint`` catalog probe).
     """
     op = entry[0]
     if op == "add_table":
