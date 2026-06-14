@@ -53,23 +53,17 @@ _LEASE_IDX_SUFFIX = "_lease_idx"
 _LEASE_CK_SUFFIX = "_lease_ck"
 
 
-def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table:
+def validate_table_identifiers(table_name: str) -> None:
     """
-    Build the outbox ``Table`` (with the partial fetch index) and attach it to *metadata*.
+    Raise ``ValueError`` if any identifier derived from *table_name* exceeds Postgres' 63-byte limit.
 
-    The user wires the returned table into their own SQLAlchemy ``MetaData`` so it is
-    discovered by Alembic's autogenerate. They are responsible for the actual migration.
-
-    Raises ``ValueError`` if *table_name* would push the NOTIFY channel
-    ``outbox_<table_name>`` past Postgres' 63-byte identifier limit (NAMEDATALEN-1).
+    Byte length, not char count — UTF-8 multibyte chars expand and would silently truncate
+    identifiers. Guards the LONGEST derived identifier: the NOTIFY channel ``outbox_<t>`` AND
+    the index/constraint names (``<t>_pending_idx`` etc., longer than the channel prefix), so a
+    name that fits the channel can still overflow an index name and fail at CREATE INDEX time (P7).
+    Called by :func:`make_outbox_table` and ``OutboxClient.__init__`` so a directly-constructed or
+    reflected ``Table`` can't bypass the guard (F3-02).
     """
-    # Byte length, not char count — UTF-8 multibyte chars expand and would silently
-    # truncate identifiers. Guard on the LONGEST identifier derived from table_name:
-    # the NOTIFY channel "outbox_<t>" (7-byte prefix) AND the index / constraint names
-    # ("<t>_pending_idx", "<t>_timer_id_uq", "<t>_lease_idx", "<t>_lease_ck"; suffixes
-    # up to ~12 bytes). The index suffixes are longer than the channel prefix, so a
-    # table_name that fits the channel can still overflow an index name and fail at
-    # CREATE INDEX time (P7).
     derived = tuple(
         ident.encode("utf-8")
         for ident in (
@@ -88,6 +82,19 @@ def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table
             f"(got {len(longest)})"
         )
         raise ValueError(msg)
+
+
+def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table:
+    """
+    Build the outbox ``Table`` (with the partial fetch index) and attach it to *metadata*.
+
+    The user wires the returned table into their own SQLAlchemy ``MetaData`` so it is
+    discovered by Alembic's autogenerate. They are responsible for the actual migration.
+
+    Raises ``ValueError`` if *table_name* would push the NOTIFY channel
+    ``outbox_<table_name>`` past Postgres' 63-byte identifier limit (NAMEDATALEN-1).
+    """
+    validate_table_identifiers(table_name)
     table = Table(
         table_name,
         metadata,

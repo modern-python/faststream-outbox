@@ -334,6 +334,10 @@ class OutboxBroker(
         # (e.g. a mid-shutdown include_router) would desync the strict zip and raise out of
         # stop(), defeating its never-raise contract.
         subs = list(self.subscribers)
+        # F1-03: shutdown is irreversible from here, so flip running BEFORE the await —
+        # otherwise an external cancellation of stop() during the gather leaves
+        # running=True over already-stopped subscribers (ping() would lie).
+        self.running = False
         results = await asyncio.gather(
             *(sub.stop() for sub in subs),
             return_exceptions=True,
@@ -341,7 +345,6 @@ class OutboxBroker(
         for sub, result in zip(subs, results, strict=True):
             if isinstance(result, BaseException):
                 self._log_subscriber_stop_error(sub, result)
-        self.running = False
 
     def _log_subscriber_stop_error(self, sub: object, exc: BaseException) -> None:
         logger_state = self.config.broker_config.logger

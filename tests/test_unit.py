@@ -20,7 +20,7 @@ from faststream.response.publish_type import PublishType
 from faststream.response.response import PublishCommand
 from faststream.specification import AsyncAPI
 from pydantic import BaseModel
-from sqlalchemy import MetaData
+from sqlalchemy import MetaData, Table
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
@@ -676,6 +676,34 @@ async def test_broker_ping_times_out_on_hung_query(monkeypatch: pytest.MonkeyPat
     engine.connect = _ConnCtx  # AsyncEngine.connect() returns an async CM (sync call)
     broker = _make_broker(engine)
     assert await broker.ping() is False
+
+
+def test_outbox_client_rejects_over_long_table_identifier() -> None:
+    """F3-02: a directly-constructed Table with an over-long name is rejected at OutboxClient construction."""
+    table = Table("o" * 52, MetaData())  # "<name>_pending_idx" overflows the 63-byte identifier limit
+    with pytest.raises(ValueError, match="too long"):
+        OutboxClient(object(), table)  # ty: ignore[invalid-argument-type]  # validation runs before engine use
+
+
+async def test_broker_stop_sets_running_false_before_stopping_subscribers() -> None:
+    """F1-03: running flips False before the subscriber-stop gather, so a cancelled stop can't lie via ping()."""
+    broker = _make_broker()
+
+    async def handle(body: dict) -> None: ...
+
+    broker.subscriber("orders")(handle)
+    sub = next(iter(broker.subscribers))
+    observed: dict[str, bool] = {}
+
+    async def spy_stop() -> None:
+        observed["running_during_stop"] = broker.running
+
+    broker.running = True
+    with patch.object(sub, "stop", new=spy_stop):
+        await broker.stop()
+
+    assert observed["running_during_stop"] is False  # set before the gather, not after
+    assert broker.running is False
 
 
 async def test_broker_stop_logs_subscriber_failure_and_completes() -> None:
@@ -2493,6 +2521,47 @@ async def test_run_with_reconnect_resets_backoff_after_sustained_uptime(monkeypa
     # 3 failures, each preceded by a reset → _compute_backoff always sees attempt 1
     # (the buggy lifetime-accumulating counter would produce [1, 2, 3]).
     assert attempts == [1, 1, 1]
+
+
+async def test_run_with_reconnect_does_not_reset_backoff_when_open_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """F1-06: a failing open (inner never runs) must NOT reset the backoff, even past the threshold."""
+    fake = FakeOutboxClient()
+    broker, test_broker = _make_broker_for_dispatch(fake)
+    attempts: list[int] = []
+
+    async def _no_sleep(_delay: float) -> None: ...
+
+    def _capture_backoff(attempt: int, ceiling: float, *, base: float = 1.0) -> float:
+        del ceiling, base
+        attempts.append(attempt)
+        return 0.0
+
+    monkeypatch.setattr("faststream_outbox.subscriber.usecase.anyio.sleep", _no_sleep)
+    monkeypatch.setattr("faststream_outbox.subscriber.usecase._compute_backoff", _capture_backoff)
+    # threshold 0 → the OLD code (started captured before open) would treat every failed
+    # open as "sustained uptime" and reset; the fix captures started only after open succeeds.
+    monkeypatch.setattr("faststream_outbox.subscriber.usecase._BACKOFF_RESET_THRESHOLD_SECONDS", 0.0)
+
+    async with test_broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        sub.running = True
+
+        @asynccontextmanager
+        async def _failing_open(_engine: object) -> typing.AsyncIterator[dict[str, object]]:
+            if len(attempts) >= 3:  # exit cleanly after observing 3 escalating attempts
+                sub.running = False
+                yield {}
+                return
+            boom = "open failed"
+            raise RuntimeError(boom)
+
+        async def _inner() -> None: ...
+
+        with patch.object(sub, "_log"):
+            await sub._run_with_reconnect(name="t", open_resources=_failing_open, inner=_inner)  # noqa: SLF001
+
+    # A failing open does NOT reset → attempts escalate. The pre-fix code reset each time → [1, 1, 1].
+    assert attempts == [1, 2, 3]
 
 
 async def test_outbox_client_delete_with_lease_uses_caller_conn() -> None:
