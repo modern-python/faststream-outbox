@@ -14,18 +14,13 @@ but deliberately unscheduled pending a trigger.
 
 ### FastAPI integration
 
-- **`OutboxRouter` doesn't forward `dlq_table` / `metrics_recorder` /
-  `routers`.** These three `OutboxBroker.__init__` arguments are not
-  exposed on `OutboxRouter.__init__`, and the router constructs the broker
-  internally with no handle to inject a pre-built one — so a FastAPI user
-  **cannot** enable the dead-letter queue or the metrics-recorder seam
-  through the router at all. The only path today is a standalone
-  `OutboxBroker`. This is documented as a limitation in
-  [`docs/usage/fastapi.md`](../docs/usage/fastapi.md) (audit improvement
-  P18, #72). Forwarding the kwargs is small in `OutboxRouter.__init__` +
-  the `super().__init__` passthrough, but it's a real feature with a
-  design surface (defaults, AsyncAPI/typing implications, whether
-  `routers` even makes sense through the FastAPI lifespan), not a
-  mechanical fix — hence a spec, not a drive-by. Revisit when a concrete
-  "FastAPI + DLQ" or "FastAPI + recorder seam" demand surfaces.
-  (`faststream_outbox/fastapi/router.py`)
+- **`OutboxRouter` doesn't forward `routers`.** `dlq_table` and
+  `metrics_recorder` now forward to the inner broker (pass-3 audit F8-01,
+  PR #88) — a FastAPI user can enable the DLQ and the recorder seam through
+  the router. The remaining unforwarded `OutboxBroker.__init__` argument is
+  `routers`: its semantics through the FastAPI lifespan are unsettled
+  (the router contributes its own subscribers via `app.include_router`, so
+  a separate `routers` sequence's start/AsyncAPI behavior needs a design
+  call). Subscribers can be registered directly on the `OutboxRouter`
+  instead. Revisit if a concrete "include a sub-router under the FastAPI
+  outbox router" demand surfaces. (`faststream_outbox/fastapi/router.py`)

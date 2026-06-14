@@ -47,6 +47,7 @@ if typing.TYPE_CHECKING:
     from starlette.routing import BaseRoute
     from starlette.types import ASGIApp, Lifespan
 
+    from faststream_outbox.metrics import MetricsRecorder
     from faststream_outbox.publisher.usecase import OutboxPublisher
     from faststream_outbox.retry import RetryStrategyProto
     from faststream_outbox.subscriber.usecase import OutboxSubscriber
@@ -69,6 +70,7 @@ class OutboxRouter(StreamRouter[OutboxInnerMessage]):
         engine: "AsyncEngine | None" = None,
         *,
         outbox_table: "Table",
+        dlq_table: "Table | None" = None,
         # Outbox broker kwargs (mirror ``OutboxBroker.__init__``). Note: ``apply_types``
         # is fixed to False by ``StreamRouter`` (FastAPI's FastDepends is used instead),
         # and ``dependencies`` here means FastAPI dependencies — the broker's
@@ -78,6 +80,8 @@ class OutboxRouter(StreamRouter[OutboxInnerMessage]):
         middlewares: Sequence["type[BaseMiddleware] | BrokerMiddleware[OutboxInnerMessage]"] = (),
         graceful_timeout: float | None = 15.0,
         serializer: "SerializerProto | None" = EMPTY,
+        # Metrics (recorder seam — mirrors ``OutboxBroker.__init__``)
+        metrics_recorder: "MetricsRecorder | None" = None,
         # AsyncAPI / Specification
         specification: typing.Optional["SpecificationFactory"] = None,
         description: str | None = None,
@@ -114,6 +118,8 @@ class OutboxRouter(StreamRouter[OutboxInnerMessage]):
             # Outbox-broker kwargs (flow through StreamRouter's **connection_kwars
             # into ``OutboxBroker(...)``)
             outbox_table=outbox_table,
+            dlq_table=dlq_table,
+            metrics_recorder=metrics_recorder,
             decoder=decoder,
             parser=parser,
             graceful_timeout=graceful_timeout,

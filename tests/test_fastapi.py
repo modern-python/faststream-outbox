@@ -9,7 +9,7 @@ the in-memory fake client during the FastAPI lifespan, mirroring the existing
 yielding a session-shaped mock from a normal FastAPI dependency.
 """
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
 from unittest.mock import AsyncMock
@@ -21,7 +21,7 @@ from faststream.middlewares import AckPolicy
 from sqlalchemy import MetaData
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from faststream_outbox import NoRetry, OutboxMessage, OutboxResponse, make_outbox_table
+from faststream_outbox import NoRetry, OutboxMessage, OutboxResponse, make_dlq_table, make_outbox_table
 from faststream_outbox.client import AbstractOutboxClient
 from faststream_outbox.fastapi import (
     OutboxBroker as AnnotatedOutboxBroker,
@@ -245,3 +245,32 @@ def test_outbox_router_forwards_broker_kwargs_to_inner_broker() -> None:
     """End-to-end forwarding: an outbox-broker kwarg passed to OutboxRouter reaches the broker."""
     router = OutboxRouter(outbox_table=_make_outbox_table(), graceful_timeout=3.5)
     assert router.broker.config.graceful_timeout == 3.5
+
+
+async def test_outbox_router_forwards_dlq_table_and_metrics_recorder_to_inner_broker() -> None:
+    """F8-01: dlq_table + metrics_recorder reach the inner broker (DLQ + recorder seam usable under FastAPI)."""
+    metadata = MetaData()
+    t = make_outbox_table(metadata)
+    dlq = make_dlq_table(metadata)
+    events: list[str] = []
+
+    def recorder(event: str, tags: Mapping[str, Any]) -> None:
+        del tags
+        events.append(event)
+
+    router = OutboxRouter(outbox_table=t, dlq_table=dlq, metrics_recorder=recorder)
+
+    @router.subscriber("orders")
+    async def handle(body: dict) -> None:
+        del body
+
+    # Both kwargs reached the inner broker...
+    assert router.broker._dlq_table is dlq  # noqa: SLF001
+    assert router.broker.config.metrics_recorder is recorder
+
+    # ...and the forwarded recorder actually fires on the inner broker's dispatch path.
+    app = _make_app_with_router(router)
+    with TestClient(app):
+        await router.broker.publish({"x": 1}, queue="orders")  # ty: ignore[missing-argument]
+
+    assert events  # the recorder seam is live under the FastAPI router
