@@ -58,8 +58,10 @@ def test_otel_acked_records_process_duration_histogram() -> None:
     metrics = _collect_metrics(reader)
     assert "messaging.process.duration" in metrics
     points = metrics["messaging.process.duration"].data_points
-    # Histogram point: at least one bucket count > 0.
     assert sum(p.count for p in points) == 1
+    # F7-09: pin the status attribute too — the source's acked branch hinges on it, and a
+    # regression mislabeling the outcome would otherwise pass the count-only check.
+    assert dict(points[0].attributes)["messaging.outbox.status"] == "acked"
 
 
 def test_otel_messages_counter_is_optional() -> None:

@@ -186,4 +186,6 @@ Every confirmed finding is now resolved, documented, consciously dropped, or def
 - **F5-04 code** (`correlation_id` fallback → `gen_cor_id`) — `str(msg.id)` is *better* (stable across re-fetch); fallback unreachable for canonical rows. Doc-only.
 - **F3-04** (structured logging) — `!r` already neutralizes CRLF/log-injection; converting many log sites is churn for marginal benefit.
 
-**Deferred to a follow-up (PR #95):** F7-07 (NOTIFY-wakeup determinism), F7-09 (telemetry exact bounds, 4 files), F1-08 (sync dispatch via `fake_client.fetch` — higher risk).
+**Resolved (test/test-infra, PR #95):** F7-07 (NOTIFY-wakeup tests now use a 30s poll interval — a 15× margin the poll path can't meet, so a broken NOTIFY fails rather than flakes), F7-09 (OTel exact counts + `status="acked"` attribute; Prometheus middleware sums matching samples instead of `max(...)`, so a duplicate series pushes past 1.0 and fails), F1-08 (shared `_claim_fake_row` claim mechanics between `FakeOutboxClient.fetch` and `_sync_dispatch` — same `deliveries_count`/lease path; eligibility gating stays in `fetch` so sync-mode still fires future-dated rows immediately).
+
+**Pass-3 audit fully closed.** Every confirmed finding is resolved, documented, or consciously dropped across PRs #85–#95.
