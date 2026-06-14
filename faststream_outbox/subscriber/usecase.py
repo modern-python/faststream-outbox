@@ -913,8 +913,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                     if not result_msg.correlation_id:
                         result_msg.correlation_id = message.correlation_id
 
-                    if self._config.propagate_inbound_headers and not result_msg.headers:
-                        result_msg.headers = dict(message.headers)
+                    self._maybe_propagate_inbound_headers(result_msg, message)
 
                     self._reject_outbox_response_with_foreign_publisher(result_msg, h.handler)
 
@@ -941,6 +940,31 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             raise SubscriberNotFound(error_msg)  # pragma: no cover
 
         return ensure_response(None)  # pragma: no cover
+
+    def _maybe_propagate_inbound_headers(
+        self,
+        result_msg: "Response",
+        message: typing.Any,
+    ) -> None:
+        """
+        Fill empty Response headers from the inbound message when configured.
+
+        ``propagate_inbound_headers=True`` carries the inbound row's headers onto a
+        response that didn't set its own. For a chained ``OutboxResponse`` the
+        envelope-managed ``content-type``/``correlation_id`` are dropped first: that
+        response re-encodes through ``_encode_payload``, which re-derives content-type
+        from the new body and reads correlation_id from the dedicated field, so
+        propagating the inbound values would make it raise and nack the *successful*
+        inbound row (audit F5-01/F5-02). Foreign-publisher relays don't re-encode and
+        keep forwarding these headers verbatim.
+        """
+        if not (self._config.propagate_inbound_headers and not result_msg.headers):
+            return
+        propagated = dict(message.headers)
+        if isinstance(result_msg, OutboxResponse):
+            for managed in ("content-type", "correlation_id"):
+                propagated.pop(managed, None)
+        result_msg.headers = propagated
 
     @staticmethod
     def _reject_outbox_response_with_foreign_publisher(
