@@ -102,7 +102,7 @@ async def test_outbox_telemetry_middleware_records_process_duration_histogram() 
     instruments = _instruments(reader)
     assert "messaging.process.duration" in instruments
     points = instruments["messaging.process.duration"].data_points
-    assert any(p.count >= 1 for p in points)
+    assert sum(p.count for p in points) == 1  # exactly one consume — would catch a double-record
     # Confirm the messaging.system attribute is the canonical short name.
     attrs = dict(points[0].attributes)
     assert attrs["messaging.system"] == "outbox"
@@ -123,7 +123,7 @@ async def test_outbox_telemetry_middleware_messages_counter_increments_when_enab
     instruments = _instruments(reader)
     assert "messaging.process.messages" in instruments
     points = instruments["messaging.process.messages"].data_points
-    assert sum(p.value for p in points) >= 1
+    assert sum(p.value for p in points) == 1  # exactly one message consumed
 
 
 async def test_outbox_telemetry_middleware_messages_counter_absent_when_disabled() -> None:

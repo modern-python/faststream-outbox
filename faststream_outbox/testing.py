@@ -57,6 +57,20 @@ class _FakeRow:
     timer_id: str | None = None
 
 
+def _claim_fake_row(row: _FakeRow, *, now: _dt.datetime, token: uuid.UUID) -> None:
+    """
+    Set the lease and bump ``deliveries_count`` — the shared claim mechanics (F1-08).
+
+    Both ``FakeOutboxClient.fetch`` (loop mode) and ``_sync_dispatch`` (sync mode) route
+    through here, so the ``max_deliveries`` boundary is exercised on one path. Eligibility
+    gating (``next_attempt_at <= now``) stays in ``fetch`` only — sync mode deliberately
+    fires future-dated rows immediately, so it claims its row without that gate.
+    """
+    row.acquired_at = now
+    row.acquired_token = token
+    row.deliveries_count += 1
+
+
 class FakeOutboxClient(AbstractOutboxClient):
     """In-memory ``OutboxClient`` substitute. Same surface, list-of-rows storage."""
 
@@ -145,9 +159,7 @@ class FakeOutboxClient(AbstractOutboxClient):
             key=lambda r: (r.next_attempt_at, r.id),
         )
         for row in eligible[:limit]:
-            row.acquired_at = now
-            row.acquired_token = token
-            row.deliveries_count += 1
+            _claim_fake_row(row, now=now, token=token)
             out.append(_to_inner(row))
         return out
 
@@ -279,9 +291,7 @@ async def _sync_dispatch(fake_client: FakeOutboxClient, broker: OutboxBroker, qu
     fake_row = next((r for r in fake_client.rows if r.id == row_id), None)
     if fake_row is None:  # pragma: no cover  # defensive: feed just returned this id
         return
-    fake_row.acquired_token = uuid.uuid4()
-    fake_row.acquired_at = utcnow()
-    fake_row.deliveries_count += 1
+    _claim_fake_row(fake_row, now=utcnow(), token=uuid.uuid4())
     await subscriber.dispatch_one(_to_inner(fake_row))
 
 

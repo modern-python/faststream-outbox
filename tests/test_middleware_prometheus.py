@@ -83,7 +83,7 @@ async def test_outbox_prometheus_middleware_consume_scope_increments_received_to
         if metric.name == "faststream_received_messages":
             for sample in metric.samples:
                 if sample.name.endswith("_total") and sample.labels.get("broker") == "outbox":
-                    found_value = max(found_value, sample.value)
+                    found_value += sample.value  # F7-09: sum, not max — a duplicate series would push this past 1.0
     assert found_value == 1.0
 
 
@@ -107,7 +107,7 @@ async def test_outbox_prometheus_middleware_consume_processed_status_acked() -> 
                     and sample.labels.get("broker") == "outbox"
                     and sample.labels.get("status") == "acked"
                 ):
-                    acked = max(acked, sample.value)
+                    acked += sample.value  # F7-09: sum, not max — a duplicate series would push this past 1.0
     assert acked == 1.0
 
 
@@ -128,7 +128,7 @@ async def test_outbox_prometheus_middleware_message_size_observed() -> None:
         if metric.name == "faststream_received_messages_size_bytes":
             for sample in metric.samples:
                 if sample.name.endswith("_count") and sample.labels.get("broker") == "outbox":
-                    observed = max(observed, sample.value)
+                    observed += sample.value  # F7-09: sum, not max — a duplicate series would push this past 1.0
     assert observed == 1.0
 
 
@@ -153,7 +153,7 @@ async def test_outbox_prometheus_middleware_publish_scope_fires_via_real_broker_
                     and sample.labels.get("destination") == "orders"
                     and sample.labels.get("status") == "success"
                 ):
-                    published = max(published, sample.value)
+                    published += sample.value  # F7-09: sum, not max — a duplicate series would push this past 1.0
     assert published == 1.0
 
 

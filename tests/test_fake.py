@@ -648,13 +648,14 @@ async def test_loop_mode_feed_wakes_fetch_loop_via_notify() -> None:
     """
     P30: feeding a row in loop mode wakes the fetch loop via NOTIFY, not the full poll interval.
 
-    With a deliberately slow 5s poll, the handler should still run within 2s — only possible
-    if feed() set the subscriber's _notify_event (the production NOTIFY analogue).
+    With a deliberately slow 30s poll, the handler must still run within 2s — a 15x margin
+    that the poll path provably cannot meet, so only the _notify_event wakeup (the production
+    NOTIFY analogue) can deliver it in time. F7-07: makes a broken NOTIFY fail, not flake.
     """
     broker = _make_broker()
     handled = asyncio.Event()
 
-    @broker.subscriber("orders", min_fetch_interval=5.0, max_fetch_interval=5.0)
+    @broker.subscriber("orders", min_fetch_interval=30.0, max_fetch_interval=30.0)
     async def handle(body: str) -> None:
         del body
         handled.set()
@@ -664,7 +665,7 @@ async def test_loop_mode_feed_wakes_fetch_loop_via_notify() -> None:
         await asyncio.sleep(0.05)  # let the loop do its first (empty) fetch and enter the idle wait
         payload, hdrs = encode_payload("x")
         test_broker.feed("orders", payload, headers=hdrs)
-        await asyncio.wait_for(handled.wait(), timeout=2.0)  # ~5s without the notify wakeup
+        await asyncio.wait_for(handled.wait(), timeout=2.0)  # ~30s without the notify wakeup
 
 
 async def test_loop_mode_publish_wakes_fetch_loop_via_notify() -> None:
@@ -672,7 +673,7 @@ async def test_loop_mode_publish_wakes_fetch_loop_via_notify() -> None:
     broker = _make_broker()
     handled = asyncio.Event()
 
-    @broker.subscriber("orders", min_fetch_interval=5.0, max_fetch_interval=5.0)
+    @broker.subscriber("orders", min_fetch_interval=30.0, max_fetch_interval=30.0)
     async def handle(body: str) -> None:
         del body
         handled.set()
@@ -690,7 +691,7 @@ async def test_loop_mode_publish_batch_wakes_fetch_loop_via_notify() -> None:
     handled: list[str] = []
     done = asyncio.Event()
 
-    @broker.subscriber("orders", min_fetch_interval=5.0, max_fetch_interval=5.0)
+    @broker.subscriber("orders", min_fetch_interval=30.0, max_fetch_interval=30.0)
     async def handle(body: str) -> None:
         handled.append(body)
         if len(handled) == 2:
