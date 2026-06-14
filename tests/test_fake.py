@@ -1484,6 +1484,75 @@ async def test_handler_returning_outbox_response_publishes_followup_row() -> Non
     assert test_broker.fake_client.rows == []
 
 
+async def test_propagate_inbound_headers_does_not_poison_cross_content_type_outbox_relay() -> None:
+    """
+    propagate_inbound_headers must not copy content-type onto a chained OutboxResponse.
+
+    Regression for audit F5-01: a ``str`` inbound body (content-type ``text/plain``)
+    had its content-type copied onto an OutboxResponse carrying a ``dict``
+    (``application/json``); the two collided in ``_encode_payload`` and the
+    successful inbound row was nacked to retry-exhaustion instead of delivering.
+    """
+    broker = _make_broker()
+    next_received: list[dict] = []
+
+    @broker.subscriber("orders", propagate_inbound_headers=True)
+    async def handle(body: str) -> OutboxResponse:
+        return OutboxResponse(
+            body={"echoed": body},
+            queue="downstream",
+            session=_fake_session(),
+        )
+
+    @broker.subscriber("downstream")
+    async def handle_next(body: dict) -> None:
+        next_received.append(body)
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish("hi", queue="orders")  # ty: ignore[missing-argument]
+
+    assert next_received == [{"echoed": "hi"}]
+    assert test_broker.fake_client.rows == []
+
+
+async def test_propagate_inbound_headers_does_not_poison_custom_correlation_id_outbox_relay() -> None:
+    """
+    propagate_inbound_headers must not copy correlation_id onto a chained OutboxResponse.
+
+    Regression for audit F5-02: the inbound correlation_id rode along in the
+    propagated headers and conflicted with the handler's explicit
+    ``OutboxResponse(correlation_id=...)`` in ``_encode_payload``, nacking the
+    successful inbound row instead of publishing the follow-on with the chosen id.
+    """
+    broker = _make_broker()
+    downstream_cors: list[str] = []
+
+    @broker.subscriber("orders", propagate_inbound_headers=True)
+    async def handle(body: dict) -> OutboxResponse:
+        del body
+        return OutboxResponse(
+            body={"v": 1},
+            queue="downstream",
+            session=_fake_session(),
+            correlation_id="custom-cid",
+        )
+
+    @broker.subscriber("downstream")
+    async def handle_next(
+        body: dict,
+        correlation_id: str = _Context("message.correlation_id"),
+    ) -> None:
+        del body
+        downstream_cors.append(correlation_id)
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish({"x": 1}, queue="orders", correlation_id="inbound-cid")  # ty: ignore[missing-argument]
+
+    assert downstream_cors == ["custom-cid"]
+
+
 async def test_handler_returning_outbox_response_inherits_correlation_id() -> None:
     """When OutboxResponse.correlation_id is None, FastStream inherits from inbound."""
     broker = _make_broker()
