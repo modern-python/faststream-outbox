@@ -1760,6 +1760,9 @@ async def test_fake_dlq_captures_retry_terminal_failure() -> None:
     assert "RuntimeError" in row["last_exception"]
     assert row["payload"]  # encoded body present
     assert row["original_id"] is not None
+    # F7-05: the headers audit column must round-trip into the DLQ (the str body's
+    # envelope content-type is the off-Postgres guard for the fake's DLQ header copy).
+    assert row["headers"]["content-type"] == "text/plain"
 
 
 async def test_fake_dlq_captures_rejected_failure() -> None:

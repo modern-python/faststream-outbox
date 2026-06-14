@@ -579,11 +579,13 @@ class TestOutboxBroker(TestBroker[OutboxBroker, OutboxBroker]):  # ty: ignore[in
     """
 
     fake_client: FakeOutboxClient
+    fake_producer: "FakeOutboxProducer | None"
     run_loops: bool
 
     def __init__(self, broker: OutboxBroker, *, run_loops: bool = False, **kwargs: typing.Any) -> None:
         super().__init__(broker, **kwargs)
         self.fake_client = FakeOutboxClient()
+        self.fake_producer = None  # set when the producer slot is swapped (see _patch_producer)
         self.run_loops = run_loops
         self._outbox_broker = broker  # for feed()'s P30 wakeup
         # Guards against the upstream harness spawning the loops twice (B14); reset
@@ -628,6 +630,8 @@ class TestOutboxBroker(TestBroker[OutboxBroker, OutboxBroker]):  # ty: ignore[in
         )
         original_producer = broker.config.broker_config.producer
         broker.config.broker_config.producer = fake_producer
+        # Expose for identity assertions, symmetric with ``self.fake_client``.
+        self.fake_producer = fake_producer
         try:
             yield
         finally:

@@ -143,6 +143,47 @@ async def test_two_concurrent_fetches_dont_double_claim(pg_engine, outbox_table)
     assert len(set(all_ids)) == 20  # no duplicates
 
 
+async def test_fetch_skips_rows_locked_by_another_transaction(pg_engine, outbox_table) -> None:
+    """
+    F7-04: fetch uses FOR UPDATE SKIP LOCKED — it skips rows another transaction holds, not blocks.
+
+    Seeds 30 rows, locks 20 in an open transaction, then asserts a concurrent fetch promptly
+    claims the disjoint 10. A regression to plain ``FOR UPDATE`` would block on the locked rows
+    until the holder commits, so the bounded ``wait_for`` fails via timeout instead of hanging.
+    (The sibling test above guards no-double-claim but would pass without SKIP LOCKED.)
+    """
+    async with pg_engine.begin() as conn:
+        for i in range(30):
+            await conn.execute(insert(outbox_table).values(queue="orders", payload=f"p-{i}".encode()))
+    client = OutboxClient(pg_engine, outbox_table)
+    t = outbox_table
+
+    async with pg_engine.connect() as holder, holder.begin():
+        locked = (
+            (
+                await holder.execute(
+                    select(t.c.id)
+                    .where(t.c.queue == "orders")
+                    .order_by(t.c.id)
+                    .limit(20)
+                    .with_for_update(skip_locked=True),
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(locked) == 20
+
+        async with pg_engine.connect() as conn_b:
+            claimed = await asyncio.wait_for(
+                client.fetch(conn_b, ["orders"], limit=20, lease_ttl_seconds=60.0),
+                timeout=5.0,
+            )
+        claimed_ids = {r.id for r in claimed}
+        assert claimed_ids.isdisjoint(set(locked))  # skipped the holder's rows
+        assert len(claimed_ids) == 10  # exactly the rows the holder didn't lock
+
+
 async def test_delete_with_lease_succeeds_with_correct_token(pg_engine: AsyncEngine, outbox_table: Table) -> None:
     async with pg_engine.begin() as conn:
         await conn.execute(insert(outbox_table).values(queue="orders", payload=b"x"))
@@ -1551,6 +1592,7 @@ async def test_relay_at_least_once_under_foreign_publish_failure(
     publisher_kafka = broker_kafka.publisher("relay_topic")
 
     call_count = 0
+    delivered_bodies: list[Any] = []
     original_publish = publisher_kafka._publish  # noqa: SLF001
 
     async def flaky_publish(cmd: Any, **kwargs: Any) -> Any:
@@ -1559,6 +1601,7 @@ async def test_relay_at_least_once_under_foreign_publish_failure(
         if call_count == 1:
             msg = "simulated foreign-publish failure"
             raise RuntimeError(msg)
+        delivered_bodies.append(cmd.body)  # F7-11: capture what the successful retry actually relayed
         return await original_publish(cmd, **kwargs)
 
     @publisher_kafka
@@ -1588,6 +1631,10 @@ async def test_relay_at_least_once_under_foreign_publish_failure(
     assert call_count >= 2, (
         f"Expected at-least-once delivery via retry, but foreign _publish was called {call_count} time(s)."
     )
+    # F7-11: the successful retry must carry the original body — a retry that relayed an
+    # empty/wrong payload would pass the call-count + row-deletion checks alone.
+    assert delivered_bodies
+    assert delivered_bodies[-1] == {"body": "first"}
     assert await _row_count(pg_engine, outbox_table) == 0, "Row should be deleted after successful retry."
 
 
