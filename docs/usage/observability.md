@@ -28,7 +28,7 @@ from faststream_outbox import MetricsRecorder, OutboxBroker
 
 def recorder(event: str, tags: dict) -> None:
     # event ∈ {fetched, dispatched, acked, nacked_retried, nacked_terminal,
-    #          lease_lost, dlq_written, published}
+    #          lease_lost, dlq_written, drain_timeout, published}
     # tags always include "queue"; subscriber-side events also include "subscriber"
     print(event, tags)
 
@@ -82,6 +82,7 @@ broken recorder never poisons the dispatch loop.
 | `lease_lost` | `queue`, `subscriber`, `phase`, `row_id`, `deliveries_count` | | Terminal or retry write found `rowcount == 0` (`phase` = `terminal` \| `retry`) |
 | `published` | `queue`, `status`, `count`, `size_bytes`, `duration_seconds` | `exception_type` | Producer, after the INSERT executes (pre-commit; also fires on error with `status="error"`) |
 | `dlq_written` | `queue`, `subscriber`, `deliveries_count`, `failure_reason` | `exception_type` | DLQ CTE wrote an audit row. `exception_type` is **omitted** — not set to `None` — when the terminal had no exception (`max_deliveries`, or a manual `reject()` without one) |
+| `drain_timeout` | `queue`, `subscriber`, `drain_timeout_seconds` | | A `stop()` drain exceeded `graceful_timeout`; in-flight rows were abandoned to lease-expiry retry. `queue` is the subscriber's **first** queue |
 
 `reason` on `nacked_terminal` is one of `max_deliveries`,
 `retry_terminal`, `rejected`. The same value lands in the DLQ

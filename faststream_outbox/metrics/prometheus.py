@@ -212,6 +212,12 @@ class PrometheusRecorder:
             [*consume_labels, "reason"],
             registry=registry,
         )
+        self._drain_timeout = Counter(
+            f"{p}_outbox_drain_timeout_total",
+            "Drains that exceeded graceful_timeout, abandoning in-flight rows to lease-expiry retry.",
+            consume_labels,
+            registry=registry,
+        )
 
     def _resolve_custom_values(self, tags: Mapping[str, typing.Any]) -> tuple[str, ...]:
         return tuple(
@@ -234,7 +240,7 @@ class PrometheusRecorder:
         destination = tags.get("queue", "")
         return (self._app_name, BROKER_SYSTEM, destination, *self._resolve_custom_values(tags))
 
-    def __call__(self, event: str, tags: Mapping[str, typing.Any]) -> None:  # noqa: C901, PLR0912
+    def __call__(self, event: str, tags: Mapping[str, typing.Any]) -> None:  # noqa: C901, PLR0911, PLR0912
         consume_base = self._consume_values(tags)
 
         if event == "fetched":
@@ -280,6 +286,10 @@ class PrometheusRecorder:
 
         if event == "dlq_written":
             self._dlq_written.labels(*consume_base, tags["failure_reason"]).inc()
+            return
+
+        if event == "drain_timeout":
+            self._drain_timeout.labels(*consume_base).inc()
             return
 
         if event == "published":

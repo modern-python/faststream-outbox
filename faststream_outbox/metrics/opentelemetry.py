@@ -149,6 +149,11 @@ class OpenTelemetryRecorder:
             unit="event",
             description="DLQ audit rows written by terminal flush, broken down by reason",
         )
+        self._drain_timeout = self._meter.create_counter(
+            name="messaging.outbox.drain_timeout",
+            unit="event",
+            description="Drains that exceeded graceful_timeout, abandoning in-flight rows to lease-expiry retry",
+        )
 
     def _attrs(self, tags: Mapping[str, typing.Any], *, operation: str) -> dict[str, typing.Any]:
         attrs: dict[str, typing.Any] = {
@@ -161,7 +166,7 @@ class OpenTelemetryRecorder:
             attrs[_ATTR_HANDLER] = handler
         return attrs
 
-    def __call__(self, event: str, tags: Mapping[str, typing.Any]) -> None:  # noqa: C901, PLR0912
+    def __call__(self, event: str, tags: Mapping[str, typing.Any]) -> None:  # noqa: C901, PLR0911, PLR0912
         if event == "fetched":
             self._fetch_batches.add(1, self._attrs(tags, operation="receive"))
             return
@@ -202,6 +207,10 @@ class OpenTelemetryRecorder:
             if exc is not None:
                 attrs[_ATTR_ERROR_TYPE] = exc
             self._dlq_written.add(1, attrs)
+            return
+
+        if event == "drain_timeout":
+            self._drain_timeout.add(1, self._attrs(tags, operation="process"))
             return
 
         if event == "published":
