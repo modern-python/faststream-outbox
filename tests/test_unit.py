@@ -18,6 +18,7 @@ from faststream.exceptions import IncorrectState
 from faststream.middlewares import AckPolicy
 from faststream.response.publish_type import PublishType
 from faststream.response.response import PublishCommand
+from faststream.specification import AsyncAPI
 from pydantic import BaseModel
 from sqlalchemy import MetaData
 from sqlalchemy.dialects import postgresql
@@ -3567,3 +3568,62 @@ def test_outbox_response_rejects_both_activate_args_eagerly() -> None:
             activate_in=_dt.timedelta(seconds=5),
             activate_at=aware,
         )
+
+
+def test_asyncapi_document_populates_channels_and_operations() -> None:
+    """
+    Regression: ``BrokerSpec(url=[])`` produced a structurally empty AsyncAPI document.
+
+    Upstream's generator only emits channels/operations for brokers with a non-empty spec
+    url; with ``url=[]`` the assembled doc had ``servers={} channels={} operations={}`` even
+    though per-subscriber/publisher schema work was correct. ``_spec_url`` now supplies a
+    placeholder when the engine is None, so the document populates.
+    """
+    metadata = MetaData()
+    table = make_outbox_table(metadata, table_name="outbox")
+    broker = OutboxBroker(outbox_table=table)
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> None: ...  # registered for the spec; never invoked
+
+    broker.publisher("events")
+
+    spec = AsyncAPI(broker).to_specification().to_jsonable()  # ty: ignore[invalid-argument-type]  # BrokerUsecase invariance
+    assert spec["servers"], "AsyncAPI servers must not be empty (url=[] regression)"
+    channel_keys = " ".join(spec["channels"])
+    assert "orders" in channel_keys, f"subscriber channel missing: {list(spec['channels'])}"
+    assert "events" in channel_keys, f"publisher channel missing: {list(spec['channels'])}"
+    assert spec["operations"], "AsyncAPI operations must not be empty"
+
+
+def test_asyncapi_include_in_schema_false_excludes_publisher_channel() -> None:
+    """A publisher with include_in_schema=False must not appear in the assembled AsyncAPI doc."""
+    metadata = MetaData()
+    table = make_outbox_table(metadata, table_name="outbox")
+    broker = OutboxBroker(outbox_table=table)
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> None: ...  # registered for the spec; never invoked
+
+    broker.publisher("hidden_events", include_in_schema=False)
+
+    spec = AsyncAPI(broker).to_specification().to_jsonable()  # ty: ignore[invalid-argument-type]  # BrokerUsecase invariance
+    channel_keys = " ".join(spec["channels"])
+    assert "orders" in channel_keys  # the included subscriber is present…
+    assert "hidden_events" not in channel_keys  # …the excluded publisher is not
+
+
+async def test_spec_url_uses_password_masked_engine_dsn_when_engine_present() -> None:
+    """When wired with an engine, the AsyncAPI server url is the engine DSN with the password masked."""
+    engine = create_async_engine("postgresql+asyncpg://user:supersecret@db.example:5432/outboxdb")
+    try:
+        metadata = MetaData()
+        table = make_outbox_table(metadata, table_name="outbox")
+        broker = OutboxBroker(engine, outbox_table=table)
+        urls = broker.specification.url
+    finally:
+        await engine.dispose()
+
+    assert urls, "spec url must be non-empty when an engine is present"
+    assert "supersecret" not in urls[0], "password must be masked in the AsyncAPI server url"
+    assert "db.example" in urls[0]

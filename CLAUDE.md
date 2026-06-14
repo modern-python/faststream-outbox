@@ -72,7 +72,7 @@ Deep dive: `architecture/timers.md`. User-facing: `docs/usage/timers.md`.
 
 Plus a `CHECK ((acquired_token IS NULL) = (acquired_at IS NULL))` (the `<table>_lease_ck` constraint) so a half-set lease is unrepresentable.
 
-The fetch CTE's OR is written so each disjunct **explicitly carries its partial-index predicate as a conjunct** — Postgres only uses a partial index when the query implies its WHERE clause; the naive form falls back to seq-scan. Both fetch indexes pay write amplification on every claim.
+The fetch CTE's OR is written so each disjunct **explicitly carries its partial-index predicate as a conjunct** — Postgres only uses a partial index when the query implies its WHERE clause; the naive form falls back to seq-scan. Both fetch indexes pay write amplification on every claim. The index also satisfies the `ORDER BY next_attempt_at, id` **only for a single-queue subscriber** — a subscriber serving multiple queues (`queue = ANY(:queues)`), or the expired-lease branch (ordered by `next_attempt_at` while `_lease_idx` is keyed on `acquired_at`), adds a `LIMIT`-bounded sort node. Prefer one subscriber per queue when fetch ordering cost matters (same segregation pattern as lease TTLs).
 
 There is **no `state` column**: a row is "available" iff `acquired_token IS NULL` or `acquired_at < now() - lease_ttl_seconds`. Terminal failures `DELETE` by default; opt in to audit via `dlq_table=make_dlq_table(metadata)`.
 

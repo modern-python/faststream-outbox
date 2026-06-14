@@ -2,9 +2,16 @@
 Outbox table factory.
 
 The package does not own the schema — users attach the returned ``Table`` to their own
-``MetaData`` and write Alembic migrations themselves — but the partial indexes that the
-fetch query relies on **are** declared on the table, so Alembic autogenerate picks them
-up and users can't forget them.
+``MetaData`` and write Alembic migrations themselves — and the partial indexes that the
+fetch query relies on, plus the ``<table>_lease_ck`` CHECK, are declared on the table.
+
+Autogenerate brings these up fully **only on a fresh ``create_table``** (which renders
+the CHECK and each partial index with its ``postgresql_where``). On an **incremental**
+migration onto a pre-existing table, Alembic's Postgres comparator ignores
+``postgresql_where`` and has no check-constraint comparator at all, so a drifted/non-partial
+predicate or a missing CHECK ships silently. The opt-in :meth:`OutboxClient.validate_schema`
+is the backstop for that drift — it probes the live ``pg_catalog`` predicates and the
+``<table>_lease_ck`` definition directly.
 
 A row is "available" iff its lease is unset (``acquired_token IS NULL``) or its lease
 is expired (``acquired_at < now() - lease_ttl_seconds``). The fetch query reclaims

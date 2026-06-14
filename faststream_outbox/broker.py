@@ -79,6 +79,23 @@ def _compute_next_at_client_side(
     return activate_at
 
 
+def _spec_url(engine: "AsyncEngine | None", outbox_table: "Table") -> list[str]:
+    """
+    AsyncAPI server URL(s) for the broker spec.
+
+    **Must be non-empty.** Upstream's AsyncAPI generator only emits channels/operations
+    for brokers whose spec carries a non-empty ``url`` (it populates ``broker_servers``
+    inside ``for url in specification.url``); an empty list yields a structurally blank
+    document — no servers, channels, or operations — silently discarding every
+    per-subscriber/per-publisher schema. Derive a password-masked DSN from the engine
+    when wired, else a stable placeholder keyed on the table name (test broker /
+    pre-connect construction, where the engine isn't available yet).
+    """
+    if engine is not None:
+        return [engine.url.render_as_string(hide_password=True)]
+    return [f"postgresql://outbox/{outbox_table.name}"]
+
+
 class _CaptureExceptionMiddleware(BaseMiddleware):
     """
     Stash the handler exception on the inner row before AckMiddleware nacks.
@@ -187,7 +204,7 @@ class OutboxBroker(
         # bodies use the same path as the broker's own publish flow.
         producer.serializer = fd_config._serializer  # noqa: SLF001
         specification = BrokerSpec(
-            url=[],
+            url=_spec_url(engine, outbox_table),
             protocol="postgresql",
             protocol_version=None,
             description=description,
