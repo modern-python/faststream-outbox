@@ -134,6 +134,22 @@ stuck-row reclaim fast; the tall TTL on the slow queue tolerates outliers
 without slowing reclaim of genuinely stuck rows elsewhere. Producers route
 to the appropriate queue at `publish` time.
 
+!!! note "Account for queue depth, not just per-row latency"
+    A fetch claims up to `fetch_batch_size` rows at once and each takes its
+    lease at fetch time, then they wait their turn in an in-memory queue drained
+    by `max_workers` handlers. A row's lease clock runs **while it waits**, so the
+    relevant bound is the *serialized* time to reach it, not one handler's P99:
+
+    ```
+    (fetch_batch_size / max_workers) × P99(handler)  ≪  lease_ttl_seconds
+    ```
+
+    With the defaults (`fetch_batch_size=10`, `max_workers=1`) the 10th row waits
+    behind nine others before dispatch. If that wait can exceed `lease_ttl_seconds`,
+    a competing fetch reclaims the still-queued row → duplicate (self-correcting)
+    delivery. Either keep `fetch_batch_size` close to `max_workers`, or size the TTL
+    for the whole batch.
+
 *See also [Troubleshooting § `event=lease_lost`](../operations/troubleshooting.md#event-lease_lost-recurring-in-logs).*
 
 ## Ack policy
