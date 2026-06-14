@@ -3,6 +3,7 @@
 import asyncio
 import datetime as _dt
 import json
+import logging
 import uuid
 from collections.abc import Mapping
 from typing import Any
@@ -18,6 +19,7 @@ from faststream_outbox import (
     ConstantRetry,
     NoRetry,
     OutboxBroker,
+    OutboxResponse,
     make_dlq_table,
     make_outbox_table,
 )
@@ -1555,3 +1557,129 @@ async def test_relay_at_least_once_under_foreign_publish_failure(
         f"Expected at-least-once delivery via retry, but foreign _publish was called {call_count} time(s)."
     )
     assert await _row_count(pg_engine, outbox_table) == 0, "Row should be deleted after successful retry."
+
+
+# --- live worker-loop coverage of the two load-bearing concurrency paths ------
+# (audit 2026-06-14, MEDIUM test gaps: lease-expiry mid-handler; relay config-error)
+
+
+async def test_lease_expiry_during_inflight_handler_redelivers_without_clobber(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+) -> None:
+    """
+    The lease-token invariant, driven end-to-end through the live worker loop.
+
+    A handler that outlives ``lease_ttl_seconds`` has its row reclaimed and
+    redelivered to a second worker mid-flight. The slow holder's terminal DELETE
+    must find ``rowcount == 0`` (the new holder already owns the row) and be
+    dropped — emitting ``lease_lost(phase=terminal)`` instead of ``acked`` — so it
+    cannot clobber the new lease holder. The row is deleted exactly once.
+
+    Prior coverage only fed ``delete_with_lease`` a synthetic wrong token and
+    reclaimed *idle* rows; this is the first test that races a real running
+    handler against its own lease expiry through ``_fetch_loop``/``_worker_loop``.
+    """
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    def recorder(event: str, tags: Mapping[str, Any]) -> None:
+        events.append((event, dict(tags)))
+
+    release = asyncio.Event()
+    deliveries: list[int] = []
+
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table, metrics_recorder=recorder)
+
+    @broker.subscriber(
+        "orders",
+        min_fetch_interval=0.02,
+        max_fetch_interval=0.05,
+        max_workers=2,  # worker A blocks; worker B must be free to take the reclaim
+        lease_ttl_seconds=0.3,
+    )
+    async def handle(body: dict[str, Any]) -> None:
+        del body
+        idx = len(deliveries)
+        deliveries.append(idx)
+        if idx == 0:
+            # First (slow) delivery: block past lease_ttl_seconds so the row's
+            # lease expires and a second fetch reclaims + redelivers it.
+            await release.wait()
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with broker:
+        async with session_factory() as session, session.begin():
+            await broker.publish({"i": 0}, queue="orders", session=session)
+        # Worker B reclaims the expired lease, is redelivered the row, and deletes it
+        # (``acked``) — all while worker A is still blocked in its slow handler. The
+        # ``acked`` event is exactly the moment B's terminal DELETE lands, so waiting on
+        # it deterministically orders B's success ahead of A's release below.
+        await _wait_until(lambda: len(deliveries) >= 2, timeout=10.0)
+        await _wait_until(lambda: any(e == "acked" for e, _ in events), timeout=10.0)
+        # Now unblock the slow holder; its terminal DELETE must be a no-op (lease lost).
+        release.set()
+        await _wait_until(
+            lambda: any(e == "lease_lost" and t.get("phase") == "terminal" for e, t in events),
+            timeout=10.0,
+        )
+
+    assert len(deliveries) >= 2, "row was never redelivered — lease expiry did not reclaim it"
+    acked = [t for e, t in events if e == "acked"]
+    lease_lost_terminal = [t for e, t in events if e == "lease_lost" and t.get("phase") == "terminal"]
+    assert len(acked) == 1, f"exactly one terminal DELETE must land (the new holder), got {len(acked)}"
+    assert lease_lost_terminal, "the stale holder's DELETE must be dropped with lease_lost(phase=terminal)"
+    assert await _row_count(pg_engine, outbox_table) == 0, "row must be deleted exactly once"
+
+
+async def test_relay_dual_fire_guard_through_worker_loop_leaves_row_and_logs(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+) -> None:
+    """
+    The OutboxResponse + foreign-publisher dual-fire guard, through the live worker loop.
+
+    Every existing relay-chain test runs in ``TestOutboxBroker(run_loops=False)``,
+    where the handler runs synchronously inside ``publish`` and the guard raises out
+    of ``dispatch_one``. The *worker-loop* contract is different: ``_worker_inner``
+    catches the ``_OutboxConfigError``, logs it at ERROR, and leaves the row for
+    lease-expiry retry (it must NOT delete it or fire the foreign publish). This is
+    the first test that exercises that catch path end-to-end against real Postgres.
+    """
+    broker_outbox = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    broker_kafka = KafkaBroker("kafka://test:9092")
+    publisher_kafka = broker_kafka.publisher("relay_topic")
+
+    @publisher_kafka
+    @broker_outbox.subscriber(
+        "relay_queue",
+        max_workers=1,
+        min_fetch_interval=0.05,
+        max_fetch_interval=0.2,
+        lease_ttl_seconds=30.0,  # long: keep redelivery noise out of the assertion window
+    )
+    async def relay(body: dict[str, Any]) -> OutboxResponse:
+        return OutboxResponse(body=body, queue="next_queue", session=None)  # ty: ignore[invalid-argument-type]
+
+    errors: list[str] = []
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    # TestKafkaBroker first so the foreign producer is wired before the outbox start() probe.
+    async with TestKafkaBroker(broker_kafka), broker_outbox:
+        sub = next(iter(broker_outbox._subscribers))  # noqa: SLF001
+        original_log = sub._log  # noqa: SLF001
+
+        def spy_log(*args: Any, **kwargs: Any) -> Any:
+            if kwargs.get("log_level") == logging.ERROR and "configuration error" in str(kwargs.get("message", "")):
+                errors.append(str(kwargs["message"]))
+            return original_log(*args, **kwargs)
+
+        with mock.patch.object(sub, "_log", side_effect=spy_log):
+            async with session_factory() as session, session.begin():
+                await broker_outbox.publish({"x": 1}, queue="relay_queue", session=session)
+            await _wait_until(lambda: bool(errors), timeout=10.0)
+
+    # Guard fired before the chain → the foreign Kafka publish never happened.
+    publisher_kafka.mock.assert_not_called()
+    # Row left in place (lease held, not deleted) for lease-expiry retry.
+    assert await _row_count(pg_engine, outbox_table) == 1, "config-error row must be left for lease-expiry, not deleted"
+    # And the _OutboxConfigError was logged at ERROR by the worker loop.
+    assert errors, "worker loop must log the _OutboxConfigError at ERROR"
