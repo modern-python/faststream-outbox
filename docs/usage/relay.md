@@ -24,6 +24,10 @@ boundary, and the relay carries an at-least-once guarantee end to end.
 
 ## Minimal relay
 
+The snippets below assume `engine` and `outbox_table` from the
+[Basic usage](./basic.md) setup (`make_outbox_table(metadata)` +
+`create_async_engine(...)`).
+
 ```python
 from faststream.kafka import KafkaBroker
 from faststream_outbox import OutboxBroker
@@ -167,6 +171,9 @@ broker_outbox.include_router(outbox_router)
 **Do not** combine `OutboxResponse(...)` and a foreign-publisher decorator.
 
 ```python
+from faststream_outbox import OutboxResponse
+
+
 @publisher_kafka
 @broker_outbox.subscriber("outbox_queue")
 async def relay(body: dict) -> OutboxResponse:

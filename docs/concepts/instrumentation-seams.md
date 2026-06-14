@@ -61,8 +61,10 @@ Three events fire **outside** the handler invocation, with no
 ## What the recorder seam observes naturally
 
 The recorder is a `Callable[[str, Mapping[str, Any]], None]` invoked at
-six subscriber events and one producer event. Plus `dlq_written` when
-the DLQ is configured. It fires whether or not a handler is in scope:
+six core subscriber events (`fetched`, `dispatched`, `acked`,
+`nacked_retried`, `nacked_terminal`, `lease_lost`), a conditional
+`dlq_written` when the DLQ is configured, and one producer event
+(`published`). It fires whether or not a handler is in scope:
 
 - All three bus-invisible events above.
 - Plus `acked` / `nacked_retried` / `nacked_terminal` / `dispatched` /
@@ -70,7 +72,11 @@ the DLQ is configured. It fires whether or not a handler is in scope:
   `subscriber` and `queue` tags.
 
 The recorder cannot bracket span lifecycles (it's a callable, not a
-context manager), so tracing belongs to the middleware seam.
+context manager), so tracing belongs to the middleware seam. It also
+runs **on the dispatch event loop and must not block** — a synchronous
+`Counter.inc()` is fine; an HTTP / StatsD push is not. See
+[Observability § Recorder must not block](../usage/observability.md#recorder-must-not-block)
+for the full contract.
 
 ## Layering: middleware seam vs. recorder seam
 

@@ -89,6 +89,7 @@ Per-subscriber knobs, passed to `@broker.subscriber("…", …)`:
 | `max_deliveries` | `None` (unbounded) | Total claims (including lease-expiry re-claims) after which the row is dropped without invoking the handler. Defends against handlers that consistently wedge. |
 | `ack_policy` | `AckPolicy.NACK_ON_ERROR` | See [Ack policy](#ack-policy) |
 | `retry_strategy` | `ExponentialRetry(...)` | See [Retry strategies](#retry-strategies) |
+| `propagate_inbound_headers` | `False` | Relay-only. When `True`, fills `Response.headers` from the inbound message *if* the handler returned a `Response` with empty headers (user-set headers always win). See [Relay](./relay.md). |
 
 ```python
 @broker.subscriber(
@@ -105,6 +106,10 @@ async def handle_urgent(body: dict) -> None: ...
 The factory in `subscriber/factory.py` warns or raises on likely-wrong
 combinations (`lease_ttl_seconds <= max_fetch_interval`, `max_deliveries`
 without retry, `min_fetch_interval > max_fetch_interval`, etc.).
+
+The table above lists the outbox-specific knobs. The standard FastStream
+subscriber kwargs pass through unchanged too: `dependencies`, `parser`,
+`decoder`, and the AsyncAPI `title_` / `description_` / `include_in_schema`.
 
 ## Slow handlers — dedicated queue
 
@@ -205,6 +210,19 @@ async def handle_audit(payload: dict) -> None: ...
 when non-zero, the computed delay is multiplied by `1 +
 U(-jitter_factor/2, +jitter_factor/2)` to spread out retries, matching
 `ExponentialRetry`'s shape.
+
+### Strategy parameters
+
+| Strategy | Required | Optional (default) |
+|---|---|---|
+| `NoRetry` | — | — |
+| `ConstantRetry` | `delay_seconds` | `jitter_factor` (`0.0`) |
+| `LinearRetry` | `initial_delay_seconds`, `step_seconds` | `jitter_factor` (`0.0`) |
+| `ExponentialRetry` | `initial_delay_seconds` | `multiplier` (`2.0`), `max_delay_seconds` (`None`), `jitter_factor` (`0.0`) |
+
+Every strategy except `NoRetry` also accepts the shared caps `max_attempts`
+(default `None`) and `max_total_delay_seconds` (default `None`); reaching
+either returns `None`, which is terminal (the row is deleted, or DLQ'd).
 
 ### Retry only on transient errors
 

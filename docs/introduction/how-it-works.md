@@ -178,13 +178,22 @@ you add).
 
 ## Failure modes
 
-- **Handlers must be idempotent.** Crash between commit-of-handler-side-effects and the broker's `DELETE` re-delivers the message.
+- **Handlers must be idempotent.** A crash between the handler's side effect and the broker's `DELETE` re-delivers the message — see [At-least-once delivery](#at-least-once-delivery) above.
 - **Best-effort ordering only.** `FOR UPDATE SKIP LOCKED` does not preserve strict order under concurrent workers. If you need strict per-aggregate ordering, route to a single subscriber and run a single worker.
 - **DLQ is opt-in.** Without `dlq_table=`, terminal failures `DELETE` the row.
 
 ## Relay to Kafka / RabbitMQ / NATS / Redis
 
-> **Relay outbox rows to Kafka / RabbitMQ / NATS / Redis with a single decorator → [Relay tutorial](../tutorials/add-kafka-relay.md).**
+An `OutboxSubscriber` can source a FastStream-native cross-broker chain:
+stack a foreign-broker publisher decorator on the subscriber
+(`@kafka_pub @broker_outbox.subscriber("q")`) and the handler's return
+value is forwarded to the real bus. The outbox row stays the durability
+boundary — the row commits with the domain write, and the relay carries
+at-least-once end to end. If the foreign publish fails, the row is **not**
+nacked through the `retry_strategy`; its lease simply expires and a later
+fetch retries the relay, so a transient bus outage never loses the row.
+
+> **Worked end-to-end example → [Relay tutorial](../tutorials/add-kafka-relay.md).**
 
 ## Acknowledgements
 

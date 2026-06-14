@@ -39,13 +39,13 @@ Subscribers work like any FastStream subscriber. Decorate a handler with
 `@broker.subscriber(queue, ...)`:
 
 ```python
-@broker.subscriber("orders", max_workers=4)
+@broker.subscriber("orders")
 async def handle(order_id: int) -> None:
     print(f"order {order_id}")
 ```
 
-See [Subscriber](./subscriber.md) for the full options list, tuning guide,
-and retry strategies.
+See [Subscriber](./subscriber.md) for the full options list (concurrency
+via `max_workers`, tuning, retry strategies).
 
 ## 4. Publish a message
 
@@ -87,7 +87,7 @@ broker = OutboxBroker(engine, outbox_table=outbox_table)
 app = FastStream(broker)
 
 
-@broker.subscriber("orders", max_workers=4)
+@broker.subscriber("orders")
 async def handle(order_id: int) -> None:
     print(f"order {order_id}")
 

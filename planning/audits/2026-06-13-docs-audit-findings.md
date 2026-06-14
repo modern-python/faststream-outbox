@@ -5,9 +5,10 @@ slug: 2026-06-13-docs-audit-findings
 scope: docs/ (22 user-facing mkdocs pages)
 prs: []
 outcome: >
-  In progress. All bugs (B1–B5), the three CLAUDE.md source-of-truth
-  drifts (C1–C3), and the full inaccuracy tail (I1–I15) are fixed; the
-  improvement tail (P1–P18) is pending. Successor to the
+  All findings resolved. Bugs B1–B5, CLAUDE.md drifts C1–C3, the
+  inaccuracy tail I1–I15, and the improvement tail P1–P18 are all fixed
+  (the P-tail in the final PR; the rest already merged). Docs-only — not
+  tied to a package release. Successor to the
   2026-06-12 docs audit (I1–I22, B1–B16) — that pass closed clean; this
   pass re-swept all 22 pages on convenience / readability / consistency /
   factual drift and surfaced a new high-severity DLQ-migration bug plus a
@@ -83,26 +84,28 @@ confusion.
 
 ## Improvements (convenience / readability / gaps)
 
+**All resolved** (PR for the improvement tail). Each row's fix noted inline.
+
 | ID | Page(s) | One-liner |
 |---|---|---|
-| P1 | usage/subscriber.md | Options table omits `propagate_inbound_headers` (real kwarg, documented only in relay.md) |
-| P2 | usage/subscriber.md | Options table omits standard passthrough kwargs (`dependencies`, `parser`, `decoder`, `title_`, `description_`, `include_in_schema`) — or a note that they pass through |
-| P3 | usage/subscriber.md | No params/defaults table for `ConstantRetry` / `LinearRetry` / `ExponentialRetry` (`delay_seconds`, `step_seconds`, `max_attempts`, `max_total_delay_seconds` never tabulated) |
-| P4 | usage/publisher.md | Never shows the `broker.publisher(...)` signature (`title`/`description`/`schema`/`include_in_schema`) despite the section being about AsyncAPI config |
-| P5 | usage/publisher.md | Chained-publishing example uses `Depends(get_session)` (FastAPI-only) on the generic publisher page; show `async with session_factory()` first |
-| P6 | index.md | Three observability entries (Guides "Setup…", Reference "Observability", Concepts "Instrumentation seams") with no signposting of how they differ |
-| P7 | concepts/instrumentation-seams.md | Missing the recorder **"must not block"** constraint — the top footgun for a custom recorder, and this is where readers decide to use it |
-| P8 | usage/observability.md | No bundled-adapter wiring snippet (`from faststream_outbox.metrics.prometheus import PrometheusRecorder` …) even though the PromQL playbook depends on it |
-| P9 | concepts/comparison.md:9-29 | "vs. writing your own" opens with a ~20-line semicolon-joined feature wall — convert to a bulleted list |
-| P10 | concepts/comparison.md | No at-a-glance decision matrix; a scanner must read six TL;DRs sequentially |
-| P11 | concepts/comparison.md:58-62 | CDC verdict leans on an internal "2026-05-07 reassessment" date with no falsifiable detail a reader can follow up on |
-| P12 | introduction/how-it-works.md:184-186 | Relay H2 is a stub (heading + one-line blockquote) after substantial sections — reads unfinished |
-| P13 | introduction/how-it-works.md | "Handlers must be idempotent" repeated 3× in close proximity — trim to one fuller treatment + cross-refs |
-| P14 | usage/testing.md:84-87 | Loop-mode example body is `...  # poll until…` — no runnable `feed()` + `await asyncio.wait_for` snippet |
-| P15 | usage/testing.md | Mixes `@pytest.mark.asyncio` (one example) with documented `asyncio_mode="auto"` inconsistently |
-| P16 | operations/troubleshooting.md | "Row count grows + lease_lost spike" → Diagnose could name the missing-`timer_id` DLQ migration as a frequent cause (moot once B1/B2 fixed, useful for already-broken deployments) |
-| P17 | usage/basic.md:40-46 | Leads the "basic" subscriber example with an unexplained `max_workers=4`; default is 1 — drop it for the first example |
-| P18 | usage/relay.md:31,169-174 | Examples use undefined `engine`/`outbox_table`; the anti-pattern snippet uses `OutboxResponse` with no import (hits `NameError` before the intended dispatch-time `RuntimeError`) |
+| P1 ✅ | usage/subscriber.md | Options table omitted `propagate_inbound_headers`. **Fixed** — row added (relay-only note) |
+| P2 ✅ | usage/subscriber.md | Standard passthrough kwargs undocumented. **Fixed** — note added (`dependencies`, `parser`, `decoder`, `title_`, `description_`, `include_in_schema`) |
+| P3 ✅ | usage/subscriber.md | No params/defaults table for the retry strategies. **Fixed** — added a "Strategy parameters" table + the shared `max_attempts`/`max_total_delay_seconds` caps |
+| P4 ✅ | usage/publisher.md | `broker.publisher(...)` signature never shown. **Fixed** — full constructor signature block added with the AsyncAPI knobs |
+| P5 ✅ | usage/publisher.md | Chained-publishing example used `Depends` (FastAPI-only). **Fixed** — added a "FastAPI-specific" callout explaining the session must outlive the handler return, and pointing vanilla apps to direct `broker.publish(...)` (the naive `async with` form would close the session before the row is inserted) |
+| P6 ✅ | index.md | Three observability entries with no signposting. **Fixed** — tagged *concept* / *reference* / *step-by-step* |
+| P7 ✅ | concepts/instrumentation-seams.md | Missing the recorder "must not block" constraint. **Fixed** — added (+ made the event count self-documenting) |
+| P8 ✅ | usage/observability.md | No bundled-adapter wiring snippet. **Fixed** — added a "Bundled adapters" subsection (`PrometheusRecorder` wiring + OTel pointer) |
+| P9 ✅ | concepts/comparison.md | "vs. writing your own" feature wall. **Fixed** — converted to a bulleted list |
+| P10 ✅ | concepts/comparison.md | No at-a-glance decision matrix. **Fixed** — added a "pick it when / pick this when" table linking each section |
+| P11 ✅ | concepts/comparison.md | CDC verdict had no falsifiable detail. **Fixed** — named the concrete tooling gap (no async-native logical-decoding client vs Debezium's JVM connectors) |
+| P12 ✅ | introduction/how-it-works.md | Relay H2 was a stub. **Fixed** — added 1 paragraph of intuition (chain, durability boundary, retry-via-lease-expiry) before the tutorial link |
+| P13 ✅ | introduction/how-it-works.md | "idempotent" repeated 3×. **Fixed** — Failure-modes bullet trimmed to a cross-ref |
+| P14 ✅ | usage/testing.md | Loop-mode example was a `...` stub. **Fixed** — runnable `feed()` + `asyncio.timeout` poll snippet, plus the `feed()` signature |
+| P15 ✅ | usage/testing.md | Mixed `@pytest.mark.asyncio` with `asyncio_mode="auto"`. **Fixed** — dropped the marker (and unused import), added a one-line note |
+| P16 ✅ | operations/troubleshooting.md | **Fixed** — Diagnose step now names the missing-`timer_id` DLQ migration as a frequent cause on older deployments |
+| P17 ✅ | usage/basic.md | Unexplained `max_workers=4` in the basic example. **Fixed** — dropped from both the §3 example and the Full quickstart |
+| P18 ✅ | usage/relay.md | Undefined `engine`/`outbox_table` + missing `OutboxResponse` import. **Fixed** — setup note added; import added to the anti-pattern snippet |
 
 ## Source-of-truth drift (CLAUDE.md — not a docs/ bug, flagged for consistency)
 

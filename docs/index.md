@@ -65,8 +65,9 @@ process, no Kafka.
 - [Comparison](concepts/comparison.md) — vs writing your own, vs CDC,
   vs Kafka transactions, vs `LISTEN/NOTIFY`, vs Celery, vs FastStream
   foreign-broker direct.
-- [Instrumentation seams](concepts/instrumentation-seams.md) — the
-  recorder seam vs native middleware, and why both exist.
+- [Instrumentation seams](concepts/instrumentation-seams.md) — *concept:*
+  the recorder seam vs native middleware, and why both exist. **Read this
+  first** if you're deciding what to wire.
 
 ### Guides
 
@@ -81,7 +82,8 @@ process, no Kafka.
 - [Schema validation](usage/schema-validation.md) — opt-in
   Alembic-driven check for `/health` and CI.
 - [Setup Prometheus and OpenTelemetry](usage/setup-prometheus-opentelemetry.md)
-  — wire the native middleware and recorder adapters end-to-end.
+  — *step-by-step:* wire the native middleware and recorder adapters
+  end-to-end.
 
 ### Reference
 
@@ -93,8 +95,8 @@ process, no Kafka.
   walking every subscriber via `broker.subscribers`.
 - [Dead-letter queue](usage/dlq.md) — opt-in audit table, atomicity
   via a single CTE, `dlq_written` metric, retention patterns.
-- [Observability](usage/observability.md) — recorder seam plus
-  native Prometheus / OpenTelemetry middleware.
+- [Observability](usage/observability.md) — *reference:* the recorder-seam
+  API, the full event/tag catalog, and the operator PromQL playbook.
 
 ### Operations
 
