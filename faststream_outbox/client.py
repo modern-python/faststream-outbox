@@ -576,6 +576,27 @@ def _validate_check_constraints_sync(connection: "Connection", table: "Table") -
     return errors
 
 
+# The published docs anchor for hand-written migrations that fix drift
+# `alembic revision --autogenerate` cannot emit (no check-constraint comparator;
+# the index comparator ignores postgresql_where). Appended to the RuntimeError
+# only when an Alembic-blind probe actually fired — see validate_schema().
+_SCHEMA_MISMATCH_PREFIX = "Outbox schema mismatch: "
+_AUTOGEN_BLIND_HINT = (
+    "These (CHECK constraints and partial-index predicates) are invisible to "
+    "'alembic revision --autogenerate' — hand-write the migration: "
+    "https://faststream-outbox.modern-python.org/operations/alembic/"
+    "#fixing-drift-autogenerate-cant-see"
+)
+
+
+def _compose_schema_mismatch_message(errors: list[str], *, has_blind_drift: bool) -> str:
+    """Build the validate_schema RuntimeError text; append the remediation pointer for Alembic-blind drift."""
+    msg = _SCHEMA_MISMATCH_PREFIX + "; ".join(errors)
+    if has_blind_drift:
+        msg += "\n\n" + _AUTOGEN_BLIND_HINT
+    return msg
+
+
 def _validate_schema_sync(connection: "Connection", table: "Table") -> list[str]:
     """Run the outbox-table validation pass; see :func:`_run_validate` for the diff machinery."""
     return _run_validate(connection, table, make_outbox_table)
