@@ -39,7 +39,13 @@ from faststream_outbox import (
 )
 from faststream_outbox.annotations import OutboxMessage as AnnotatedOutboxMessage
 from faststream_outbox.broker import OutboxParamsStorage
-from faststream_outbox.client import OutboxClient, _validate_schema_sync
+from faststream_outbox.client import (
+    _AUTOGEN_BLIND_HINT,
+    _SCHEMA_MISMATCH_PREFIX,
+    OutboxClient,
+    _compose_schema_mismatch_message,
+    _validate_schema_sync,
+)
 from faststream_outbox.configs import OutboxBrokerConfig
 from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.message import OutboxInnerMessage, OutboxMessage
@@ -1353,6 +1359,30 @@ def test_validate_schema_sync_raises_when_alembic_missing() -> None:
         pytest.raises(ImportError, match=r"pip install faststream-outbox\[validate\]"),
     ):
         _validate_schema_sync(MagicMock(), t)
+
+
+def test_compose_schema_mismatch_message_appends_hint_on_blind_drift() -> None:
+    msg = _compose_schema_mismatch_message(
+        ["missing CHECK constraint 'outbox_lease_ck' (expected '...')"],
+        has_blind_drift=True,
+    )
+    assert msg.startswith(_SCHEMA_MISMATCH_PREFIX)
+    assert _AUTOGEN_BLIND_HINT in msg
+    assert "#fixing-drift-autogenerate-cant-see" in msg
+
+
+def test_compose_schema_mismatch_message_omits_hint_without_blind_drift() -> None:
+    msg = _compose_schema_mismatch_message(
+        ["table 'outbox' missing column 'headers'"],
+        has_blind_drift=False,
+    )
+    assert msg == _SCHEMA_MISMATCH_PREFIX + "table 'outbox' missing column 'headers'"
+    assert _AUTOGEN_BLIND_HINT not in msg
+
+
+def test_compose_schema_mismatch_message_joins_multiple_errors() -> None:
+    msg = _compose_schema_mismatch_message(["a", "b"], has_blind_drift=False)
+    assert msg == _SCHEMA_MISMATCH_PREFIX + "a; b"
 
 
 async def test_broker_ping_done_subscriber_task_is_false() -> None:

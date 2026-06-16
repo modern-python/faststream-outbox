@@ -457,8 +457,9 @@ async def test_validate_schema_fails_when_columns_missing(pg_engine, outbox_tabl
     async with pg_engine.begin() as conn:
         await conn.exec_driver_sql(drop_sql)
     client = OutboxClient(pg_engine, outbox_table)
-    with pytest.raises(RuntimeError, match="missing column 'headers'"):
+    with pytest.raises(RuntimeError, match="missing column 'headers'") as excinfo:
         await client.validate_schema()
+    assert "fixing-drift-autogenerate-cant-see" not in str(excinfo.value)
 
 
 async def test_validate_schema_fails_when_timer_id_unique_index_missing(pg_engine, outbox_table) -> None:
@@ -1925,8 +1926,9 @@ async def test_validate_schema_fails_when_lease_check_constraint_missing(
     async with pg_engine.begin() as conn:
         await conn.exec_driver_sql(drop_sql)
     client = OutboxClient(pg_engine, outbox_table)
-    with pytest.raises(RuntimeError, match="missing CHECK constraint"):
+    with pytest.raises(RuntimeError, match="missing CHECK constraint") as excinfo:
         await client.validate_schema()
+    assert "operations/alembic/#fixing-drift-autogenerate-cant-see" in str(excinfo.value)
 
 
 async def test_validate_schema_fails_when_lease_check_constraint_predicate_wrong(
@@ -1943,5 +1945,7 @@ async def test_validate_schema_fails_when_lease_check_constraint_predicate_wrong
             f"CHECK (acquired_token IS NOT NULL OR acquired_at IS NULL)",
         )
     client = OutboxClient(pg_engine, outbox_table)
-    with pytest.raises(RuntimeError, match="wrong predicate"):
+    with pytest.raises(RuntimeError, match="wrong predicate") as excinfo:
         await client.validate_schema()
+    # The predicate-drift probe is Alembic-blind too, so the remediation pointer must fire.
+    assert "operations/alembic/#fixing-drift-autogenerate-cant-see" in str(excinfo.value)

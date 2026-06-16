@@ -409,20 +409,21 @@ class OutboxClient(AbstractOutboxClient):
         """
         async with self._engine.connect() as conn:
             errors = await conn.run_sync(_validate_schema_sync, self._table)
-            # S2: alembic's autogenerate diff compares index columns + uniqueness but NOT
-            # the partial-index WHERE predicate, so a wrong postgresql_where slips through
-            # and later breaks the producer's ON CONFLICT arbiter. Probe the predicates
-            # directly against the live catalog.
-            errors.extend(await conn.run_sync(_validate_index_predicates_sync, self._table))
-            # Alembic's compare_metadata has no check-constraint comparator, so a missing
-            # or altered <table>_lease_ck (the half-set-lease guard) passes the diff above
-            # silently. Probe pg_constraint directly, mirroring the partial-index probe.
-            errors.extend(await conn.run_sync(_validate_check_constraints_sync, self._table))
+            # S2 / lease_ck: these two probes catch drift that `alembic revision
+            # --autogenerate` cannot remediate — its index comparator ignores
+            # postgresql_where and it has no check-constraint comparator at all.
+            # Collect them separately so the raised error can point operators at
+            # the hand-written-migration recipe (_AUTOGEN_BLIND_HINT) only when
+            # one of them actually fired.
+            blind_errors = await conn.run_sync(_validate_index_predicates_sync, self._table)
+            blind_errors.extend(await conn.run_sync(_validate_check_constraints_sync, self._table))
+            errors.extend(blind_errors)
             if self._dlq_table is not None:
                 errors.extend(await conn.run_sync(_validate_dlq_schema_sync, self._dlq_table))
         if errors:
-            msg = "Outbox schema mismatch: " + "; ".join(errors)
-            raise RuntimeError(msg)
+            raise RuntimeError(
+                _compose_schema_mismatch_message(errors, has_blind_drift=bool(blind_errors)),
+            )
 
     async def ping(self) -> bool:
         # Bound the probe: an unwrapped connect+SELECT 1 against a half-dead TCP socket
@@ -574,6 +575,27 @@ def _validate_check_constraints_sync(connection: "Connection", table: "Table") -
         if got != want:
             errors.append(f"CHECK constraint {name!r} has wrong predicate: expected '{want}', got '{got}'")
     return errors
+
+
+# The published docs anchor for hand-written migrations that fix drift
+# `alembic revision --autogenerate` cannot emit (no check-constraint comparator;
+# the index comparator ignores postgresql_where). Appended to the RuntimeError
+# only when an Alembic-blind probe actually fired — see validate_schema().
+_SCHEMA_MISMATCH_PREFIX = "Outbox schema mismatch: "
+_AUTOGEN_BLIND_HINT = (
+    "These (CHECK constraints and partial-index predicates) are invisible to "
+    "'alembic revision --autogenerate' — hand-write the migration: "
+    "https://faststream-outbox.modern-python.org/operations/alembic/"
+    "#fixing-drift-autogenerate-cant-see"
+)
+
+
+def _compose_schema_mismatch_message(errors: list[str], *, has_blind_drift: bool) -> str:
+    """Build the validate_schema RuntimeError text; append the remediation pointer for Alembic-blind drift."""
+    msg = _SCHEMA_MISMATCH_PREFIX + "; ".join(errors)
+    if has_blind_drift:
+        msg += "\n\n" + _AUTOGEN_BLIND_HINT
+    return msg
 
 
 def _validate_schema_sync(connection: "Connection", table: "Table") -> list[str]:
