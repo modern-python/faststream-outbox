@@ -1931,6 +1931,30 @@ async def test_validate_schema_fails_when_lease_check_constraint_missing(
     assert "operations/alembic/#fixing-drift-autogenerate-cant-see" in str(excinfo.value)
 
 
+async def test_validate_schema_passes_under_ck_naming_convention(
+    pg_engine: AsyncEngine,
+) -> None:
+    """
+    A MetaData with a ``ck`` naming convention renames the lease CHECK to ``ck_<t>_<t>_lease_ck``.
+
+    The probe must look it up under that resolved name (carried on the constraint object), not the
+    literal ``<t>_lease_ck`` — otherwise a perfectly valid schema falsely raises "missing CHECK
+    constraint" for every deployment using the SQLAlchemy/Alembic-recommended convention.
+    """
+    convention = {"ck": "ck_%(table_name)s_%(constraint_name)s"}
+    metadata = MetaData(naming_convention=convention)
+    table_name = f"test_outbox_{uuid.uuid4().hex[:12]}"
+    table = make_outbox_table(metadata, table_name=table_name)
+    async with pg_engine.begin() as conn:
+        await conn.run_sync(metadata.create_all)
+    try:
+        client = OutboxClient(pg_engine, table)
+        await client.validate_schema()  # must NOT raise
+    finally:
+        async with pg_engine.begin() as conn:
+            await conn.run_sync(metadata.drop_all)
+
+
 async def test_validate_schema_fails_when_lease_check_constraint_predicate_wrong(
     pg_engine: AsyncEngine,
     outbox_table: Table,

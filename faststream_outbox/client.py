@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     ARRAY,
+    CheckConstraint,
     Float,
     MetaData,
     String,
@@ -543,6 +544,26 @@ _EXPECTED_CHECK_CONSTRAINTS = {
 }
 
 
+def _resolve_check_constraint_name(table: "Table", suffix: str, want: str) -> str:
+    """
+    Return the name the lease CHECK constraint actually carries on *table*.
+
+    A ``MetaData`` with a SQLAlchemy ``ck`` ``naming_convention`` re-templates an
+    explicitly-named ``CheckConstraint`` — the package's ``<table>_lease_ck`` becomes e.g.
+    ``ck_<table>_<table>_lease_ck`` — so the live DB name is NOT ``f"{table.name}{suffix}"``.
+    The convention-resolved name is already carried on the constraint object, so identify
+    our constraint by its (normalized) predicate and read its ``.name``. Falls back to the
+    literal ``f"{table.name}{suffix}"`` when the table carries no matching constraint (a
+    reflected/hand-built ``Table``), preserving the original "missing" report.
+    """
+    for constraint in table.constraints:
+        if isinstance(constraint, CheckConstraint) and constraint.name is not None:
+            predicate = _normalize_predicate(str(constraint.sqltext)).removeprefix("check ").strip()
+            if predicate == want:
+                return str(constraint.name)
+    return f"{table.name}{suffix}"
+
+
 def _validate_check_constraints_sync(connection: "Connection", table: "Table") -> list[str]:
     """
     Compare the live CHECK constraint(s) against what the package expects.
@@ -565,7 +586,7 @@ def _validate_check_constraints_sync(connection: "Connection", table: "Table") -
     live = {row["name"]: row["definition"] for row in rows}
     errors: list[str] = []
     for suffix, want in _EXPECTED_CHECK_CONSTRAINTS.items():
-        name = f"{table.name}{suffix}"
+        name = _resolve_check_constraint_name(table, suffix, want)
         if name not in live:
             errors.append(f"missing CHECK constraint {name!r} (expected '{want}')")
             continue

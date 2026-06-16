@@ -44,6 +44,7 @@ from faststream_outbox.client import (
     _SCHEMA_MISMATCH_PREFIX,
     OutboxClient,
     _compose_schema_mismatch_message,
+    _validate_check_constraints_sync,
     _validate_schema_sync,
 )
 from faststream_outbox.configs import OutboxBrokerConfig
@@ -1383,6 +1384,52 @@ def test_compose_schema_mismatch_message_omits_hint_without_blind_drift() -> Non
 def test_compose_schema_mismatch_message_joins_multiple_errors() -> None:
     msg = _compose_schema_mismatch_message(["a", "b"], has_blind_drift=False)
     assert msg == _SCHEMA_MISMATCH_PREFIX + "a; b"
+
+
+# SQLAlchemy re-templates an explicitly-named CheckConstraint through a MetaData's ``ck``
+# naming convention (the explicit name becomes the ``%(constraint_name)s`` token), so the live
+# constraint name is NOT ``<table>_lease_ck`` — it is ``ck_<table>_<table>_lease_ck``. The probe
+# must look it up under the convention-resolved name carried on the constraint object, not a
+# literal suffix, or it falsely reports a correct schema as "missing CHECK constraint".
+_CK_CONVENTION = {"ck": "ck_%(table_name)s_%(constraint_name)s"}
+_RESOLVED_LEASE_CK_NAME = "ck_outbox_faststream_outbox_faststream_lease_ck"
+_LEASE_CK_PREDICATE = "acquired_token is null = acquired_at is null"
+
+
+def _mock_check_constraint_connection(rows: list[dict[str, str]]) -> MagicMock:
+    """Build a connection whose ``execute(...).mappings().all()`` yields *rows* (name/definition dicts)."""
+    connection = MagicMock()
+    connection.execute.return_value.mappings.return_value.all.return_value = rows
+    return connection
+
+
+def test_validate_check_constraints_honors_naming_convention() -> None:
+    metadata = MetaData(naming_convention=_CK_CONVENTION)
+    table = make_outbox_table(metadata, table_name="outbox_faststream")
+    connection = _mock_check_constraint_connection(
+        [{"name": _RESOLVED_LEASE_CK_NAME, "definition": "CHECK (((acquired_token IS NULL) = (acquired_at IS NULL)))"}],
+    )
+    assert _validate_check_constraints_sync(connection, table) == []
+
+
+def test_validate_check_constraints_missing_reports_convention_resolved_name() -> None:
+    metadata = MetaData(naming_convention=_CK_CONVENTION)
+    table = make_outbox_table(metadata, table_name="outbox_faststream")
+    connection = _mock_check_constraint_connection([])  # constraint absent from the live DB
+    errors = _validate_check_constraints_sync(connection, table)
+    assert errors == [f"missing CHECK constraint {_RESOLVED_LEASE_CK_NAME!r} (expected '{_LEASE_CK_PREDICATE}')"]
+
+
+def test_validate_check_constraints_falls_back_to_literal_name_without_constraint_object() -> None:
+    """
+    Fall back to the literal ``<table>_lease_ck`` when the Table carries no lease CheckConstraint.
+
+    A hand-built/reflected ``Table`` has no convention to resolve, so the "missing" report still fires.
+    """
+    table = Table("bare_outbox", MetaData())  # no CheckConstraint attached
+    connection = _mock_check_constraint_connection([])
+    errors = _validate_check_constraints_sync(connection, table)
+    assert errors == [f"missing CHECK constraint 'bare_outbox_lease_ck' (expected '{_LEASE_CK_PREDICATE}')"]
 
 
 async def test_broker_ping_done_subscriber_task_is_false() -> None:
