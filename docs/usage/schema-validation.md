@@ -38,6 +38,12 @@ schema (`add_*` / `modify_*` ops). `remove_*` ops are silently dropped so
 you can attach your own audit columns or additional indexes without the
 validator complaining.
 
+Some drift cannot be fixed by re-running `alembic revision --autogenerate` — a
+missing/altered `outbox_lease_ck` CHECK or a drifted partial-index predicate.
+For those, the `RuntimeError` ends with a pointer to
+[Alembic migrations § Fixing drift autogenerate can't see](../operations/alembic.md#fixing-drift-autogenerate-cant-see),
+which holds the hand-written migration recipe.
+
 !!! warning "Server defaults are not checked"
     The diff runs with `compare_server_default=False` — Alembic's
     server-default comparison is flaky against Postgres' normalized
