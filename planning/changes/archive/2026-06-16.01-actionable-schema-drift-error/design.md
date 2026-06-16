@@ -1,11 +1,11 @@
 ---
-status: draft
+status: shipped
 date: 2026-06-16
 slug: actionable-schema-drift-error
 supersedes: null
 superseded_by: null
-pr: null
-outcome: null
+pr: "99"
+outcome: shipped in #99
 ---
 
 # Design: Actionable error for Alembic-blind schema drift

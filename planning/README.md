@@ -74,6 +74,11 @@ _None._
 
 ### Archived (shipped)
 
+- **[actionable-schema-drift-error](changes/archive/2026-06-16.01-actionable-schema-drift-error/design.md)**
+  (#99, 2026-06-16) — `validate_schema()` appends a hand-written-migration
+  pointer to its `RuntimeError` for Alembic-blind drift (the `outbox_lease_ck`
+  CHECK and partial-index predicates that `--autogenerate` can't remediate);
+  recipe lives in `docs/operations/alembic.md`.
 - **[portable-planning-convention](changes/archive/2026-06-13.01-portable-planning-convention/design.md)**
   (#77, 2026-06-13) — Two-axis OpenSpec-shaped convention: `architecture/`
   truth + `changes/` folder bundles, `.NN` intra-day tiebreak, three lanes,
