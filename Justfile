@@ -41,8 +41,3 @@ docs-serve:
 # One-shot strict build; fails on broken links or orphaned pages.
 docs-build:
     uvx --with-requirements docs/requirements.txt mkdocs build --strict
-
-# Force-pushes built site to gh-pages; CI runs this on push to main.
-# Manual invocation from a stale checkout will roll the live site back.
-docs-deploy:
-    uvx --with-requirements docs/requirements.txt mkdocs gh-deploy --force
