@@ -215,6 +215,11 @@ op.create_index(
 Substitute the columns / `unique` / predicate from the table above for
 `outbox_pending_idx` and `outbox_lease_idx`.
 
+The recipes pass literal names (`'outbox_lease_ck'`, `'outbox_timer_id_uq'`) —
+the exact names the package emits. If your `MetaData` carries a SQLAlchemy
+`naming_convention`, wrap each name in `op.f('outbox_lease_ck')` so Alembic
+treats it as final and does not re-template it.
+
 ## DLQ retention via partition drop { #dlq-retention-via-partition-drop }
 
 Plain `DELETE FROM outbox_dlq WHERE failed_at < now() - interval '90

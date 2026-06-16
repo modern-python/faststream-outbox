@@ -1945,5 +1945,7 @@ async def test_validate_schema_fails_when_lease_check_constraint_predicate_wrong
             f"CHECK (acquired_token IS NOT NULL OR acquired_at IS NULL)",
         )
     client = OutboxClient(pg_engine, outbox_table)
-    with pytest.raises(RuntimeError, match="wrong predicate"):
+    with pytest.raises(RuntimeError, match="wrong predicate") as excinfo:
         await client.validate_schema()
+    # The predicate-drift probe is Alembic-blind too, so the remediation pointer must fire.
+    assert "operations/alembic/#fixing-drift-autogenerate-cant-see" in str(excinfo.value)
