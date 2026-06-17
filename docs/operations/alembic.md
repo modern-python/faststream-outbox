@@ -218,32 +218,25 @@ Substitute the columns / `unique` / predicate from the table above for
 The recipes pass literal names (`'outbox_lease_ck'`, `'outbox_timer_id_uq'`) —
 the exact names the package emits **with no `naming_convention`**.
 
-If your `MetaData` carries a SQLAlchemy `naming_convention` with a `ck` key, the
-lease `CheckConstraint` is re-templated — `outbox_lease_ck` becomes e.g.
-`ck_outbox_outbox_lease_ck` (the explicit name fills the `%(constraint_name)s`
-token). `validate_schema()` reads the expected CHECK name **off your `Table`
-object**, so it already honours your convention — but your migration must create
-the constraint under that **same** rendered name, or the probe won't find it.
+### Naming conventions: the CHECK name doesn't matter
 
-Introspect the rendered name from your own table and recreate the constraint
-under it (`op.f(...)` passes it through literally):
+`validate_schema()`'s CHECK probe matches the lease constraint **by predicate,
+not name**. So if your `MetaData` carries a SQLAlchemy `naming_convention` with a
+`ck` key, you don't need to match any particular name — create the constraint
+under whatever name your migration produces and it will validate, as long as its
+predicate is `(acquired_token IS NULL) = (acquired_at IS NULL)`. The literal
+`op.create_check_constraint('outbox_lease_ck', ...)` recipe above is fine even
+under a convention.
 
-```python
-from sqlalchemy import CheckConstraint
+(Why the probe ignores the name: a `ck` convention re-templates the in-memory
+`CheckConstraint.name` to e.g. `ck_outbox_outbox_lease_ck`, but a hand-written
+`op.create_check_constraint('outbox_lease_ck', ...)` creates the literal name
+verbatim — Alembic op functions don't apply the convention. The live name is
+therefore unpredictable, so the probe keys off the stable predicate instead.)
 
-# `outbox_table` is what `make_outbox_table(your_metadata)` returned.
-ck = next(c for c in outbox_table.constraints if isinstance(c, CheckConstraint))
-print(ck.name)  # the exact name to use, e.g. 'ck_outbox_outbox_lease_ck'
-
-op.create_check_constraint(
-    op.f(ck.name),
-    'outbox',
-    '(acquired_token IS NULL) = (acquired_at IS NULL)',
-)
-```
-
-The explicitly-named indexes (`outbox_pending_idx` etc.) are **not** re-templated
-by the `ix`/`uq` convention keys, so their literal names stay correct as-is.
+The **index** recipes still use literal names, because the explicitly-named
+indexes (`outbox_pending_idx` etc.) are **not** re-templated by the `ix`/`uq`
+convention keys — those only rename auto-named indexes.
 
 ## DLQ retention via partition drop { #dlq-retention-via-partition-drop }
 

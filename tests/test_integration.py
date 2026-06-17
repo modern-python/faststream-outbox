@@ -1959,7 +1959,7 @@ async def test_validate_schema_fails_when_lease_check_constraint_predicate_wrong
     pg_engine: AsyncEngine,
     outbox_table: Table,
 ) -> None:
-    """A ``<table>_lease_ck`` with a drifted predicate must be caught by the pg_constraint probe."""
+    """A drifted lease-CHECK predicate no longer enforces the invariant, so it reads as missing."""
     name = outbox_table.name
     async with pg_engine.begin() as conn:
         await conn.exec_driver_sql(f'ALTER TABLE "{name}" DROP CONSTRAINT "{name}_lease_ck"')
@@ -1969,7 +1969,41 @@ async def test_validate_schema_fails_when_lease_check_constraint_predicate_wrong
             f"CHECK (acquired_token IS NOT NULL OR acquired_at IS NULL)",
         )
     client = OutboxClient(pg_engine, outbox_table)
-    with pytest.raises(RuntimeError, match="wrong predicate") as excinfo:
+    with pytest.raises(RuntimeError, match="missing CHECK constraint enforcing") as excinfo:
         await client.validate_schema()
-    # The predicate-drift probe is Alembic-blind too, so the remediation pointer must fire.
+    # The predicate probe is Alembic-blind too, so the remediation pointer must fire.
     assert "operations/alembic/#fixing-drift-autogenerate-cant-see" in str(excinfo.value)
+
+
+async def test_validate_schema_passes_under_ck_convention_with_literally_named_constraint(
+    pg_engine: AsyncEngine,
+) -> None:
+    """
+    Convention metadata + a literally-named lease CHECK must validate (the reported case).
+
+    A ``MetaData`` carries a ``ck`` naming convention, but the lease CHECK was created by a
+    hand-written migration under the **literal** ``<table>_lease_ck`` name (Alembic op functions
+    don't apply the convention). The in-memory Table's convention-doubled name (``ck_<t>_<t>_lease_ck``)
+    differs from the live literal name — yet the predicate matches, so validate_schema must pass.
+    """
+    convention = {"ck": "ck_%(table_name)s_%(constraint_name)s"}
+    metadata = MetaData(naming_convention=convention)
+    table_name = f"test_outbox_{uuid.uuid4().hex[:12]}"
+    table = make_outbox_table(metadata, table_name=table_name)
+    async with pg_engine.begin() as conn:
+        await conn.run_sync(metadata.create_all)
+        # Replace the convention-doubled constraint with one under the literal name a
+        # ``op.create_check_constraint('<table>_lease_ck', ...)`` migration would create.
+        await conn.exec_driver_sql(
+            f'ALTER TABLE "{table_name}" DROP CONSTRAINT "ck_{table_name}_{table_name}_lease_ck"',
+        )
+        await conn.exec_driver_sql(
+            f'ALTER TABLE "{table_name}" ADD CONSTRAINT "{table_name}_lease_ck" '
+            f"CHECK ((acquired_token IS NULL) = (acquired_at IS NULL))",
+        )
+    try:
+        client = OutboxClient(pg_engine, table)
+        await client.validate_schema()  # must NOT raise
+    finally:
+        async with pg_engine.begin() as conn:
+            await conn.run_sync(metadata.drop_all)

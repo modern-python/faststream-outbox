@@ -23,7 +23,6 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     ARRAY,
-    CheckConstraint,
     Float,
     MetaData,
     String,
@@ -544,36 +543,23 @@ _EXPECTED_CHECK_CONSTRAINTS = {
 }
 
 
-def _resolve_check_constraint_name(table: "Table", suffix: str, want: str) -> str:
-    """
-    Return the name the lease CHECK constraint actually carries on *table*.
-
-    A ``MetaData`` with a SQLAlchemy ``ck`` ``naming_convention`` re-templates an
-    explicitly-named ``CheckConstraint`` — the package's ``<table>_lease_ck`` becomes e.g.
-    ``ck_<table>_<table>_lease_ck`` — so the live DB name is NOT ``f"{table.name}{suffix}"``.
-    The convention-resolved name is already carried on the constraint object, so identify
-    our constraint by its (normalized) predicate and read its ``.name``. Falls back to the
-    literal ``f"{table.name}{suffix}"`` when the table carries no matching constraint (a
-    reflected/hand-built ``Table``), preserving the original "missing" report.
-    """
-    for constraint in table.constraints:
-        if isinstance(constraint, CheckConstraint) and constraint.name is not None:
-            predicate = _normalize_predicate(str(constraint.sqltext)).removeprefix("check ").strip()
-            if predicate == want:
-                return str(constraint.name)
-    return f"{table.name}{suffix}"
-
-
 def _validate_check_constraints_sync(connection: "Connection", table: "Table") -> list[str]:
     """
-    Compare the live CHECK constraint(s) against what the package expects.
+    Verify the live DB carries a CHECK enforcing each invariant the package needs.
 
     Alembic's ``compare_metadata`` registers no check-constraint comparator, so a missing
-    or altered ``<table>_lease_ck`` — the ``(acquired_token IS NULL) = (acquired_at IS NULL)``
-    invariant that makes a half-set lease unrepresentable — slips through :func:`_run_validate`
-    entirely. Probe ``pg_constraint`` directly, mirroring :func:`_validate_index_predicates_sync`.
+    or altered lease CHECK — the ``(acquired_token IS NULL) = (acquired_at IS NULL)`` invariant
+    that makes a half-set lease unrepresentable — slips through :func:`_run_validate` entirely.
+    Probe ``pg_constraint`` directly, mirroring :func:`_validate_index_predicates_sync`.
 
-    Flags both a **missing** constraint and one whose normalized predicate **drifted**.
+    Match by **predicate, not name**. A CHECK's name is irrelevant to whether it enforces the
+    invariant, and the name is not predictable from the package side: a ``MetaData`` with a
+    SQLAlchemy ``ck`` ``naming_convention`` re-templates the package's ``<table>_lease_ck`` to
+    ``ck_<table>_<table>_lease_ck`` on the in-memory ``Table``, yet a hand-written migration
+    (``op.create_check_constraint('<table>_lease_ck', ...)``) creates the literal name verbatim
+    — Alembic op functions don't apply ``target_metadata``'s convention. So the live name varies
+    by how the migration was authored; only the predicate is stable. Found under **any** name →
+    pass; absent (including a drifted predicate, which is just "the right one is missing") → error.
     """
     rows = (
         connection.execute(
@@ -583,18 +569,15 @@ def _validate_check_constraints_sync(connection: "Connection", table: "Table") -
         .mappings()
         .all()
     )
-    live = {row["name"]: row["definition"] for row in rows}
+    # pg_get_constraintdef returns e.g. ``CHECK (((a IS NULL) = (b IS NULL)))``; strip the
+    # leading ``check`` keyword after normalizing away parens/case/whitespace.
+    live_predicates = {_normalize_predicate(row["definition"]).removeprefix("check ").strip() for row in rows}
     errors: list[str] = []
     for suffix, want in _EXPECTED_CHECK_CONSTRAINTS.items():
-        name = _resolve_check_constraint_name(table, suffix, want)
-        if name not in live:
-            errors.append(f"missing CHECK constraint {name!r} (expected '{want}')")
-            continue
-        # pg_get_constraintdef returns e.g. ``CHECK (((a IS NULL) = (b IS NULL)))``; strip the
-        # leading ``check`` keyword after normalizing away parens/case/whitespace.
-        got = _normalize_predicate(live[name]).removeprefix("check ").strip()
-        if got != want:
-            errors.append(f"CHECK constraint {name!r} has wrong predicate: expected '{want}', got '{got}'")
+        if want not in live_predicates:
+            errors.append(
+                f"missing CHECK constraint enforcing '{want}' (the lease invariant; name it e.g. {table.name}{suffix})",
+            )
     return errors
 
 

@@ -1386,14 +1386,14 @@ def test_compose_schema_mismatch_message_joins_multiple_errors() -> None:
     assert msg == _SCHEMA_MISMATCH_PREFIX + "a; b"
 
 
-# SQLAlchemy re-templates an explicitly-named CheckConstraint through a MetaData's ``ck``
-# naming convention (the explicit name becomes the ``%(constraint_name)s`` token), so the live
-# constraint name is NOT ``<table>_lease_ck`` — it is ``ck_<table>_<table>_lease_ck``. The probe
-# must look it up under the convention-resolved name carried on the constraint object, not a
-# literal suffix, or it falsely reports a correct schema as "missing CHECK constraint".
+# The lease CHECK probe matches by PREDICATE, not name. A CHECK's name is irrelevant to whether
+# it enforces the invariant, and the live name is unpredictable from the package side: a ``ck``
+# naming_convention re-templates the package's ``<table>_lease_ck`` to ``ck_<table>_<table>_lease_ck``
+# on the in-memory Table, yet a hand-written ``op.create_check_constraint('<table>_lease_ck', ...)``
+# migration creates the literal name verbatim. So the probe must pass on the predicate under ANY name.
 _CK_CONVENTION = {"ck": "ck_%(table_name)s_%(constraint_name)s"}
-_RESOLVED_LEASE_CK_NAME = "ck_outbox_faststream_outbox_faststream_lease_ck"
 _LEASE_CK_PREDICATE = "acquired_token is null = acquired_at is null"
+_LEASE_CK_DEFINITION = "CHECK (((acquired_token IS NULL) = (acquired_at IS NULL)))"
 
 
 def _mock_check_constraint_connection(rows: list[dict[str, str]]) -> MagicMock:
@@ -1403,33 +1403,47 @@ def _mock_check_constraint_connection(rows: list[dict[str, str]]) -> MagicMock:
     return connection
 
 
-def test_validate_check_constraints_honors_naming_convention() -> None:
-    metadata = MetaData(naming_convention=_CK_CONVENTION)
-    table = make_outbox_table(metadata, table_name="outbox_faststream")
+def test_validate_check_constraints_passes_under_convention_resolved_name() -> None:
+    """A constraint carrying the convention-doubled name still passes — matched on predicate."""
+    table = make_outbox_table(MetaData(naming_convention=_CK_CONVENTION), table_name="outbox_faststream")
     connection = _mock_check_constraint_connection(
-        [{"name": _RESOLVED_LEASE_CK_NAME, "definition": "CHECK (((acquired_token IS NULL) = (acquired_at IS NULL)))"}],
+        [{"name": "ck_outbox_faststream_outbox_faststream_lease_ck", "definition": _LEASE_CK_DEFINITION}],
     )
     assert _validate_check_constraints_sync(connection, table) == []
 
 
-def test_validate_check_constraints_missing_reports_convention_resolved_name() -> None:
-    metadata = MetaData(naming_convention=_CK_CONVENTION)
-    table = make_outbox_table(metadata, table_name="outbox_faststream")
+def test_validate_check_constraints_passes_under_literal_name() -> None:
+    """The literal ``<table>_lease_ck`` a hand-written migration creates also passes — same predicate."""
+    table = make_outbox_table(MetaData(naming_convention=_CK_CONVENTION), table_name="outbox_faststream")
+    connection = _mock_check_constraint_connection(
+        [{"name": "outbox_faststream_lease_ck", "definition": _LEASE_CK_DEFINITION}],
+    )
+    assert _validate_check_constraints_sync(connection, table) == []
+
+
+def test_validate_check_constraints_missing_describes_predicate() -> None:
+    """When no live CHECK enforces the predicate, the error names the invariant, not a guessed name."""
+    table = make_outbox_table(MetaData(), table_name="outbox_faststream")
     connection = _mock_check_constraint_connection([])  # constraint absent from the live DB
     errors = _validate_check_constraints_sync(connection, table)
-    assert errors == [f"missing CHECK constraint {_RESOLVED_LEASE_CK_NAME!r} (expected '{_LEASE_CK_PREDICATE}')"]
+    assert errors == [
+        f"missing CHECK constraint enforcing '{_LEASE_CK_PREDICATE}' "
+        f"(the lease invariant; name it e.g. outbox_faststream_lease_ck)",
+    ]
 
 
-def test_validate_check_constraints_falls_back_to_literal_name_without_constraint_object() -> None:
-    """
-    Fall back to the literal ``<table>_lease_ck`` when the Table carries no lease CheckConstraint.
-
-    A hand-built/reflected ``Table`` has no convention to resolve, so the "missing" report still fires.
-    """
-    table = Table("bare_outbox", MetaData())  # no CheckConstraint attached
-    connection = _mock_check_constraint_connection([])
+def test_validate_check_constraints_drifted_predicate_reported_as_missing() -> None:
+    """A CHECK with a drifted predicate doesn't enforce the invariant, so it reads as missing."""
+    table = make_outbox_table(MetaData(), table_name="outbox_faststream")
+    drifted = "CHECK ((acquired_token IS NOT NULL OR acquired_at IS NULL))"
+    connection = _mock_check_constraint_connection(
+        [{"name": "outbox_faststream_lease_ck", "definition": drifted}],
+    )
     errors = _validate_check_constraints_sync(connection, table)
-    assert errors == [f"missing CHECK constraint 'bare_outbox_lease_ck' (expected '{_LEASE_CK_PREDICATE}')"]
+    assert errors == [
+        f"missing CHECK constraint enforcing '{_LEASE_CK_PREDICATE}' "
+        f"(the lease invariant; name it e.g. outbox_faststream_lease_ck)",
+    ]
 
 
 async def test_broker_ping_done_subscriber_task_is_false() -> None:
