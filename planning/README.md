@@ -74,6 +74,10 @@ _None._
 
 ### Archived (shipped)
 
+- **[docs-diataxis-nav](changes/archive/2026-06-19.02-docs-diataxis-nav/design.md)**
+  (#104, 2026-06-19) — Dissolve the standalone Patterns nav section: fold the
+  messaging-service case study into Guides and move the file to `docs/usage/`
+  (no section renames). Seven top-level sections → six.
 - **[messaging-service-patterns-doc](changes/archive/2026-06-19.01-messaging-service-patterns-doc/design.md)**
   (#103, 2026-06-19) — New `docs/patterns/` section with one page composing
   the outbox in an anonymized chat/notifications service: transactional event

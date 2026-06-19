@@ -1,11 +1,11 @@
 ---
-status: draft
+status: shipped
 date: 2026-06-19
 slug: docs-diataxis-nav
 supersedes: null
 superseded_by: null
-pr: null
-outcome: null
+pr: 104
+outcome: Dropped the Patterns nav section; messaging-service page moved to docs/usage/ under Guides (no renames). 7 sections → 6. No architecture/ change (docs only).
 ---
 
 # Design: Dissolve the "Patterns" nav section into Guides
