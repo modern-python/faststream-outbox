@@ -127,6 +127,14 @@ class CreateMessageUseCase:
             await self.transaction.commit()
 ```
 
+This atomicity is load-bearing on one wiring detail: the `producer`,
+`messages_repository`, and `transaction` must all resolve the **same
+request-scoped `AsyncSession`**. `publish` inserts through whatever session the
+producer holds — if that is a different session from the one the repository
+writes through, the outbox row commits on its own and the "commits with the
+domain row" guarantee silently breaks, with no error. Scope the session per
+request in your DI container so all three share it.
+
 A subscriber on `chat-events` reads the row and relays it to Kafka via a
 DI-injected Kafka producer:
 
@@ -149,7 +157,7 @@ async def relay_chat_event(
 ```
 
 Register the router on the broker (the `OutboxBroker` built in `ioc.py`) with
-`broker.include_routers(ROUTER)`.
+`broker.include_router(ROUTER)`.
 
 > This service hand-rolls the Kafka hop through a DI'd producer, which keeps the
 > Kafka client fully under your control. If you'd rather stack the relay as a
@@ -161,28 +169,31 @@ Register the router on the broker (the `OutboxBroker` built in `ioc.py`) with
 The unread notification is a **delayed** outbox row, armed in the same create
 transaction. `timer_id` makes it idempotent; `activate_in` defers it:
 
+These two methods live on the same `OutboxEventProducer` from Pattern 1 (shown
+here as a continuation of the class):
+
 ```python title="producers.py (continued)"
 import datetime
 
-# inside OutboxEventProducer:
-
 UNREAD_DELAY = datetime.timedelta(seconds=30)
 
-async def arm_unread_timer(self, message: "Message") -> None:
-    await self.outbox_broker.publish(
-        ChatEvent(type="unread", message_id=message.id, chat_id=message.chat_id),
-        queue="unread-timers",
-        timer_id=str(message.id),
-        activate_in=UNREAD_DELAY,
-        session=self.session,
-    )
 
-async def cancel_unread_timer(self, message_id: int) -> None:
-    await self.outbox_broker.cancel_timer(
-        queue="unread-timers",
-        timer_id=str(message_id),
-        session=self.session,
-    )
+class OutboxEventProducer:  # ... continued from Pattern 1
+    async def arm_unread_timer(self, message: "Message") -> None:
+        await self.outbox_broker.publish(
+            ChatEvent(type="unread", message_id=message.id, chat_id=message.chat_id),
+            queue="unread-timers",
+            timer_id=str(message.id),
+            activate_in=UNREAD_DELAY,
+            session=self.session,
+        )
+
+    async def cancel_unread_timer(self, message_id: int) -> None:
+        await self.outbox_broker.cancel_timer(
+            queue="unread-timers",
+            timer_id=str(message_id),
+            session=self.session,
+        )
 ```
 
 When the recipient reads the message, a second use case **cancels** the timer in
