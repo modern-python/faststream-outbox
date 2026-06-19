@@ -84,6 +84,8 @@ process, no Kafka.
 - [Setup Prometheus and OpenTelemetry](usage/setup-prometheus-opentelemetry.md)
   — *step-by-step:* wire the native middleware and recorder adapters
   end-to-end.
+- [A messaging service, end-to-end](usage/messaging-service.md) — the relay,
+  timer, and testing guides composed in one service.
 
 ### Reference
 
