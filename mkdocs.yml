@@ -21,8 +21,7 @@ nav:
       - Testing: usage/testing.md
       - Schema validation: usage/schema-validation.md
       - Setup Prometheus and OpenTelemetry: usage/setup-prometheus-opentelemetry.md
-  - Patterns:
-      - 'A messaging service, end-to-end': patterns/messaging-service.md
+      - 'A messaging service, end-to-end': usage/messaging-service.md
   - Reference:
       - Subscriber: usage/subscriber.md
       - Publisher: usage/publisher.md

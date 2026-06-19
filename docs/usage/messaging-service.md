@@ -162,7 +162,7 @@ Register the router on the broker (the `OutboxBroker` built in `ioc.py`) with
 > This service hand-rolls the Kafka hop through a DI'd producer, which keeps the
 > Kafka client fully under your control. If you'd rather stack the relay as a
 > single decorator over the subscriber, see
-> [Relay to Kafka / RabbitMQ / NATS](../usage/relay.md).
+> [Relay to Kafka / RabbitMQ / NATS](relay.md).
 
 ## Pattern 2 — Fire-unless-cancelled timer
 
@@ -227,7 +227,7 @@ Two properties make this safe, and one is a limit worth knowing:
   no longer cancel it — the notification fires. Downstream consumers should
   tolerate the occasional already-read notification.
 
-More on scheduling semantics: [Timers](../usage/timers.md).
+More on scheduling semantics: [Timers](timers.md).
 
 ## Pattern 3 — Testing the composed app
 
@@ -269,13 +269,13 @@ async def test_outbox_schema(outbox_broker: OutboxBroker) -> None:
     await outbox_broker.validate_schema()
 ```
 
-More on the test broker's two modes: [Testing](../usage/testing.md).
+More on the test broker's two modes: [Testing](testing.md).
 
 ## See also
 
-- [Relay to Kafka / RabbitMQ / NATS](../usage/relay.md) — the native relay
+- [Relay to Kafka / RabbitMQ / NATS](relay.md) — the native relay
   decorator, an alternative to the hand-rolled hop above.
-- [Dead-letter queue](../usage/dlq.md) — archive terminal failures instead of
+- [Dead-letter queue](dlq.md) — archive terminal failures instead of
   deleting them.
-- [Observability](../usage/observability.md) — the metrics recorder and the
+- [Observability](observability.md) — the metrics recorder and the
   Prometheus / OpenTelemetry middleware.
