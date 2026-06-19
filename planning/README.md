@@ -74,6 +74,10 @@ _None._
 
 ### Archived (shipped)
 
+- **[messaging-service-patterns-doc](changes/archive/2026-06-19.01-messaging-service-patterns-doc/design.md)**
+  (#103, 2026-06-19) — New `docs/patterns/` section with one page composing
+  the outbox in an anonymized chat/notifications service: transactional event
+  relay, fire-unless-cancelled timer, and nested test brokers.
 - **[actionable-schema-drift-error](changes/archive/2026-06-16.01-actionable-schema-drift-error/design.md)**
   (#99, 2026-06-16) — `validate_schema()` appends a hand-written-migration
   pointer to its `RuntimeError` for Alembic-blind drift (the `outbox_lease_ck`
