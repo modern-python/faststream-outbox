@@ -83,7 +83,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class ChatEvent(pydantic.BaseModel):
-    type: str  # "created" | "read" | "deleted"
+    type: str  # "created" | "read" | "deleted" | "unread"
     message_id: int
     chat_id: int
 
@@ -148,7 +148,8 @@ async def relay_chat_event(
     await kafka_producer.publish_event(event)
 ```
 
-Register the router on the broker with `broker.include_routers(ROUTER)`.
+Register the router on the broker (the `OutboxBroker` built in `ioc.py`) with
+`broker.include_routers(ROUTER)`.
 
 > This service hand-rolls the Kafka hop through a DI'd producer, which keeps the
 > Kafka client fully under your control. If you'd rather stack the relay as a
