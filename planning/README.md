@@ -14,13 +14,15 @@ at the repo root; this directory records *how it got there*.
 ### Two axes, never mixed
 
 - **`architecture/` (repo root) — the present.** One file per capability,
-  living prose, updated whenever a change ships. The truth home.
+  living prose, updated in the same PR that ships the change. The truth home.
 - **`planning/changes/` — the past-and-pending.** One folder per change,
   kept in place after ship.
 
-Shipping a change **promotes** its conclusions into the affected
-`architecture/<capability>.md` by hand. That hand-edit is what keeps
-`architecture/` true; the bundle stays in `changes/` as the *why*.
+A change **promotes** its conclusions into the affected
+`architecture/<capability>.md` by hand **in the implementing PR, alongside the
+code** — the edit rides in the same diff and is reviewed with it, never applied
+as a separate post-merge step. That hand-edit is what keeps `architecture/`
+true; the bundle stays in `changes/` as the *why*.
 
 ### Change bundles
 
