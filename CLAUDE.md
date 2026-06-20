@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
-- `just test` — full suite in docker compose (Postgres 17). Forwards args: `just test tests/test_unit.py -k name`.
+- `just test` — full suite in docker compose (Postgres 17). Forwards args: `just test tests/test_unit.py -k name`. Args are forwarded **unquoted**, so a spaced `-k` expression (`-k "a or b"`) word-splits and fails (`file or directory not found: or`) — run one keyword per invocation, or use a single substring matching all targets.
 - `just lint` — `eof-fixer`, `ruff format`, `ruff check --fix`, `ty check`. `just lint-ci` is the non-mutating variant.
 - `just install` — `uv lock --upgrade && uv sync --all-extras --all-groups --frozen`.
 - `just build` / `just down` / `just sh` — image build, teardown, shell into the app container.

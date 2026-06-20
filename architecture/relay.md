@@ -27,3 +27,12 @@ c. `AcknowledgementMiddleware.__aexit__` turns publisher-chain exceptions into o
 When `True`, the `process_message` override fills `Response.headers` from the inbound `OutboxMessage.headers` only when the handler returned a `Response` with empty headers (explicit user-set headers win). Default False matches the FastStream-wide convention; users who want propagation flip one kwarg.
 
 **Envelope-managed keys are stripped for a chained `OutboxResponse`.** `_maybe_propagate_inbound_headers` drops `content-type` and `correlation_id` from the propagated dict when the result is an `OutboxResponse`. That response re-encodes through `_encode_payload`, which re-derives `content-type` from the *new* body and reads `correlation_id` from the dedicated field; propagating the inbound row's values would make `_encode_payload` raise on any cross-content-type or custom-`correlation_id` relay, nacking the **successful** inbound row to retry-exhaustion (audit F5-01 / F5-02). Foreign-publisher relays (Kafka/etc.) don't re-encode through the outbox envelope, so they keep forwarding these headers verbatim — including `content-type`.
+
+## Who retries during a foreign-broker outage
+
+Retries come from **two tiers**, and short outages never reach the outbox one:
+
+- **Transient blip (~10–30s):** the client library (e.g. `aiokafka`) absorbs it with its own reconnect+retry loop. The `publish` inside the handler **blocks until the broker returns**, then succeeds. From the outbox subscriber's view that is one slow *successful* publish — **no raise, no nack, no `nacked_retried` tick, no `next_attempt_at` reschedule**. At-least-once still holds (the outbox row is held until the client acks), but the retrying tier is the client, not the outbox.
+- **Sustained outage / hard failure:** the client eventually raises into the handler; `AcknowledgementMiddleware` turns that into a nack and the outbox's `retry_strategy` takes over (property (c) above).
+
+Implications: a quick `docker compose stop kafka` will **not** produce a visible outbox-level retry log line — to exercise the outbox retry tier in a demo or test, raise inside the handler instead. Operators sizing alerts on `lease_lost` / `nacked_retried` should not expect spikes during short blips. One real failure mode: a long-blocked publish (client spinning) can outrun `lease_ttl_seconds` and surface as a `lease_lost` on the terminal write — `lease_lost` correlating with broker instability is that.
