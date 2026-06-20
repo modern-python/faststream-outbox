@@ -170,9 +170,14 @@ the implementing PR.
 
 - `just index` prints all 15 (+1) bundles, correctly grouped and sorted, with
   no missing/garbled summaries — eyeball the output.
-- A small unit test for the frontmatter parser + grouping in `planning/`'s
-  scope is optional but cheap; at minimum the script must run clean under
-  `uv run python planning/index.py` and exit 0.
+- **No unit test.** `planning/index.py` is portable dev tooling (it copies to
+  other repos verbatim with the convention); a test in `tests/` would couple it
+  to this repo's pytest + `--cov=.` gate and be unclear what to do with on copy.
+  No coverage config is needed: `planning/` has no `__init__.py` and nothing
+  imports the script, so `--cov=.` never traces it and the 100% gate is
+  unaffected. It is verified by running it — `just index` must exit 0 and render
+  correctly. If the parser breaks, the listing visibly breaks; the stakes are a
+  human-read index, not runtime.
 - `grep -r 'changes/archive' planning` returns no matches after the rewrite.
 - `grep -rL '^summary:' planning/changes/*/design.md` (and `change.md`) is
   empty — every bundle has a summary.
