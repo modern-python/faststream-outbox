@@ -55,8 +55,10 @@ def test_load_bundles_reads_design_then_change_and_skips_others(
     assert slugs == {"a", "b"}
     a = next(b for b in bundles if b["slug"] == "a")
     assert a["path"] == "changes/a-bundle/design.md"
+    assert a["name"] == "a-bundle"
     b = next(b for b in bundles if b["slug"] == "b")
     assert b["path"] == "changes/b-bundle/change.md"
+    assert b["name"] == "b-bundle"
 
 
 def test_render_groups_sorts_and_renders_supersede_links() -> None:
@@ -65,6 +67,7 @@ def test_render_groups_sorts_and_renders_supersede_links() -> None:
             "status": "draft",
             "date": "2026-02-01",
             "slug": "wip",
+            "name": "2026-02-01.01-wip",
             "pr": "",
             "summary": "Work in progress.",
             "path": "changes/wip/design.md",
@@ -73,6 +76,7 @@ def test_render_groups_sorts_and_renders_supersede_links() -> None:
             "status": "shipped",
             "date": "2026-01-02",
             "slug": "newer",
+            "name": "2026-01-02.01-newer",
             "pr": "10",
             "summary": "Newer.",
             "path": "changes/newer/design.md",
@@ -82,6 +86,7 @@ def test_render_groups_sorts_and_renders_supersede_links() -> None:
             "status": "shipped",
             "date": "2026-01-01",
             "slug": "older",
+            "name": "2026-01-01.01-older",
             "pr": "9",
             "summary": "Older.",
             "path": "changes/older/design.md",
@@ -90,6 +95,7 @@ def test_render_groups_sorts_and_renders_supersede_links() -> None:
             "status": "superseded",
             "date": "2026-01-01",
             "slug": "gone",
+            "name": "2026-01-01.01-gone",
             "pr": "8",
             "summary": "",
             "path": "changes/gone/design.md",
@@ -117,6 +123,7 @@ def test_render_empty_group_prints_none() -> None:
                 "status": "shipped",
                 "date": "2026-01-01",
                 "slug": "s",
+                "name": "2026-01-01.01-s",
                 "pr": "1",
                 "summary": "S.",
                 "path": "changes/s/design.md",

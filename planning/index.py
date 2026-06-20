@@ -50,6 +50,7 @@ def load_bundles() -> list[dict[str, str]]:
             continue
         fields = parse_frontmatter(spec.read_text(encoding="utf-8"))
         fields["path"] = f"changes/{bundle.name}/{spec.name}"
+        fields["name"] = bundle.name
         bundles.append(fields)
     return bundles
 
@@ -76,7 +77,7 @@ def render(bundles: list[dict[str, str]]) -> str:
         out += [f"## {title}", ""]
         rows = sorted(
             (b for b in bundles if b.get("status") in statuses),
-            key=lambda b: (b.get("date", ""), b.get("slug", "")),
+            key=lambda b: b.get("name", ""),
             reverse=True,
         )
         out += [format_row(b) for b in rows] if rows else ["_None._"]

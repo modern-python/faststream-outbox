@@ -7,7 +7,7 @@ at the repo root; this directory records *how it got there*.
 ## Conventions
 
 > This section is the portable convention — identical across the
-> modern-python repos. The Index below is repo-specific. To adopt elsewhere,
+> modern-python repos. The generated change listing (`just index`) and the `## Other` pointers below are repo-local. To adopt elsewhere,
 > copy this section plus [`_templates/`](_templates/) and point that repo's
 > `CLAUDE.md` Workflow + truth home at it.
 
