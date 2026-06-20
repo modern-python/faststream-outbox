@@ -1,13 +1,22 @@
 [project]
 name = "faststream-outbox"
 version = "0"
-description = "FastStream broker integration for the transactional outbox pattern: a Postgres table is the queue"
+description = "FastStream transactional-outbox integration backed by a Postgres table"
 authors = [
     { name = "Artur Shiriev", email = "me@shiriev.ru" },
 ]
 readme = "README.md"
 requires-python = ">=3.13,<4"
 license = "MIT"
+keywords = ["faststream", "outbox", "transactional-outbox", "postgresql", "messaging", "asyncio", "python"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Typing :: Typed",
+    "Topic :: Software Development :: Libraries",
+]
 dependencies = [
     "faststream>=0.7.1,<0.8",
     "sqlalchemy[asyncio]>=2.0",
@@ -89,6 +98,13 @@ max-args = 15
 addopts = "--cov=. --cov-report term-missing --cov-fail-under=100"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+
+[project.urls]
+Homepage = "https://faststream-outbox.modern-python.org"
+Documentation = "https://faststream-outbox.modern-python.org"
+Repository = "https://github.com/modern-python/faststream-outbox"
+Issues = "https://github.com/modern-python/faststream-outbox/issues"
+Changelog = "https://github.com/modern-python/faststream-outbox/releases"
 
 [tool.coverage.report]
 exclude_also = ["if typing.TYPE_CHECKING:"]
