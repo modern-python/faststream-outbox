@@ -84,6 +84,9 @@ max-args = 15
     "S101", # allow asserts
     "PLR2004", # allow magic values
 ]
+"planning/*.py" = [
+    "INP001", # planning/ is not a Python package; scripts live here without __init__.py
+]
 
 [tool.pytest.ini_options]
 addopts = "--cov=. --cov-report term-missing --cov-fail-under=100"

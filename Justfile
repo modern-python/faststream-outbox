@@ -28,6 +28,10 @@ lint-ci:
     uv run ruff check --no-fix
     uv run ty check
 
+# Print the planning change index (grouped by status) to stdout.
+index:
+    uv run python planning/index.py
+
 publish:
     rm -rf dist
     uv version $GITHUB_REF_NAME
