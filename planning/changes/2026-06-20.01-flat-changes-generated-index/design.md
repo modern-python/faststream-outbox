@@ -2,9 +2,7 @@
 status: draft
 date: 2026-06-20
 slug: flat-changes-generated-index
-summary: Flatten changes/ (drop active/archive), make status frontmatter the
-  sole lifecycle state, add a summary field, and replace the hand-maintained
-  README Index with a stdlib generator (just index).
+summary: Flatten changes/ (drop active/archive), make status frontmatter the sole lifecycle state, add a summary field, and replace the hand-maintained README Index with a stdlib generator (just index).
 supersedes: null
 superseded_by: null
 pr: null

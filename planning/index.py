@@ -1,3 +1,4 @@
+# ruff: noqa: INP001  # planning/ is not a Python package; this is a standalone script
 """
 Generate the planning change index from bundle frontmatter.
 
