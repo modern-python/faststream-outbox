@@ -30,8 +30,9 @@ A change is a folder `changes/YYYY-MM-DD.NN-<slug>/`:
   (`.01`, `.02`, …) that breaks same-date ties so the timeline sorts stably.
 - `<slug>` — kebab-case description, not a story ID.
 
-The implementing PR sets `status: shipped` and fills `pr`, `outcome`, and
-`summary` **in the branch**, alongside the code and the `architecture/`
+`summary` is written when the change is created (it is the change's
+one-liner). The implementing PR then sets `status: shipped` and fills `pr`
+and `outcome` **in the branch**, alongside the code and the `architecture/`
 promotion — no post-merge bookkeeping, no folder move.
 
 ### Three lanes

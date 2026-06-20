@@ -128,15 +128,15 @@ generator, and the single-step lifecycle (§5). Every "on merge, move to
 ### 5. Single-step lifecycle
 
 A change moves `draft` → `approved` while it is being designed (spec/plan exist
-before code). The **implementing PR itself** sets `status: shipped` and fills
-`pr:` / `outcome:` / `summary:` **in the branch**, alongside the code and the
+before code). `summary:` is written then, at creation — it is the change's
+one-liner. The **implementing PR itself** sets `status: shipped` and fills
+`pr:` / `outcome:` **in the branch**, alongside the code and the
 `architecture/<capability>.md` promotion. On merge there is **no bookkeeping
 step**: no folder move (gone with active/archive) and no separate status flip.
 
-This is strictly better in one respect: `status: shipped` and `summary:` land
-inside the diff the reviewer reads, so they are reviewed like any other line
-rather than applied as unreviewed post-merge housekeeping. The two frictions
-are both benign:
+This is strictly better in one respect: `status: shipped` lands inside the diff
+the reviewer reads, so it is reviewed like any other line rather than applied
+as unreviewed post-merge housekeeping. The two frictions are both benign:
 
 - `pr:` is known the moment the PR opens; fill it with one more commit to the
   same branch (or during the final review pass).
