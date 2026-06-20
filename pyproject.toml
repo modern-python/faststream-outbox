@@ -100,7 +100,8 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
 [project.urls]
-Homepage = "https://modern-python.org"
+Homepage = "https://faststream-outbox.modern-python.org"
+Documentation = "https://faststream-outbox.modern-python.org"
 Repository = "https://github.com/modern-python/faststream-outbox"
 Issues = "https://github.com/modern-python/faststream-outbox/issues"
 Changelog = "https://github.com/modern-python/faststream-outbox/releases"
