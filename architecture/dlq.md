@@ -10,6 +10,8 @@ User-facing: `docs/usage/dlq.md`. Invariant summary: `CLAUDE.md` § Opt-in DLQ.
 
 `OutboxClient.delete_with_lease` switches to `WITH deleted AS (DELETE … RETURNING …) INSERT INTO <dlq> SELECT … FROM deleted` when configured. One statement preserves the writer-connection autocommit fast path and the lease-token guard; INSERT failure rolls back the DELETE, so the outbox row stays leased and is reclaimed when the lease expires — **DLQ misconfiguration surfaces as outbox-table growth + `lease_lost` spikes rather than silent audit loss.** Identifiers are quoted via the dialect's `identifier_preparer`; values flow through bind params.
 
+The CTE's `RETURNING` / `INSERT` / `SELECT` column lists are not hand-written — they derive from `_DLQ_PROJECTION` (the `(outbox_col, dlq_col)` pairs copied verbatim) plus `_DLQ_INJECTED_COLUMNS` (`failure_reason`, `last_exception`, supplied by the caller) in `schema.py`. The fake (`FakeOutboxClient.delete_with_lease`) builds its audit dict from the same constants, so the two substrates can't drift on which columns the archive carries — a DLQ column change is one edit in `schema.py`, verified across both adapters by `tests/test_client_contract.py`. `failed_at` is not in the projection; it rides the DLQ column's `server_default`.
+
 ## `terminal_failure_reason` routing
 
 `OutboxInnerMessage.terminal_failure_reason` is set on the three failure paths:
