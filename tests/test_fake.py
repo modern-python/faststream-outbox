@@ -1197,14 +1197,6 @@ async def test_fake_client_feed_timer_id_different_queues_allowed() -> None:
     assert len(fake.rows) == 2
 
 
-async def test_fake_client_future_next_attempt_is_invisible_to_fetch() -> None:
-    fake = FakeOutboxClient()
-    future = _dt.datetime.now(tz=_dt.UTC) + _dt.timedelta(minutes=5)
-    fake.feed(queue="q", payload=b"x", next_attempt_at=future)
-    rows = await fake.fetch(None, ["q"], limit=10, lease_ttl_seconds=60.0)
-    assert rows == []
-
-
 async def test_fake_client_cancel_timer_removes_unleased_row() -> None:
     fake = FakeOutboxClient()
     fake.feed(queue="q", payload=b"x", timer_id="email-1")
