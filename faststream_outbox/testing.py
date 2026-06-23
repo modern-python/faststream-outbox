@@ -29,6 +29,7 @@ from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.message import OutboxInnerMessage
 from faststream_outbox.metrics import _safe_emit
 from faststream_outbox.response import _REQUEST_UNSUPPORTED_MSG, OutboxPublishCommand
+from faststream_outbox.schema import _DLQ_INJECTED_COLUMNS, _DLQ_PROJECTION
 
 
 if typing.TYPE_CHECKING:
@@ -175,22 +176,17 @@ class FakeOutboxClient(AbstractOutboxClient):
             # delete where the real client no-ops.
             if row.id == message_id and acquired_token is not None and row.acquired_token == acquired_token:
                 if dlq_payload is not None:
-                    # Mirror the real CTE side-effect: DLQ row materializes in the
-                    # same call as the DELETE, before the row is removed.
-                    self._dlq_rows.append(
-                        {
-                            "original_id": row.id,
-                            "queue": row.queue,
-                            "payload": row.payload,
-                            "headers": row.headers,
-                            "deliveries_count": row.deliveries_count,
-                            "created_at": row.created_at,
-                            "failed_at": utcnow(),
-                            "failure_reason": dlq_payload["failure_reason"],
-                            "last_exception": dlq_payload["last_exception"],
-                            "timer_id": row.timer_id,  # P9 parity with the real DLQ CTE
-                        },
-                    )
+                    # Mirror the real CTE side-effect: DLQ row materializes in the same
+                    # call as the DELETE, before the row is removed. Built from the shared
+                    # _DLQ_PROJECTION so the fake can't drift from the real CTE; failed_at
+                    # mirrors the DLQ column server_default.
+                    dlq_row: dict[str, typing.Any] = {
+                        dlq_col: getattr(row, outbox_col) for outbox_col, dlq_col in _DLQ_PROJECTION
+                    }
+                    dlq_row["failed_at"] = utcnow()
+                    for col in _DLQ_INJECTED_COLUMNS:
+                        dlq_row[col] = dlq_payload[col]
+                    self._dlq_rows.append(dlq_row)
                 del self._rows[i]
                 return True
         return False

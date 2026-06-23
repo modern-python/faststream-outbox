@@ -43,6 +43,8 @@ from sqlalchemy import (
 from faststream_outbox._import_checker import is_alembic_installed
 from faststream_outbox.message import OutboxInnerMessage
 from faststream_outbox.schema import (
+    _DLQ_INJECTED_COLUMNS,
+    _DLQ_PROJECTION,
     _LEASE_CK_SUFFIX,
     _LEASE_IDX_SUFFIX,
     _PENDING_IDX_SUFFIX,
@@ -329,21 +331,27 @@ class OutboxClient(AbstractOutboxClient):
         # wrote to a same-named search_path table (B10).
         outbox_name = preparer.format_table(self._table)
         dlq_name = preparer.format_table(dlq_table)
-        # S608: outbox_name / dlq_name come from application-defined SQLAlchemy
-        # Table objects (not request input) and are quoted via the dialect's
-        # identifier preparer — values flow through :bindparam placeholders.
+        # Column lists derive from _DLQ_PROJECTION (projected pairs first, then the
+        # injected failure-context columns) so the real CTE and the fake stay in lockstep
+        # off one source. INSERT and SELECT share the same order, so the named columns map
+        # positionally.
+        returning_cols = ", ".join(out for out, _ in _DLQ_PROJECTION)
+        insert_cols = ", ".join([dlq for _, dlq in _DLQ_PROJECTION] + list(_DLQ_INJECTED_COLUMNS))
+        select_exprs = ", ".join(
+            [out for out, _ in _DLQ_PROJECTION] + [f":{col}" for col in _DLQ_INJECTED_COLUMNS],
+        )
+        # S608: outbox_name / dlq_name come from application-defined SQLAlchemy Table
+        # objects (not request input) and are quoted via the dialect's identifier preparer;
+        # the column names come from _DLQ_PROJECTION constants. Values flow through
+        # :bindparam placeholders.
         cte_sql = (
             f"WITH deleted AS ("  # noqa: S608
             f"DELETE FROM {outbox_name} "
             f"WHERE id = :message_id AND acquired_token = :acquired_token "
-            f"RETURNING id, queue, payload, headers, deliveries_count, created_at, timer_id"
+            f"RETURNING {returning_cols}"
             f") "
-            f"INSERT INTO {dlq_name} ("
-            f"original_id, queue, payload, headers, deliveries_count, created_at, "
-            f"failure_reason, last_exception, timer_id"
-            f") "
-            f"SELECT id, queue, payload, headers, deliveries_count, created_at, "
-            f":failure_reason, :last_exception, timer_id "
+            f"INSERT INTO {dlq_name} ({insert_cols}) "
+            f"SELECT {select_exprs} "
             f"FROM deleted"
         )
         sql = text(cte_sql)
