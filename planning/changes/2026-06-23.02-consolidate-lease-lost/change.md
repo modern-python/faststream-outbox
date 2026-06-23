@@ -5,7 +5,7 @@ slug: consolidate-lease-lost
 summary: Consolidate the duplicated lease-lost detect→log→emit block shared by _flush_terminal and _flush_retry into one _emit_lease_lost helper.
 supersedes: null
 superseded_by: null
-pr: null
+pr: 110
 outcome: |
   Landed as the minimal (A) form: `_emit_lease_lost(row, *, phase)` in
   subscriber/usecase.py; both flush methods call it. ~36 duplicated lines removed.
