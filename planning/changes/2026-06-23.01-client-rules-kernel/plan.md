@@ -3,7 +3,7 @@ status: shipped
 date: 2026-06-23
 slug: client-rules-kernel
 spec: client-rules-kernel
-pr: null
+pr: 109
 ---
 
 # client-rules-kernel — implementation plan

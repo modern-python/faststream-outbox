@@ -5,7 +5,7 @@ slug: client-rules-kernel
 summary: Deduplicate the outbox rules between the real and fake clients — extract the genuinely-pure bits (DLQ projection, scheduling resolution) and co-verify the irreducibly-SQL bits with one contract suite run against both adapters.
 supersedes: null
 superseded_by: null
-pr: null
+pr: 109
 outcome: |
   Landed as planned. Pure bits extracted: `_scheduling.py` (activate-args resolution +
   validation, shared by real and fake publish paths) and `_DLQ_PROJECTION` in `schema.py`
