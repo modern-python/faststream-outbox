@@ -5,7 +5,7 @@ slug: metrics-recorders-not-unified
 summary: Keep PrometheusRecorder and OpenTelemetryRecorder as separate hand-written event switches — do not factor them behind a shared data-driven event→metric table.
 supersedes: null
 superseded_by: null
-pr: null
+pr: 112
 ---
 
 # Metrics recorders stay separate; no shared event→metric table
