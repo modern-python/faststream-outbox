@@ -718,6 +718,36 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                 return False
         return await flush(row, writer_conn=writer_conn)
 
+    def _emit_lease_lost(self, row: OutboxInnerMessage, *, phase: str) -> None:
+        """
+        Log + record the ``lease_lost`` event shared by the terminal and retry flush paths.
+
+        A terminal/retry write that finds ``rowcount == 0`` means a newer fetch reclaimed
+        the row (its lease expired mid-handler) — the row will be redelivered, so the
+        caller must NOT also emit an acked/nacked metric (P17). Both flush paths report
+        this identically apart from ``phase`` (``"terminal"`` | ``"retry"``).
+        """
+        self._log(
+            log_level=logging.WARNING,
+            message=f"Outbox row {row} lease expired before {phase} write; skipping",
+            extra={
+                "event": "lease_lost",
+                "phase": phase,
+                "row_id": row.id,
+                "queue": row.queue,
+                "deliveries_count": row.deliveries_count,
+            },
+        )
+        self._emit_metric(
+            "lease_lost",
+            {
+                **self._base_tags(row.queue),
+                "phase": phase,
+                "row_id": row.id,
+                "deliveries_count": row.deliveries_count,
+            },
+        )
+
     async def _flush_terminal(
         self,
         row: OutboxInnerMessage,
@@ -746,26 +776,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             dlq_payload=dlq_payload,
         )
         if not deleted:
-            self._log(
-                log_level=logging.WARNING,
-                message=f"Outbox row {row} lease expired before delete; skipping",
-                extra={
-                    "event": "lease_lost",
-                    "phase": "terminal",
-                    "row_id": row.id,
-                    "queue": row.queue,
-                    "deliveries_count": row.deliveries_count,
-                },
-            )
-            self._emit_metric(
-                "lease_lost",
-                {
-                    **self._base_tags(row.queue),
-                    "phase": "terminal",
-                    "row_id": row.id,
-                    "deliveries_count": row.deliveries_count,
-                },
-            )
+            self._emit_lease_lost(row, phase="terminal")
             return False
         if dlq_payload is not None:
             # P34: omit exception_type when there's no exception (e.g. max_deliveries)
@@ -801,26 +812,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             last_attempt_at=row.last_attempt_at,  # ty: ignore[invalid-argument-type]
         )
         if not updated:
-            self._log(
-                log_level=logging.WARNING,
-                message=f"Outbox row {row} lease expired before retry update; skipping",
-                extra={
-                    "event": "lease_lost",
-                    "phase": "retry",
-                    "row_id": row.id,
-                    "queue": row.queue,
-                    "deliveries_count": row.deliveries_count,
-                },
-            )
-            self._emit_metric(
-                "lease_lost",
-                {
-                    **self._base_tags(row.queue),
-                    "phase": "retry",
-                    "row_id": row.id,
-                    "deliveries_count": row.deliveries_count,
-                },
-            )
+            self._emit_lease_lost(row, phase="retry")
             return False
         return True
 
