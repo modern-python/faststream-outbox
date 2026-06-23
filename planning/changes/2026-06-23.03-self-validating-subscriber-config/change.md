@@ -5,7 +5,7 @@ slug: self-validating-subscriber-config
 summary: Move subscriber-knob validation from the factory into OutboxSubscriberConfig.__post_init__ so every construction path is validated, not just the factory's.
 supersedes: null
 superseded_by: null
-pr: null
+pr: 111
 outcome: |
   Landed. Validation moved to OutboxSubscriberConfig.__post_init__ (guarded super-call +
   self._validate()); factory.py dropped _validate_subscriber_config and now just wires.
