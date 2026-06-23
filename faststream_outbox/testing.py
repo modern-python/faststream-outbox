@@ -21,12 +21,9 @@ from unittest import mock
 
 from faststream._internal.testing.broker import TestBroker, patch_broker_calls
 
+from faststream_outbox._scheduling import resolve_next_attempt_client_side, validate_activate_args
 from faststream_outbox._time import utcnow
-from faststream_outbox.broker import (
-    OutboxBroker,
-    _compute_next_at_client_side,
-    _validate_activate_args,
-)
+from faststream_outbox.broker import OutboxBroker
 from faststream_outbox.client import AbstractOutboxClient
 from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.message import OutboxInnerMessage
@@ -415,8 +412,8 @@ class FakeOutboxProducer:
         self._run_loops = run_loops
 
     async def publish(self, cmd: OutboxPublishCommand) -> int | None:
-        _validate_activate_args("broker.publish", cmd.activate_in, cmd.activate_at)
-        next_at = _compute_next_at_client_side(cmd.activate_in, cmd.activate_at)
+        validate_activate_args("broker.publish", cmd.activate_in, cmd.activate_at)
+        next_at = resolve_next_attempt_client_side(cmd.activate_in, cmd.activate_at, utcnow())
         return await _fake_publish_one(
             self._fake_client,
             self._broker,
@@ -431,8 +428,8 @@ class FakeOutboxProducer:
         )
 
     async def publish_batch(self, cmd: OutboxPublishCommand) -> None:
-        _validate_activate_args("broker.publish_batch", cmd.activate_in, cmd.activate_at)
-        next_at = _compute_next_at_client_side(cmd.activate_in, cmd.activate_at)
+        validate_activate_args("broker.publish_batch", cmd.activate_in, cmd.activate_at)
+        next_at = resolve_next_attempt_client_side(cmd.activate_in, cmd.activate_at, utcnow())
         await _fake_publish_many(
             self._fake_client,
             self._broker,
@@ -478,8 +475,8 @@ def _build_fake_publish(
         # production and from ``publisher.publish()`` / ``OutboxResponse``, which require a
         # real AsyncSession; tests that assert that contract must use those paths.
         del session
-        _validate_activate_args("broker.publish", activate_in, activate_at)
-        next_at = _compute_next_at_client_side(activate_in, activate_at)
+        validate_activate_args("broker.publish", activate_in, activate_at)
+        next_at = resolve_next_attempt_client_side(activate_in, activate_at, utcnow())
         return await _fake_publish_one(
             fake_client,
             broker,
@@ -512,10 +509,10 @@ def _build_fake_publish_batch(
         activate_at: _dt.datetime | None = None,
     ) -> None:
         del session
-        _validate_activate_args("broker.publish_batch", activate_in, activate_at)
+        validate_activate_args("broker.publish_batch", activate_in, activate_at)
         if not bodies:
             return
-        next_at = _compute_next_at_client_side(activate_in, activate_at)
+        next_at = resolve_next_attempt_client_side(activate_in, activate_at, utcnow())
         await _fake_publish_many(
             fake_client,
             broker,

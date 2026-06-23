@@ -8,7 +8,6 @@ producer never opens its own session — every command carries the caller's
 ``AsyncSession`` so the row commits atomically with the caller's domain writes.
 """
 
-import datetime as _dt
 import time
 import typing
 
@@ -17,6 +16,7 @@ from faststream._internal.parser import DefaultCodec
 from sqlalchemy import Float, Table, bindparam, func, insert, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from faststream_outbox._scheduling import is_future_dated, resolve_next_attempt_client_side
 from faststream_outbox._time import utcnow
 from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.metrics import MetricsRecorder, _noop_recorder, _safe_emit
@@ -30,19 +30,6 @@ if typing.TYPE_CHECKING:
     from fast_depends.library.serializer import SerializerProto
     from faststream._internal.parser import CodecProto
     from faststream._internal.types import AsyncCallable, CustomCallable
-
-
-def _is_future_dated(
-    activate_in: _dt.timedelta | None,
-    activate_at: _dt.datetime | None,
-    now: _dt.datetime,
-) -> bool:
-    """Whether a row is genuinely future-dated (so NOTIFY is skipped — polling fires it at the gate)."""
-    if activate_in is not None:
-        return activate_in > _dt.timedelta(0)
-    if activate_at is not None:
-        return activate_at > now
-    return False
 
 
 class OutboxProducer:
@@ -149,7 +136,7 @@ class OutboxProducer:
         # Skip NOTIFY only when the row is genuinely future-dated. A past activate_at
         # (e.g. a recovered idempotency token) is immediately eligible — fire NOTIFY.
         now = utcnow()
-        is_future = _is_future_dated(cmd.activate_in, cmd.activate_at, now)
+        is_future = is_future_dated(cmd.activate_in, cmd.activate_at, now)
 
         if cmd.timer_id is not None:
             stmt = (
@@ -178,10 +165,7 @@ class OutboxProducer:
         # column-level SQL expressions, and a few-ms drift versus the DB is
         # harmless for user-supplied scheduling. Retries still use server time.
         now = utcnow()
-        if cmd.activate_in is not None:
-            next_at: _dt.datetime | None = now + cmd.activate_in
-        else:
-            next_at = cmd.activate_at
+        next_at = resolve_next_attempt_client_side(cmd.activate_in, cmd.activate_at, now)
         rows: list[dict[str, typing.Any]] = []
         total_size = 0
         start_perf = time.perf_counter()
@@ -197,7 +181,7 @@ class OutboxProducer:
                 rows.append(row)
             await cmd.session.execute(insert(self._table), rows)
             # Skip NOTIFY only when genuinely future-dated; past times are eligible.
-            if not _is_future_dated(cmd.activate_in, cmd.activate_at, now):
+            if not is_future_dated(cmd.activate_in, cmd.activate_at, now):
                 await self._notify(cmd.session, cmd.queue)
         except Exception as exc:
             self._emit_metric(

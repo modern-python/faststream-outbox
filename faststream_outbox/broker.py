@@ -30,7 +30,6 @@ from faststream.specification.schema.extra import Tag, TagDict
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from faststream_outbox._time import utcnow
 from faststream_outbox.client import AbstractOutboxClient, OutboxClient, _row_to_message
 from faststream_outbox.configs import LastExceptionRenderer, OutboxBrokerConfig
 from faststream_outbox.message import OutboxInnerMessage
@@ -54,30 +53,6 @@ if typing.TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
 
     from faststream_outbox.subscriber.usecase import OutboxSubscriber
-
-
-def _validate_activate_args(
-    method_name: str,
-    activate_in: _dt.timedelta | None,
-    activate_at: _dt.datetime | None,
-) -> None:
-    """Mutex + tz-aware checks shared by the test fakes. Real broker delegates to ``OutboxPublishCommand``."""
-    if activate_in is not None and activate_at is not None:
-        msg = f"{method_name} accepts at most one of activate_in / activate_at"
-        raise ValueError(msg)
-    if activate_at is not None and activate_at.tzinfo is None:
-        msg = f"{method_name} requires activate_at to be timezone-aware"
-        raise ValueError(msg)
-
-
-def _compute_next_at_client_side(
-    activate_in: _dt.timedelta | None,
-    activate_at: _dt.datetime | None,
-) -> _dt.datetime | None:
-    """Resolve activate_in / activate_at to a single ``next_attempt_at`` value (client clock)."""
-    if activate_in is not None:
-        return utcnow() + activate_in
-    return activate_at
 
 
 def _spec_url(engine: "AsyncEngine | None", outbox_table: "Table") -> list[str]:
