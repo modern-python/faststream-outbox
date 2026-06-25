@@ -1,11 +1,3 @@
----
-status: shipped
-date: 2026-06-23
-slug: client-rules-kernel
-spec: design.md
-pr: 109
----
-
 # client-rules-kernel — implementation plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use

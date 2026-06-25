@@ -1,12 +1,5 @@
 ---
-status: shipped
-date: 2026-06-10
-slug: docs-landing-and-comparison
 summary: Docs landing rewrite, four-section nav reshape, new Comparison page.
-supersedes: null
-superseded_by: null
-pr: "50"
-outcome: merged 2026-06-10 as #50
 ---
 
 # Design: Rework the docs landing + nav, add a comparison page

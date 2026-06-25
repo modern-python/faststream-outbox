@@ -1,11 +1,3 @@
----
-status: shipped
-date: 2026-06-11
-slug: docs-tutorials-and-observability-split
-spec: design.md
-pr: "56"
----
-
 # docs-tutorials-and-observability-split — implementation plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use

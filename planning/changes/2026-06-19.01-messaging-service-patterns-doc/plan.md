@@ -1,11 +1,3 @@
----
-status: shipped
-date: 2026-06-19
-slug: messaging-service-patterns-doc
-spec: design.md
-pr: 103
----
-
 # messaging-service-patterns-doc — implementation plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use

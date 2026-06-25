@@ -1,12 +1,5 @@
 ---
-status: shipped
-date: 2026-06-04
-slug: foreign-broker-relay
 summary: OutboxSubscriber officially supports the FastStream-native decorator relay to Kafka/Rabbit/NATS/Redis with three guardrails.
-supersedes: null
-superseded_by: null
-pr: "44"
-outcome: merged 2026-06-05 as #44
 ---
 
 # Foreign-broker relay from `OutboxSubscriber` — design

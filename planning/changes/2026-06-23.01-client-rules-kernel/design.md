@@ -1,21 +1,5 @@
 ---
-status: shipped
-date: 2026-06-23
-slug: client-rules-kernel
 summary: Deduplicate the outbox rules between the real and fake clients — extract the genuinely-pure bits (DLQ projection, scheduling resolution) and co-verify the irreducibly-SQL bits with one contract suite run against both adapters.
-supersedes: null
-superseded_by: null
-pr: 109
-outcome: |
-  Landed as planned. Pure bits extracted: `_scheduling.py` (activate-args resolution +
-  validation, shared by real and fake publish paths) and `_DLQ_PROJECTION` in `schema.py`
-  (single source for the outbox→DLQ column mapping). Irreducibly-SQL rules co-verified by
-  `tests/test_client_contract.py` — one parametrized module over both adapters (fake
-  everywhere, real Postgres auto-skipped). Scope correction during execution: `cancel_timer`
-  and `timer_id` insert-dedup are broker/producer concerns, not on `AbstractOutboxClient`, so
-  they were excluded from the contract suite; within-batch fetch *return order* is unspecified
-  (F2-09), so the suite asserts FIFO *selection* under LIMIT, not return order. Replace-don't-layer
-  removed ~220 lines of subsumed per-adapter tests; full suite 543 passed at 100% coverage.
 ---
 
 # Design: Dedupe the outbox rules between the real and fake clients

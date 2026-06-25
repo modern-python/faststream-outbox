@@ -1,12 +1,5 @@
 ---
-status: shipped
-date: 2026-06-20
-slug: flat-changes-generated-index
 summary: Flatten changes/ (drop active/archive), make status frontmatter the sole lifecycle state, add a summary field, and replace the hand-maintained README Index with a stdlib generator (just index).
-supersedes: null
-superseded_by: null
-pr: 105
-outcome: Flattened planning/changes/ (active/archive removed); added single-line summary: to every bundle; new stdlib planning/index.py + just index generator (grouped In progress/Shipped/Superseded, stdout-only); slimmed README to conventions + generator note; single-step in-branch lifecycle in README + CLAUDE.md.
 ---
 
 # Design: Flatten changes/ and generate the index from frontmatter

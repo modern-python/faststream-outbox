@@ -1,11 +1,3 @@
----
-status: shipped
-date: 2026-06-16
-slug: actionable-schema-drift-error
-spec: design.md
-pr: "99"
----
-
 # actionable-schema-drift-error — implementation plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use

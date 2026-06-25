@@ -1,17 +1,5 @@
 ---
-status: shipped
-date: 2026-06-23
-slug: consolidate-lease-lost
 summary: Consolidate the duplicated lease-lost detect→log→emit block shared by _flush_terminal and _flush_retry into one _emit_lease_lost helper.
-supersedes: null
-superseded_by: null
-pr: 110
-outcome: |
-  Landed as the minimal (A) form: `_emit_lease_lost(row, *, phase)` in
-  subscriber/usecase.py; both flush methods call it. ~36 duplicated lines removed.
-  Existing lease-lost unit tests (which invoke the flush methods directly) passed
-  unchanged as the regression guard; full suite 543 passed at 100% coverage. (B) the
-  Lease value object and (C) the Lease module were evaluated and rejected — see Approach.
 ---
 
 # Change: Give lease-lost telemetry one home

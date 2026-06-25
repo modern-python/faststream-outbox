@@ -1,12 +1,5 @@
 ---
-status: shipped
-date: 2026-06-03
-slug: faststream-0.7-migration
 summary: Migrate to faststream>=0.7,<0.8; fix mechanical break points; drop per-call middlewares= kwarg.
-supersedes: null
-superseded_by: null
-pr: "42"
-outcome: merged 2026-06-03 as #42
 ---
 
 # Design: FastStream 0.7 migration

@@ -1,11 +1,3 @@
----
-status: shipped
-date: 2026-06-20
-slug: flat-changes-generated-index
-spec: design.md
-pr: 105
----
-
 # flat-changes-generated-index — implementation plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use

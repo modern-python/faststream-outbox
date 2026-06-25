@@ -1,12 +1,5 @@
 ---
-status: shipped
-date: 2026-06-19
-slug: messaging-service-patterns-doc
 summary: New docs/patterns/ section with one page composing the outbox in an anonymized chat/notifications service: transactional event relay, fire-unless-cancelled timer, nested test brokers.
-supersedes: null
-superseded_by: null
-pr: 103
-outcome: Shipped docs/patterns/messaging-service.md + a Patterns nav section — one anonymized service composing transactional relay, fire-unless-cancelled timer, and nested test brokers. No architecture/ change (docs only, no new invariant).
 ---
 
 # Design: A "Patterns" docs page composing the outbox in a real service

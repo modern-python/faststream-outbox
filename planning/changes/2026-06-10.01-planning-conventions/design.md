@@ -1,12 +1,5 @@
 ---
-status: superseded
-date: 2026-06-10
-slug: planning-conventions
 summary: Spec/plan boundary, active/archived/_templates layout, frontmatter, migration of the existing pairs. Superseded by portable-planning-convention.
-supersedes: null
-superseded_by: portable-planning-convention
-pr: "49"
-outcome: merged 2026-06-10 as #49
 ---
 
 # Design: Rework planning conventions + migrate existing artifacts

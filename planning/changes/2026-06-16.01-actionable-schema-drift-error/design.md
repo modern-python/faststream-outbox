@@ -1,12 +1,5 @@
 ---
-status: shipped
-date: 2026-06-16
-slug: actionable-schema-drift-error
 summary: validate_schema() appends a hand-written-migration pointer to its RuntimeError for Alembic-blind drift (the outbox_lease_ck CHECK and partial-index predicates autogenerate cannot remediate).
-supersedes: null
-superseded_by: null
-pr: "99"
-outcome: shipped in #99
 ---
 
 # Design: Actionable error for Alembic-blind schema drift

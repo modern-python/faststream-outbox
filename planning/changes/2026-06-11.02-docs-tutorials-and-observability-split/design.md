@@ -1,12 +1,5 @@
 ---
-status: shipped
-date: 2026-06-11
-slug: docs-tutorials-and-observability-split
 summary: Three-way split of usage/observability.md into Reference + How-to + Explanation; tutorials deferred to #58.
-supersedes: null
-superseded_by: null
-pr: "56"
-outcome: merged 2026-06-12 as #56 (observability split only; tutorials §1 §2 deferred to a follow-on spec)
 ---
 
 # Design: Add two tutorials and split observability.md
