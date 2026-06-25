@@ -1,5 +1,4 @@
-"""
-Outbox subscriber — the consume loop that backs ``@broker.subscriber("queue")``.
+"""Outbox subscriber — the consume loop that backs ``@broker.subscriber("queue")``.
 
 Two async tasks run per subscriber:
 
@@ -98,8 +97,7 @@ _LISTEN_CLOSE_TIMEOUT = 5.0
 
 
 def _compute_backoff(attempt: int, ceiling: float, *, base: float = 1.0) -> float:
-    """
-    Exponential backoff with ±50% jitter, capped at *ceiling*.
+    """Exponential backoff with ±50% jitter, capped at *ceiling*.
 
     *attempt* is 1-based — the first attempt sleeps ~``base * U(0.5, 1.5)``.
     """
@@ -118,8 +116,7 @@ def _render_last_exception(
     exc: BaseException | None,
     renderer: "Callable[[BaseException], str | None] | None",
 ) -> str | None:
-    """
-    Render *exc* for the DLQ ``last_exception`` column, then bound its length.
+    """Render *exc* for the DLQ ``last_exception`` column, then bound its length.
 
     Default (``renderer is None``) is ``repr(exc)`` — full forensic detail. A deployment
     handling PII can pass ``last_exception_renderer`` to redact (e.g. ``type(exc).__name__``)
@@ -302,8 +299,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
 
     @property
     def _notify_channel(self) -> str:
-        """
-        LISTEN channel name.
+        """LISTEN channel name.
 
         One channel per outbox table; subscribers ignore queues they don't care
         about (cheap — wake-up does an empty fetch and goes back to sleep).
@@ -324,8 +320,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         self,
         engine: "AsyncEngine | None",
     ) -> AsyncIterator[Mapping[str, object]]:
-        """
-        Yield the kwargs ``_fetch_inner`` needs, owning fetch_conn + listen_conn lifetimes.
+        """Yield the kwargs ``_fetch_inner`` needs, owning fetch_conn + listen_conn lifetimes.
 
         Production path opens a long-lived ``AsyncConnection`` for the fetch CTE and a
         separate raw asyncpg connection for LISTEN. Test-broker path (``engine is None``)
@@ -348,8 +343,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         fetch_conn: "AsyncConnection | None",
         listen_conn: "_asyncpg.Connection | None",
     ) -> None:
-        """
-        Fetch + adaptive backoff, with NOTIFY-driven wakeup.
+        """Fetch + adaptive backoff, with NOTIFY-driven wakeup.
 
         Returns when ``self.running`` goes False, or raises on any DB error so the outer
         loop can rebuild the connection. Periodically probes ``listen_conn`` with a bounded
@@ -407,8 +401,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         self._notify_event.clear()
 
     async def _open_listen_connection(self, engine: "AsyncEngine") -> "_asyncpg.Connection | None":
-        """
-        Open a dedicated raw asyncpg connection and register LISTEN on it.
+        """Open a dedicated raw asyncpg connection and register LISTEN on it.
 
         Returns the connection on success, ``None`` on any failure (asyncpg not installed,
         non-asyncpg driver, permission error, network problem). The fetch loop falls back
@@ -452,8 +445,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         return conn if listening else None
 
     async def _close_listen_connection(self, listen_conn: "_asyncpg.Connection") -> None:
-        """
-        Close the raw LISTEN connection without letting teardown wedge the fetch loop (S1).
+        """Close the raw LISTEN connection without letting teardown wedge the fetch loop (S1).
 
         A graceful ``close()`` on a half-dead socket can block on the kernel keepalive
         (the same socket the bounded health probe may have just flagged). Cap the graceful
@@ -467,8 +459,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                 listen_conn.terminate()
 
     def _on_notify(self, *args: object) -> None:
-        """
-        Asyncpg notification callback: ``(connection, pid, channel, payload)``.
+        """Asyncpg notification callback: ``(connection, pid, channel, payload)``.
 
         The payload is the publisher's queue name (``pg_notify('outbox_<table>', queue)``).
         We only wake for queues this subscriber serves — on a busy multi-queue table that
@@ -494,8 +485,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         self,
         engine: "AsyncEngine | None",
     ) -> AsyncIterator[Mapping[str, object]]:
-        """
-        Yield ``writer_conn`` for ``_worker_inner``, owning its lifetime across all flushes.
+        """Yield ``writer_conn`` for ``_worker_inner``, owning its lifetime across all flushes.
 
         One long-lived ``AsyncConnection`` per outer reconnect cycle — every terminal/retry
         write reuses it, so a drain of N rows costs O(workers) pool checkouts, not O(rows).
@@ -522,8 +512,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         inner: Callable[..., Awaitable[None]],
         halt_on_drain: bool = False,
     ) -> None:
-        """
-        Reconnect-with-backoff scaffold shared by ``_fetch_loop`` and ``_worker_loop``.
+        """Reconnect-with-backoff scaffold shared by ``_fetch_loop`` and ``_worker_loop``.
 
         Reads the client lazily inside the loop (the test broker patches it in/out via
         ``mock.patch``, so it can be ``None`` after teardown — returning cleanly avoids
@@ -567,8 +556,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                 await anyio.sleep(_compute_backoff(error_attempt, _BACKOFF_MAX_SECONDS))
 
     async def _worker_inner(self, *, writer_conn: "AsyncConnection | None") -> None:
-        """
-        Pull rows from the inflight queue and dispatch each, threading *writer_conn* through.
+        """Pull rows from the inflight queue and dispatch each, threading *writer_conn* through.
 
         Returns when ``self.running`` goes False, or raises on any DB error from the
         terminal write so :meth:`_worker_loop` can rebuild the connection.
@@ -597,8 +585,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         *,
         writer_conn: "AsyncConnection | None" = None,
     ) -> None:
-        """
-        Run a single already-leased row through the full consume pipeline.
+        """Run a single already-leased row through the full consume pipeline.
 
         Mirrors the per-row body of ``_worker_loop`` so ``TestOutboxBroker`` can drive
         the handler synchronously from ``broker.publish``, matching the FastStream
@@ -692,8 +679,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         terminal: bool,
         writer_conn: "AsyncConnection | None",
     ) -> bool:
-        """
-        Run the terminal/retry write, propagating errors only when ``writer_conn`` is set.
+        """Run the terminal/retry write, propagating errors only when ``writer_conn`` is set.
 
         Returns True iff the write landed (rowcount > 0). False means the lease was lost
         (a newer fetch reclaimed the row) or — on the test-broker path — the flush raised
@@ -719,8 +705,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         return await flush(row, writer_conn=writer_conn)
 
     def _emit_lease_lost(self, row: OutboxInnerMessage, *, phase: str) -> None:
-        """
-        Log + record the ``lease_lost`` event shared by the terminal and retry flush paths.
+        """Log + record the ``lease_lost`` event shared by the terminal and retry flush paths.
 
         A terminal/retry write that finds ``rowcount == 0`` means a newer fetch reclaimed
         the row (its lease expired mid-handler) — the row will be redelivered, so the
@@ -832,8 +817,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
 
     @typing.override
     async def consume(self, msg: OutboxInnerMessage) -> typing.Any:
-        """
-        Override to propagate ``_OutboxConfigError`` from programming guards.
+        """Override to propagate ``_OutboxConfigError`` from programming guards.
 
         ``SubscriberUsecase.consume`` swallows all ``Exception`` subclasses except
         ``StopConsume`` / ``SystemExit``. Programming guards (e.g. the
@@ -883,8 +867,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
 
     @typing.override
     async def process_message(self, msg: OutboxInnerMessage) -> "Response":  # noqa: C901
-        """
-        Outbox-specific process_message — header propagation (G3) hook.
+        """Outbox-specific process_message — header propagation (G3) hook.
 
         Optionally fills empty Response headers with the inbound message's
         headers when ``propagate_inbound_headers=True``, and runs the
@@ -977,8 +960,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         result_msg: "Response",
         message: typing.Any,
     ) -> None:
-        """
-        Fill empty Response headers from the inbound message when configured.
+        """Fill empty Response headers from the inbound message when configured.
 
         ``propagate_inbound_headers=True`` carries the inbound row's headers onto a
         response that didn't set its own. For a chained ``OutboxResponse`` the
@@ -1002,8 +984,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         result_msg: "Response",
         handler: typing.Any,
     ) -> None:
-        """
-        Refuse the dual-fire combination: OutboxResponse + foreign publisher.
+        """Refuse the dual-fire combination: OutboxResponse + foreign publisher.
 
         OutboxResponse(body=..., queue=..., session=...) writes to the outbox in
         the caller's transaction; a foreign-publisher decorator also publishes

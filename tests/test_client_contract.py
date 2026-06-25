@@ -1,5 +1,4 @@
-"""
-Cross-adapter contract for ``AbstractOutboxClient``.
+"""Cross-adapter contract for ``AbstractOutboxClient``.
 
 The two adapters — ``OutboxClient`` (SQL/Postgres) and ``FakeOutboxClient``
 (in-memory) — implement the same rules in different substrates: the real client runs

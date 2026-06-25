@@ -1,5 +1,4 @@
-"""
-Metrics seam: a single callable invoked at well-defined instrumentation points.
+"""Metrics seam: a single callable invoked at well-defined instrumentation points.
 
 The seam is intentionally minimal — ``Callable[[str, Mapping[str, Any]], None]`` —
 so adapters live next to the library without dragging Prometheus, OpenTelemetry,
@@ -72,8 +71,7 @@ def _noop_recorder(_event: str, _tags: Mapping[str, typing.Any]) -> None:
 
 
 def _safe_emit(recorder: MetricsRecorder, event: str, tags: Mapping[str, typing.Any]) -> None:
-    """
-    Invoke ``recorder`` swallowing exceptions and logging at DEBUG.
+    """Invoke ``recorder`` swallowing exceptions and logging at DEBUG.
 
     Shared by every call site that emits metrics from the test broker. A broken
     user-supplied recorder must never poison the dispatch path — DEBUG-level

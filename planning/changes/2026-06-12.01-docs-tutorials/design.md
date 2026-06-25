@@ -1,12 +1,5 @@
 ---
-status: shipped
-date: 2026-06-12
-slug: docs-tutorials
 summary: The two tutorials deferred from #56: Your first outbox app and Add a Kafka relay. Kill-Kafka step folded into an at-least-once callout after aiokafka absorbed the outage.
-supersedes: null
-superseded_by: null
-pr: "58"
-outcome: merged 2026-06-12 as #58 (both tutorials, kill-Kafka step replaced by an at-least-once contract callout per spec authorization)
 ---
 
 # Design: Two new tutorials (Diátaxis F-min, part 2)

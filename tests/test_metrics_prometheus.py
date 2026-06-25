@@ -147,8 +147,7 @@ def test_prometheus_published_without_count_defaults_to_zero() -> None:
 
 
 def test_prometheus_published_error_status_total_fires_at_count_zero() -> None:
-    """
-    P28: a status="error" published event (count=0) must increment the error-status total.
+    """P28: a status="error" published event (count=0) must increment the error-status total.
 
     The old ``if count > 0`` gate left ``published_messages_total{status="error"}`` — the
     exact series dashboards alert on — permanently at zero.

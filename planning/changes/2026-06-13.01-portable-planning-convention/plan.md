@@ -1,11 +1,3 @@
----
-status: shipped
-date: 2026-06-13
-slug: portable-planning-convention
-spec: portable-planning-convention
-pr: "77"
----
-
 # Portable planning-convention — implementation plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use

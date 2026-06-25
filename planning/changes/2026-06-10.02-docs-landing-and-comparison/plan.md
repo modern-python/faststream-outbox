@@ -1,11 +1,3 @@
----
-status: shipped
-date: 2026-06-10
-slug: docs-landing-and-comparison
-spec: docs-landing-and-comparison
-pr: "50"
----
-
 # docs-landing-and-comparison — implementation plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use

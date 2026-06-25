@@ -1,5 +1,4 @@
-"""
-Publish-side DTO for the outbox transport.
+"""Publish-side DTO for the outbox transport.
 
 ``OutboxPublishCommand`` carries the domain fields that travel from the
 publisher / broker into ``OutboxProducer.publish``: the user's ``AsyncSession``
@@ -36,8 +35,7 @@ def _validate_publish_args(
     activate_in: _dt.timedelta | None,
     activate_at: _dt.datetime | None,
 ) -> None:
-    """
-    Fail-fast validation shared by every real outbox publish entry point.
+    """Fail-fast validation shared by every real outbox publish entry point.
 
     ``OutboxPublishCommand``, ``OutboxResponse`` and ``broker.publish_batch`` all
     route through here so a misconfigured ``session`` / ``queue`` / ``activate_*``
@@ -148,8 +146,7 @@ class OutboxPublishCommand(BatchPublishCommand):
 
 
 class OutboxResponse(Response):
-    """
-    Handler return type — auto-published as a follow-on outbox row.
+    """Handler return type — auto-published as a follow-on outbox row.
 
     Idiomatic FastStream shape: ``async def h(...) -> OutboxResponse``. Requires
     ``session=...`` for the same reason ``broker.publish`` does — the new row must

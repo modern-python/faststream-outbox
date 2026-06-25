@@ -1,5 +1,4 @@
-"""
-Outbox table factory.
+"""Outbox table factory.
 
 The package does not own the schema — users attach the returned ``Table`` to their own
 ``MetaData`` and write Alembic migrations themselves — and the partial indexes that the
@@ -54,8 +53,7 @@ _LEASE_CK_SUFFIX = "_lease_ck"
 
 
 def validate_table_identifiers(table_name: str) -> None:
-    """
-    Raise ``ValueError`` if any identifier derived from *table_name* exceeds Postgres' 63-byte limit.
+    """Raise ``ValueError`` if any identifier derived from *table_name* exceeds Postgres' 63-byte limit.
 
     Byte length, not char count — UTF-8 multibyte chars expand and would silently truncate
     identifiers. Guards the LONGEST derived identifier: the NOTIFY channel ``outbox_<t>`` AND
@@ -85,8 +83,7 @@ def validate_table_identifiers(table_name: str) -> None:
 
 
 def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table:
-    """
-    Build the outbox ``Table`` (with the partial fetch index) and attach it to *metadata*.
+    """Build the outbox ``Table`` (with the partial fetch index) and attach it to *metadata*.
 
     The user wires the returned table into their own SQLAlchemy ``MetaData`` so it is
     discovered by Alembic's autogenerate. They are responsible for the actual migration.
@@ -176,8 +173,7 @@ _DLQ_INJECTED_COLUMNS: tuple[str, ...] = ("failure_reason", "last_exception")
 
 
 def make_dlq_table(metadata: "MetaData", table_name: str = "outbox_dlq") -> Table:
-    """
-    Build the dead-letter-queue ``Table`` and attach it to *metadata*.
+    """Build the dead-letter-queue ``Table`` and attach it to *metadata*.
 
     Opt-in companion to :func:`make_outbox_table`. Pass the returned table to
     ``OutboxBroker(..., dlq_table=...)`` to enable archive-on-terminal-failure: the

@@ -1,5 +1,4 @@
-"""
-Postgres outbox client.
+"""Postgres outbox client.
 
 All read/write paths against the outbox table live here. The fetch query is the
 load-bearing piece: a single CTE that selects available rows ``FOR UPDATE SKIP LOCKED``
@@ -74,8 +73,7 @@ _PING_TIMEOUT_SECONDS = 5.0
 
 
 class AbstractOutboxClient(abc.ABC):
-    """
-    Outbox client interface.
+    """Outbox client interface.
 
     Satisfied by both :class:`OutboxClient` (real Postgres) and ``FakeOutboxClient``
     (in-memory test substitute, defined in ``testing.py``). The subscriber's ``_client``
@@ -159,8 +157,7 @@ class OutboxClient(AbstractOutboxClient):
 
     @property
     def engine(self) -> "AsyncEngine":
-        """
-        The underlying ``AsyncEngine``.
+        """The underlying ``AsyncEngine``.
 
         Used by the subscriber loop to open its own long-lived fetch connection and to
         drive ``LISTEN/NOTIFY``.
@@ -175,8 +172,7 @@ class OutboxClient(AbstractOutboxClient):
         limit: int,
         lease_ttl_seconds: float,
     ) -> list[OutboxInnerMessage]:
-        """
-        Atomically claim up to *limit* available rows for the given queue names on *conn*.
+        """Atomically claim up to *limit* available rows for the given queue names on *conn*.
 
         A row is available iff its lease is unset (``acquired_token IS NULL``) or its
         lease is older than *lease_ttl_seconds*. Returns the freshly-leased rows; each
@@ -249,8 +245,7 @@ class OutboxClient(AbstractOutboxClient):
         *,
         dlq_payload: "Mapping[str, typing.Any] | None" = None,
     ) -> bool:
-        """
-        Delete *message_id* iff it still holds *acquired_token*. Returns True if deleted.
+        """Delete *message_id* iff it still holds *acquired_token*. Returns True if deleted.
 
         Issues a single ``DELETE`` on *conn* with no explicit transaction wrapper — the
         production writer connection is configured ``isolation_level="AUTOCOMMIT"`` by
@@ -310,8 +305,7 @@ class OutboxClient(AbstractOutboxClient):
         acquired_token: uuid.UUID,
         dlq_payload: "Mapping[str, typing.Any]",
     ) -> "tuple[typing.Any, dict[str, typing.Any]]":
-        """
-        Compose the single-statement DLQ CTE plus the parameter dict.
+        """Compose the single-statement DLQ CTE plus the parameter dict.
 
         Identifiers are quoted via the dialect's identifier preparer so reserved words
         and odd characters survive interpolation. The outbox/DLQ table names are
@@ -374,8 +368,7 @@ class OutboxClient(AbstractOutboxClient):
         first_attempt_at: _dt.datetime,
         last_attempt_at: _dt.datetime,
     ) -> bool:
-        """
-        Release the lease on *message_id* and reschedule it for retry, iff it still holds the lease.
+        """Release the lease on *message_id* and reschedule it for retry, iff it still holds the lease.
 
         Issues a single ``UPDATE`` on *conn* with no explicit transaction wrapper — the
         production writer connection is configured ``isolation_level="AUTOCOMMIT"`` by
@@ -407,8 +400,7 @@ class OutboxClient(AbstractOutboxClient):
         return (result.rowcount or 0) > 0
 
     async def validate_schema(self) -> None:
-        """
-        Validate that the database table(s) match the package's expected columns.
+        """Validate that the database table(s) match the package's expected columns.
 
         Raises ``RuntimeError`` listing every mismatch across the outbox table and,
         when configured, the DLQ table. Opt-in: call from your startup hook or
@@ -494,8 +486,7 @@ _INDEX_PREDICATE_QUERY = text(
 
 
 def _validate_index_predicates_sync(connection: "Connection", table: "Table") -> list[str]:
-    """
-    Compare the live partial-index WHERE predicates against what the package expects (S2).
+    """Compare the live partial-index WHERE predicates against what the package expects (S2).
 
     Alembic's index diff ignores ``postgresql_where``, so the alembic autogenerate pass
     (:func:`_run_validate`) does not catch two drifts that break the producer's ``ON CONFLICT``
@@ -552,8 +543,7 @@ _EXPECTED_CHECK_CONSTRAINTS = {
 
 
 def _validate_check_constraints_sync(connection: "Connection", table: "Table") -> list[str]:
-    """
-    Verify the live DB carries a CHECK enforcing each invariant the package needs.
+    """Verify the live DB carries a CHECK enforcing each invariant the package needs.
 
     Alembic's ``compare_metadata`` registers no check-constraint comparator, so a missing
     or altered lease CHECK — the ``(acquired_token IS NULL) = (acquired_at IS NULL)`` invariant
@@ -625,8 +615,7 @@ def _run_validate(
     table: "Table",
     canonical_factory: "Callable[[MetaData, str], Table]",
 ) -> list[str]:
-    """
-    Run Alembic's autogenerate diff against the live DB and surface any "missing schema" drift.
+    """Run Alembic's autogenerate diff against the live DB and surface any "missing schema" drift.
 
     The canonical schema is whatever ``canonical_factory`` produces — the same Table the user
     attaches to their own ``MetaData`` via ``make_outbox_table`` / ``make_dlq_table``. Delegating
@@ -680,8 +669,7 @@ def _run_validate(
 
 
 def _flatten_drift_errors(diff: "Sequence[typing.Any]", table_name: str) -> list[str]:
-    """
-    Walk Alembic's nested diff and surface only the ops that mean *missing schema*.
+    """Walk Alembic's nested diff and surface only the ops that mean *missing schema*.
 
     Top-level entries are tuples for table-level ops (``add_table``, ``remove_table``) and
     lists of nested tuples for column / index ops on existing tables. ``remove_*`` ops are
@@ -702,8 +690,7 @@ def _flatten_drift_errors(diff: "Sequence[typing.Any]", table_name: str) -> list
 
 
 def _drift_entry_to_error(entry: "tuple[typing.Any, ...]", table_name: str) -> str | None:
-    """
-    Map one Alembic op tuple to a human-readable error string, or None to ignore.
+    """Map one Alembic op tuple to a human-readable error string, or None to ignore.
 
     Tuple shapes per Alembic's autogenerate contract:
       add_column       -> (op, schema, table_name, Column)

@@ -1,11 +1,3 @@
----
-status: shipped
-date: 2026-06-19
-slug: docs-diataxis-nav
-spec: docs-diataxis-nav
-pr: 104
----
-
 # docs-diataxis-nav — implementation plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use

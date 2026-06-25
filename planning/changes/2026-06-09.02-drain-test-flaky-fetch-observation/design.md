@@ -1,12 +1,5 @@
 ---
-status: shipped
-date: 2026-06-09
-slug: drain-test-flaky-fetch-observation
 summary: Drain test waits via the fetched recorder instead of an SQL poll, killing a 3.14 coverage flake.
-supersedes: null
-superseded_by: null
-pr: "48"
-outcome: merged 2026-06-10 as #48
 ---
 
 # Drain test: replace SQL-poll flake with recorder observation

@@ -1,5 +1,4 @@
-"""
-Tests for the native ``OutboxTelemetryMiddleware`` subclass + its provider.
+"""Tests for the native ``OutboxTelemetryMiddleware`` subclass + its provider.
 
 End-to-end consume-scope tests drive through ``TestOutboxBroker``. Provider
 unit tests exercise attribute mapping directly. We use OTel SDK's
@@ -208,8 +207,7 @@ def test_outbox_telemetry_provider_publish_destination_name() -> None:
 
 
 async def test_outbox_telemetry_middleware_publish_scope_does_not_fire_under_test_broker() -> None:
-    """
-    ``TestOutboxBroker`` patches ``broker.publish`` directly, bypassing ``_basic_publish``.
+    """``TestOutboxBroker`` patches ``broker.publish`` directly, bypassing ``_basic_publish``.
 
     The middleware's ``publish_scope`` therefore must not fire. The recorder seam
     (via ``FakeOutboxProducer`` / ``_build_fake_publish``) is the publish-side

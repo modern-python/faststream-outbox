@@ -1,5 +1,4 @@
-"""
-Annotated context shortcuts for handler signatures.
+"""Annotated context shortcuts for handler signatures.
 
 Mirrors the native FastStream convention (see ``faststream.kafka.annotations``):
 the class names are imported with ``as`` aliases and re-exported as

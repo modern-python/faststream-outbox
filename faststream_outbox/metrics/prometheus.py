@@ -1,5 +1,4 @@
-"""
-Prometheus adapter for the ``MetricsRecorder`` seam.
+"""Prometheus adapter for the ``MetricsRecorder`` seam.
 
 Drop-in shape parity with ``faststream.prometheus.PrometheusMiddleware``.
 
@@ -75,8 +74,7 @@ _DEFAULT_DURATION_BUCKETS: tuple[float, ...] = (
 
 
 class PrometheusRecorder:
-    """
-    Drop-in Prometheus adapter for ``MetricsRecorder``.
+    """Drop-in Prometheus adapter for ``MetricsRecorder``.
 
     Args:
         registry: Prometheus collector registry. Required (no global default so

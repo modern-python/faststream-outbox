@@ -25,8 +25,7 @@ def _validate_jitter_factor(jitter_factor: float) -> None:
 
 
 class RetryStrategyProto(Protocol):
-    """
-    Decides whether a Nack'ed row gets another attempt and how long to wait.
+    """Decides whether a Nack'ed row gets another attempt and how long to wait.
 
     Implementations return the delay in seconds before the next attempt, or
     ``None`` to signal terminal failure (the row will be deleted). The DB

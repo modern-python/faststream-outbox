@@ -1,12 +1,5 @@
 ---
-status: shipped
-date: 2026-06-09
-slug: mkdocs-github-pages
 summary: Docs hosting moves from Read the Docs to GitHub Pages on faststream-outbox.modern-python.org.
-supersedes: null
-superseded_by: null
-pr: "45"
-outcome: merged 2026-06-09 as #45
 ---
 
 # Design: Migrate docs hosting from Read the Docs to GitHub Pages

@@ -1,5 +1,4 @@
-"""
-Native OpenTelemetry integration for the outbox broker.
+"""Native OpenTelemetry integration for the outbox broker.
 
 Mirrors upstream FastStream's ``faststream/<broker>/opentelemetry/`` directory
 convention. Use this when you want spans + meters via FastStream's middleware

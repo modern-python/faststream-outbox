@@ -1,12 +1,5 @@
 ---
-status: shipped
-date: 2026-06-13
-slug: portable-planning-convention
 summary: Two-axis OpenSpec-shaped convention: architecture/ truth + changes/ folder bundles, .NN intra-day tiebreak, three lanes, dedicated audits/+retros/, portable README. Supersedes planning-conventions.
-supersedes: planning-conventions
-superseded_by: null
-pr: "77"
-outcome: merged 2026-06-13 as #77
 ---
 
 # Design: Portable OpenSpec-shaped planning convention

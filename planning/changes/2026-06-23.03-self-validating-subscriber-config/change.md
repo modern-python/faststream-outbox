@@ -1,20 +1,5 @@
 ---
-status: shipped
-date: 2026-06-23
-slug: self-validating-subscriber-config
 summary: Move subscriber-knob validation from the factory into OutboxSubscriberConfig.__post_init__ so every construction path is validated, not just the factory's.
-supersedes: null
-superseded_by: null
-pr: 111
-outcome: |
-  Landed. Validation moved to OutboxSubscriberConfig.__post_init__ (guarded super-call +
-  self._validate()); factory.py dropped _validate_subscriber_config and now just wires.
-  Behavior preserved exactly (EMPTY→None ack_policy mapping). One wrinkle surfaced under
-  CI: moving validation under the dataclass-generated __init__ added a "<string>" frame
-  that the 3.13 C warnings.warn(skip_file_prefixes=...) refuses to skip (works on 3.14),
-  so the FastAPI-router attribution test failed in docker. Replaced skip_file_prefixes
-  with a manual stacklevel walk (_subscriber_warn) that's version- and call-path-robust.
-  Existing validation tests passed as the regression guard; full suite 543 passed at 100%.
 ---
 
 # Change: Make the subscriber config validate itself

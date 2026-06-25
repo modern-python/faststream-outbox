@@ -48,8 +48,7 @@ from faststream_outbox.testing import FakeOutboxClient, FakeOutboxProducer, _Fak
 
 
 def _fake_session() -> AsyncMock:
-    """
-    Build an ``AsyncMock(spec=AsyncSession)`` for tests where the session is ignored.
+    """Build an ``AsyncMock(spec=AsyncSession)`` for tests where the session is ignored.
 
     ``OutboxPublishCommand`` requires an ``AsyncSession``; the fake producer doesn't
     touch it. The mock passes ``isinstance`` and lets publisher tests focus on the
@@ -645,8 +644,7 @@ async def test_fake_broker_retry_strategy_receives_handler_exception() -> None:
 
 
 async def test_loop_mode_feed_wakes_fetch_loop_via_notify() -> None:
-    """
-    P30: feeding a row in loop mode wakes the fetch loop via NOTIFY, not the full poll interval.
+    """P30: feeding a row in loop mode wakes the fetch loop via NOTIFY, not the full poll interval.
 
     With a deliberately slow 30s poll, the handler must still run within 2s — a 15x margin
     that the poll path provably cannot meet, so only the _notify_event wakeup (the production
@@ -1358,8 +1356,7 @@ async def test_fake_broker_nack_message_exception_retries_not_deletes() -> None:
 
 
 async def test_fake_broker_manual_handler_without_ack_is_rejected_via_dispatch() -> None:
-    """
-    T2: a forgetful MANUAL handler (returns, no ack/nack/reject, no exception) is rejected through dispatch.
+    """T2: a forgetful MANUAL handler (returns, no ack/nack/reject, no exception) is rejected through dispatch.
 
     Goes through the full ``broker.publish -> dispatch_one`` path (not a direct
     ``assert_state_set`` call). Deleting the fallback would emit a false ``acked``
@@ -1525,8 +1522,7 @@ async def test_handler_returning_outbox_response_publishes_followup_row() -> Non
 
 
 async def test_propagate_inbound_headers_does_not_poison_cross_content_type_outbox_relay() -> None:
-    """
-    propagate_inbound_headers must not copy content-type onto a chained OutboxResponse.
+    """propagate_inbound_headers must not copy content-type onto a chained OutboxResponse.
 
     Regression for audit F5-01: a ``str`` inbound body (content-type ``text/plain``)
     had its content-type copied onto an OutboxResponse carrying a ``dict``
@@ -1557,8 +1553,7 @@ async def test_propagate_inbound_headers_does_not_poison_cross_content_type_outb
 
 
 async def test_propagate_inbound_headers_does_not_poison_custom_correlation_id_outbox_relay() -> None:
-    """
-    propagate_inbound_headers must not copy correlation_id onto a chained OutboxResponse.
+    """propagate_inbound_headers must not copy correlation_id onto a chained OutboxResponse.
 
     Regression for audit F5-02: the inbound correlation_id rode along in the
     propagated headers and conflicted with the handler's explicit
@@ -1957,8 +1952,7 @@ async def test_fake_dlq_written_omits_exception_type_when_no_exception() -> None
 
 
 async def test_test_broker_aenter_returns_single_outbox_broker() -> None:
-    """
-    0.7.1's EnterType binding means TestOutboxBroker yields a single OutboxBroker, not a list/tuple.
+    """0.7.1's EnterType binding means TestOutboxBroker yields a single OutboxBroker, not a list/tuple.
 
     Guards the contract through the upstream typing refactor: even if the base
     class signature changes again, our single-broker subclass must always hand

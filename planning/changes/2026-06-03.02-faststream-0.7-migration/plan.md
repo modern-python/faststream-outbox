@@ -1,11 +1,3 @@
----
-status: shipped
-date: 2026-06-03
-slug: faststream-0.7-migration
-spec: faststream-0.7-migration
-pr: "42"
----
-
 # FastStream 0.7 Migration — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

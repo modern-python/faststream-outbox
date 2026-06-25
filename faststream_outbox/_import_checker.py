@@ -1,5 +1,4 @@
-"""
-Centralized probes for optional-extra imports.
+"""Centralized probes for optional-extra imports.
 
 Each ``is_*_installed`` is a module-level boolean derived from
 ``importlib.util.find_spec`` so consumers can guard runtime imports without a
@@ -22,8 +21,7 @@ is_prometheus_client_installed = find_spec("prometheus_client") is not None
 
 
 def missing_extra_message(component: str, extra: str) -> str:
-    """
-    Build the friendly "this needs an optional extra" install hint.
+    """Build the friendly "this needs an optional extra" install hint.
 
     Single source of truth for the message text so the import-time guard and the
     ``__init__`` probe guard in each middleware module stay in sync (B13).

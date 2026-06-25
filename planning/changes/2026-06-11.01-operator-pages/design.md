@@ -1,12 +1,5 @@
 ---
-status: shipped
-date: 2026-06-11
-slug: operator-pages
 summary: docs/operations/: Production checklist, Troubleshooting playbook, Alembic migrations. The B follow-on from #50.
-supersedes: null
-superseded_by: null
-pr: "53"
-outcome: merged 2026-06-11 as #53
 ---
 
 # Design: Operator pages — Production checklist, Troubleshooting, Alembic migrations

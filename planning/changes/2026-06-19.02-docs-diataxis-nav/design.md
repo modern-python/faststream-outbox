@@ -1,12 +1,5 @@
 ---
-status: shipped
-date: 2026-06-19
-slug: docs-diataxis-nav
 summary: Dissolve the standalone Patterns nav section: fold the messaging-service case study into Guides and move the file to docs/usage/ (no section renames). Seven top-level sections to six.
-supersedes: null
-superseded_by: null
-pr: 104
-outcome: Dropped the Patterns nav section; messaging-service page moved to docs/usage/ under Guides (no renames). 7 sections → 6. No architecture/ change (docs only).
 ---
 
 # Design: Dissolve the "Patterns" nav section into Guides

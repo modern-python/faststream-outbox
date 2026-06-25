@@ -67,8 +67,7 @@ async def test_validate_schema_detects_non_partial_index_on_present_index(
     pg_engine: AsyncEngine,
     outbox_table: Table,
 ) -> None:
-    """
-    S2 (review #1): an expected partial index recreated NON-partial breaks ON CONFLICT too, and is caught.
+    """S2 (review #1): an expected partial index recreated NON-partial breaks ON CONFLICT too, and is caught.
 
     Alembic's diff can't distinguish a plain UNIQUE (queue, timer_id) from the partial
     form (it ignores postgresql_where), and the indpred-NULL row would otherwise be
@@ -137,8 +136,7 @@ async def test_two_concurrent_fetches_dont_double_claim(pg_engine, outbox_table)
 
 
 async def test_fetch_skips_rows_locked_by_another_transaction(pg_engine, outbox_table) -> None:
-    """
-    F7-04: fetch uses FOR UPDATE SKIP LOCKED — it skips rows another transaction holds, not blocks.
+    """F7-04: fetch uses FOR UPDATE SKIP LOCKED — it skips rows another transaction holds, not blocks.
 
     Seeds 30 rows, locks 20 in an open transaction, then asserts a concurrent fetch promptly
     claims the disjoint 10. A regression to plain ``FOR UPDATE`` would block on the locked rows
@@ -178,8 +176,7 @@ async def test_fetch_skips_rows_locked_by_another_transaction(pg_engine, outbox_
 
 
 async def test_writer_connection_autocommit_round_trip(pg_engine: AsyncEngine, outbox_table: Table) -> None:
-    """
-    Autocommit-configured writer conn runs ``delete_with_lease`` end-to-end against real Postgres.
+    """Autocommit-configured writer conn runs ``delete_with_lease`` end-to-end against real Postgres.
 
     The connection is configured exactly the way ``_open_worker_resources`` configures the
     worker writer (``isolation_level="AUTOCOMMIT"``); ``delete_with_lease`` runs with no
@@ -315,8 +312,7 @@ async def test_validate_schema_fails_when_columns_missing(pg_engine, outbox_tabl
 
 
 async def test_validate_schema_fails_when_timer_id_unique_index_missing(pg_engine, outbox_table) -> None:
-    """
-    Missing partial unique index on (queue, timer_id) must be caught before runtime.
+    """Missing partial unique index on (queue, timer_id) must be caught before runtime.
 
     Without it, ``publish(timer_id=…)`` raises ``InvalidColumnReference`` on first call.
     """
@@ -369,8 +365,7 @@ async def test_validate_schema_fails_when_nullability_changed(pg_engine, outbox_
 
 
 async def test_validate_schema_ignores_user_added_extras(pg_engine, outbox_table) -> None:
-    """
-    Extra columns / indexes the user adds to their outbox table must NOT fail validation.
+    """Extra columns / indexes the user adds to their outbox table must NOT fail validation.
 
     Users may add audit columns or their own indexes; the validator's contract is to flag
     *missing* schema only, not extras.
@@ -401,8 +396,7 @@ async def test_publish_inserts_in_caller_transaction(pg_engine, outbox_table) ->
 
 
 async def test_outbox_response_followon_row_commits_with_handler_transaction(pg_engine, outbox_table) -> None:
-    """
-    F7-02: a returned OutboxResponse's follow-on row commits with the handler's transaction.
+    """F7-02: a returned OutboxResponse's follow-on row commits with the handler's transaction.
 
     The worker loop publishes a returned OutboxResponse through ``OutboxFakePublisher``
     (``result_msg.as_publish_command()`` → ``producer.publish`` on the response's own
@@ -815,8 +809,7 @@ async def test_fetch_unprocessed_reads_uncommitted_writes_in_same_session(pg_eng
 
 
 async def test_terminal_writes_reuse_writer_conn_under_load(pg_engine, outbox_table) -> None:
-    """
-    M3 — per-worker cached writer conn drains N rows without N pool checkouts.
+    """M3 — per-worker cached writer conn drains N rows without N pool checkouts.
 
     A drain of N rows must trigger O(workers) pool checkouts during the steady-state
     drain, not one per row (the pre-M3 behavior). With ``max_workers=1`` and one fetch
@@ -872,8 +865,7 @@ async def test_terminal_writes_reuse_writer_conn_under_load(pg_engine, outbox_ta
 
 
 async def test_concurrent_drain_with_eight_workers_holds_pool_bounded(pg_engine, outbox_table) -> None:
-    """
-    T2 — multi-worker drain: 500 rows + max_workers=8 keeps pool checkouts O(workers).
+    """T2 — multi-worker drain: 500 rows + max_workers=8 keeps pool checkouts O(workers).
 
     The M3 baseline (test above) exercises max_workers=1 (2 steady-state pool
     connections: 1 fetch + 1 writer). This test raises the bar to max_workers=8
@@ -1242,8 +1234,7 @@ async def test_dlq_atomic_insert_with_delete(
 
 
 async def test_dlq_writes_to_schema_qualified_tables(pg_engine: AsyncEngine) -> None:
-    """
-    B10: with a non-default ``MetaData(schema=...)`` the DLQ CTE must target ``schema.table``.
+    """B10: with a non-default ``MetaData(schema=...)`` the DLQ CTE must target ``schema.table``.
 
     The buggy ``quote(table.name)`` dropped the schema, so the raw DELETE+INSERT CTE
     referenced a bare ``outbox`` / ``outbox_dlq`` not on the search_path → ``UndefinedTable``
@@ -1386,8 +1377,7 @@ async def test_relay_at_least_once_under_foreign_publish_failure(
     pg_engine: AsyncEngine,
     outbox_table: Table,
 ) -> None:
-    """
-    Assert at-least-once delivery to a foreign broker under simulated publish failure.
+    """Assert at-least-once delivery to a foreign broker under simulated publish failure.
 
     Foreign publish that fails on the first attempt is retried via the
     outbox's retry_strategy; the row eventually clears after a successful
@@ -1452,8 +1442,7 @@ async def test_lease_expiry_during_inflight_handler_redelivers_without_clobber(
     pg_engine: AsyncEngine,
     outbox_table: Table,
 ) -> None:
-    """
-    The lease-token invariant, driven end-to-end through the live worker loop.
+    """The lease-token invariant, driven end-to-end through the live worker loop.
 
     A handler that outlives ``lease_ttl_seconds`` has its row reclaimed and
     redelivered to a second worker mid-flight. The slow holder's terminal DELETE
@@ -1520,8 +1509,7 @@ async def test_relay_dual_fire_guard_through_worker_loop_leaves_row_and_logs(
     pg_engine: AsyncEngine,
     outbox_table: Table,
 ) -> None:
-    """
-    The OutboxResponse + foreign-publisher dual-fire guard, through the live worker loop.
+    """The OutboxResponse + foreign-publisher dual-fire guard, through the live worker loop.
 
     Every existing relay-chain test runs in ``TestOutboxBroker(run_loops=False)``,
     where the handler runs synchronously inside ``publish`` and the guard raises out
@@ -1575,8 +1563,7 @@ async def test_listen_failure_falls_back_to_polling_against_real_postgres(
     pg_engine: AsyncEngine,
     outbox_table: Table,
 ) -> None:
-    """
-    With the LISTEN connection unavailable, delivery still happens via polling.
+    """With the LISTEN connection unavailable, delivery still happens via polling.
 
     Prior coverage stubbed ``asyncpg.connect``/``add_listener`` to fail in unit tests;
     this drives a real subscriber against live Postgres whose ``_open_listen_connection``
@@ -1607,8 +1594,7 @@ async def test_worker_rebuilds_writer_connection_after_flush_failure(
     pg_engine: AsyncEngine,
     outbox_table: Table,
 ) -> None:
-    """
-    A terminal-write failure poisons the worker's writer connection; it must rebuild and recover.
+    """A terminal-write failure poisons the worker's writer connection; it must rebuild and recover.
 
     Prior coverage only drove this with MagicMock engines (asserting ``connect`` was called
     twice). Here a real terminal ``delete_with_lease`` raises once against live Postgres,
@@ -1672,8 +1658,7 @@ async def test_graceful_timeout_none_still_bounds_drain(
     pg_engine: AsyncEngine,
     outbox_table: Table,
 ) -> None:
-    """
-    ``graceful_timeout=None`` must not hang ``stop()`` on a wedged handler.
+    """``graceful_timeout=None`` must not hang ``stop()`` on a wedged handler.
 
     None stays "unbounded" for ``ping()``, but the drain clamps it to a finite fallback so
     a single stuck handler can't make ``stop()`` (hence pod shutdown) hang forever. Without
@@ -1721,8 +1706,7 @@ async def test_validate_schema_fails_when_lease_check_constraint_missing(
 async def test_validate_schema_passes_under_ck_naming_convention(
     pg_engine: AsyncEngine,
 ) -> None:
-    """
-    A MetaData with a ``ck`` naming convention renames the lease CHECK to ``ck_<t>_<t>_lease_ck``.
+    """A MetaData with a ``ck`` naming convention renames the lease CHECK to ``ck_<t>_<t>_lease_ck``.
 
     The probe must look it up under that resolved name (carried on the constraint object), not the
     literal ``<t>_lease_ck`` — otherwise a perfectly valid schema falsely raises "missing CHECK
@@ -1765,8 +1749,7 @@ async def test_validate_schema_fails_when_lease_check_constraint_predicate_wrong
 async def test_validate_schema_passes_under_ck_convention_with_literally_named_constraint(
     pg_engine: AsyncEngine,
 ) -> None:
-    """
-    Convention metadata + a literally-named lease CHECK must validate (the reported case).
+    """Convention metadata + a literally-named lease CHECK must validate (the reported case).
 
     A ``MetaData`` carries a ``ck`` naming convention, but the lease CHECK was created by a
     hand-written migration under the **literal** ``<table>_lease_ck`` name (Alembic op functions

@@ -1,11 +1,3 @@
----
-status: shipped
-date: 2026-06-03
-slug: all-extra-and-planning-dir
-spec: all-extra-and-planning-dir
-pr: "41"
----
-
 # `all` extra and `planning/` workflow dir — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

@@ -8,190 +8,35 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
-- `just test` — full suite in docker compose (Postgres 17). Forwards args: `just test tests/test_unit.py -k name`. Args are forwarded **unquoted**, so a spaced `-k` expression (`-k "a or b"`) word-splits and fails (`file or directory not found: or`) — run one keyword per invocation, or use a single substring matching all targets.
-- `just lint` — `eof-fixer`, `ruff format`, `ruff check --fix`, `ty check`. `just lint-ci` is the non-mutating variant.
-- `just install` — `uv lock --upgrade && uv sync --all-extras --all-groups --frozen`.
-- `just build` / `just down` / `just sh` — image build, teardown, shell into the app container.
-- `just docs-serve` / `just docs-build` — serve docs locally at `http://127.0.0.1:8000` with hot-reload, or one-shot `mkdocs build --strict`. `just docs-deploy` is reserved for CI (force-pushes to `gh-pages`).
+`just` (task runner) + `uv` (package manager); the [`Justfile`](Justfile) is the source of truth for recipes — run `just --list` or read it. The non-obvious bits:
 
-`tests/test_unit.py` and `tests/test_fake.py` need no Postgres — `uv run pytest tests/test_unit.py` works directly. `tests/test_integration.py` requires Postgres at `POSTGRES_DSN` (default `postgresql+asyncpg://outbox:outbox@localhost:5432/outbox`); `pg_engine` skips if unreachable. Coverage is on by default with `--cov-fail-under=100` — partial runs fail that gate; pass `--no-cov` or `--cov-fail-under=0` when iterating locally.
+- `just test [args]` — full suite in docker compose (Postgres 17). Args forward **unquoted**, so a spaced `-k` expression (`-k "a or b"`) word-splits and fails (`file or directory not found: or`) — run one keyword per invocation, or a single substring matching all targets. `tests/test_unit.py` + `tests/test_fake.py` need no Postgres (`uv run pytest tests/test_unit.py` works directly); `tests/test_integration.py` needs Postgres at `POSTGRES_DSN` (default `postgresql+asyncpg://outbox:outbox@localhost:5432/outbox`; `pg_engine` skips if unreachable). Coverage is on with `--cov-fail-under=100` — partial runs fail that gate; pass `--no-cov` or `--cov-fail-under=0` when iterating.
+- `just lint` / `just lint-ci` — autofix vs non-mutating; `lint-ci` also runs the planning-bundle validator.
+- `just docs-serve` / `just docs-build` — local hot-reload at `http://127.0.0.1:8000` / one-shot strict `mkdocs build`.
 
 ## Workflow
 
-Per-feature: brainstorming → spec in `planning/changes/YYYY-MM-DD.NN-<slug>/design.md` → writing-plans → plan in `planning/changes/YYYY-MM-DD.NN-<slug>/plan.md` → executing-plans / subagent-driven-development → requesting-code-review → finishing-a-development-branch. Each change is a folder bundle; `<slug>` is a kebab-case description, not a story ID; `.NN` is a zero-padded intra-day counter that breaks same-date ties so the timeline sorts stably. `summary:` is written when the change is created (it is the change's one-liner); the implementing PR then sets `status: shipped`, fills `pr:` and `outcome:` in-branch, and promotes its conclusions into the affected `architecture/<capability>.md` **in the same PR, alongside the code** — the only ship-time step (there is no folder move), reviewed in the implementing diff rather than applied after merge; that hand-edit is what keeps `architecture/` true. A design decision taken **without** a code change — especially a candidate **rejected** with a load-bearing reason (e.g. an architecture-review suggestion we declined) — is recorded as `planning/decisions/YYYY-MM-DD-<slug>.md` (a `decision.md` template, frontmatter `status: accepted|superseded`), each with a **Revisit trigger** so future reviews don't re-litigate it. See [`planning/README.md`](planning/README.md) for the conventions (run `just index` for the change + decision listing) and [`planning/_templates/`](planning/_templates/) for copy-and-fill starting points.
-
-**Spec** (`design.md`) captures the *thinking* — why we are doing this, what the design is, what trade-offs were considered, what is out of scope. Written before code; rarely revised after merge. **Plan** (`plan.md`) captures the *sequencing* — the ordered checklist of tasks an executor (human or agent) walks. References the spec for the "why"; never re-explains it. **`architecture/`** captures the *invariants* of shipped systems — the living truth, promoted in the change's implementing PR alongside the code. A plan paragraph that would still read correctly with all task numbers and checkboxes removed is design content and belongs in the spec.
-
-**Three lanes.** Scale the artifact to the change. **Full** — a `design.md` + `plan.md` bundle — for real design judgment, a new file/module, a public-API change, cross-cutting/multi-file work, or non-trivial test design. **Lightweight** — a single `change.md` — for small-but-real changes (≲30 LOC net, ≤2 files, no new file, no public-API change, a single straightforward test). **Tiny** — no bundle, just a conventional commit — for a typo fix, dep bump, linter/formatter/CI tweak, a mechanical rename to satisfy a just-landed convention, or a single-line config change. Heavier lane wins on ambiguity; a `change.md` that outgrows its lane splits into `design.md` + `plan.md`.
+Planning uses a portable convention — `architecture/` (repo root) is the living **truth home** and promotion target; `planning/changes/` holds the per-change bundles. Start at the [Quick path](planning/README.md#quick-path-start-here) in `planning/README.md` (the authoritative spec) to pick a lane — **Full** (`design.md` + `plan.md`), **Lightweight** (single `change.md`), or **Tiny** (just a commit) — and ship. `just check-planning` validates bundles; `just index` prints the change + decision listing; `planning/_templates/` are copy-and-fill starting points. A design decision taken **without** a code change — especially a **rejected** option with a load-bearing reason — goes in `planning/decisions/YYYY-MM-DD-<slug>.md` (`status: accepted|superseded`) with a **Revisit trigger** so future reviews don't re-litigate it.
 
 ## Architecture
 
+> Quick orientation + the invariants Claude must not break. Each capability's full implementation detail lives in its `architecture/<capability>.md` (the truth home); user-facing docs live in `docs/`. **When a change alters a capability's behavior, update the matching `architecture/<capability>.md` in the same PR** — that promotion is what keeps `architecture/` true.
+
 The package wires a FastStream `Broker`/`Registrator`/`Subscriber` trio whose transport is Postgres rows, not a message bus.
 
-Deep-dives live in `architecture/`; this file holds the invariants Claude must not break, plus pointers.
-
-### Producer side
-
-`broker.publish(body, *, queue, session, headers=None, correlation_id=None, activate_in=None, activate_at=None, timer_id=None)` and `broker.publish_batch(*bodies, queue, session, headers=None, activate_in=None, activate_at=None)` insert outbox rows through the caller's `AsyncSession`. **They do not flush, commit, or open their own transaction** — the row must commit with the caller's domain writes. Both reject non-`AsyncSession` with `TypeError`. `publish` returns the row id (or `None` on `timer_id` conflict); `publish_batch` returns nothing and rejects `timer_id` (per-row dedup is meaningless in a batch). `broker.request` raises `NotImplementedError` (outbox is fire-and-forget).
-
-`OutboxProducer` (`publisher/producer.py`) implements `ProducerProto[OutboxPublishCommand]` and is the canonical insert path. `broker.publish` / `publish_batch` / `OutboxPublisher.publish` all build an `OutboxPublishCommand` (`response.py`) and route through `_basic_publish(cmd, producer=self.config.producer)` — encode + insert + NOTIFY semantics live in one place. Session-type / queue / activate-args-mutex / tz validation lives in one shared `_validate_publish_args` (`response.py`), called by the `OutboxPublishCommand` constructor, `OutboxResponse.__init__`, and `broker.publish_batch`'s empty-batch branch — so every real publish entry point (including an empty batch) rejects the same misconfigurations identically and eagerly (order: activate-args → session → queue). `from_cmd` raises (relay chaining is unsupported here).
-
-`broker.publisher(queue, *, headers=None, title=None, description=None, schema=None, include_in_schema=True)` returns an `OutboxPublisher` — a typed wrapper around `broker.publish` with the same transactional contract. Static decorator headers merge with per-call (per-call wins). The publisher exists for AsyncAPI / per-queue config — **not** decorator-relay chaining: `OutboxPublisher.__call__` raises `NotImplementedError` at decoration time. A relay decorator can't reach an `AsyncSession` without breaking the transactional contract.
-
-For chained publishing, handlers can `return OutboxResponse(body=..., queue=..., session=session)`. `OutboxResponse.__init__` validates eagerly via the shared `_validate_publish_args` (so a misconfigured response raises at the `return` site, not at dispatch where it would masquerade as a handler failure); `as_publish_command()` re-runs the same validator, keeping `OutboxPublishCommand` the authoritative source. FastStream gates `_make_response_publisher` on truthy `message.reply_to`; `OutboxParser.parse_message` sets `reply_to=msg.queue` to trip it. The actual publisher is `OutboxFakePublisher` (`publisher/fake.py`), which gates on `isinstance(cmd, OutboxPublishCommand)` so plain returns (`None`, `dict`, …) become silent no-ops. `correlation_id` propagates via FastStream's `process_message` inheritance.
-
-`_encode_payload` (`envelope.py`) is the internal helper that turns `body` into `(payload_bytes, headers_dict)`. Used by both producers; not exported.
-
-### Relay to foreign broker
-
-`OutboxSubscriber` can source a FastStream-native cross-broker chain: `@kafka_pub @broker_outbox.subscriber("q")` (Kafka/Rabbit/NATS/Redis/Confluent). Upstream's `SubscriberUsecase.process_message` walks the publisher chain — no dispatch override is needed for the chain itself. Three guardrails on top:
-
-- **Bad chain composition is refused.** `OutboxResponse(...)` + a non-`OutboxFakePublisher` in the chain raises `_OutboxConfigError` (private `RuntimeError` subclass) via `process_message` / `consume()` / `dispatch_one` overrides; the worker loop catches it, logs it at ERROR, and leaves the row — the lease expires and another fetch reclaims it (retry via lease expiry, **not** the `retry_strategy`) until the config is fixed (P18).
-- **WARNING for unstarted foreign brokers at `start()`** — one per broker, deduped via `_warned_foreign_config_ids: set[int]`.
-- **`propagate_inbound_headers: bool = False`** — when True, inbound headers fill `Response.headers` only if the handler returned a `Response` with empty headers (user-set wins). Default False matches FastStream convention.
-
-Deep dive: `architecture/relay.md`. User-facing: `docs/usage/relay.md`.
-
-### Timers (delayed delivery)
-
-`activate_in: timedelta` / `activate_at: datetime` (mutually exclusive) set `next_attempt_at`; the fetch CTE's `next_attempt_at <= now()` gates eligibility. For `publish`, `activate_in` is computed server-side via `make_interval` (clock-skew-safe) while `activate_at` is bound as the caller's absolute literal; `publish_batch` is fully client-side.
-
-`timer_id` (single `publish` only) → partial unique index `(queue, timer_id) WHERE timer_id IS NOT NULL`. Producer uses `pg_insert(...).on_conflict_do_nothing(...)` — re-publishing the same id is a no-op (returns `None`). NOTIFY is skipped when future-dated OR the conflict suppressed the insert. The dedup window is **one *live* row per `(queue, timer_id)`** — it resets once the row is delivered (DELETEd) or terminally fails, so `timer_id` is "at most one in flight", not a global once-ever idempotency key (the DLQ keeps `timer_id` non-unique).
-
-`broker.cancel_timer(*, queue, timer_id, session)` issues `DELETE WHERE queue=? AND timer_id=? AND acquired_token IS NULL` — **the `acquired_token IS NULL` guard is load-bearing** (preserves the lease-token invariant; returns `False` if a handler is in flight).
-
-Deep dive: `architecture/timers.md`. User-facing: `docs/usage/timers.md`.
-
-### User-owned schema
-
-`make_outbox_table(metadata, table_name="outbox")` returns a `sqlalchemy.Table` on the user's `MetaData`. The package never creates or migrates — that's Alembic — but declares three partial indexes so autogenerate brings them up:
-
-- `(queue, next_attempt_at) WHERE acquired_token IS NULL` — fetch CTE Branch A (unleased).
-- `(queue, acquired_at) WHERE acquired_token IS NOT NULL` — fetch CTE Branch B (expired-lease reclaim).
-- unique `(queue, timer_id) WHERE timer_id IS NOT NULL` — `timer_id` dedup.
-
-Plus a `CHECK ((acquired_token IS NULL) = (acquired_at IS NULL))` (the `<table>_lease_ck` constraint) so a half-set lease is unrepresentable.
-
-The fetch CTE's OR is written so each disjunct **explicitly carries its partial-index predicate as a conjunct** — Postgres only uses a partial index when the query implies its WHERE clause; the naive form falls back to seq-scan. Both fetch indexes pay write amplification on every claim. The index also satisfies the `ORDER BY next_attempt_at, id` **only for a single-queue subscriber** — a subscriber serving multiple queues (`queue = ANY(:queues)`), or the expired-lease branch (ordered by `next_attempt_at` while `_lease_idx` is keyed on `acquired_at`), adds a `LIMIT`-bounded sort node. Prefer one subscriber per queue when fetch ordering cost matters (same segregation pattern as lease TTLs).
-
-The `ORDER BY` lives on the inner CTE that **selects + LIMITs** the rows; the outer `UPDATE … RETURNING *` is unordered, so the order rows *dispatch* within a single fetch batch is unspecified (F2-09). The ordering governs *which* rows are claimed under contention (FIFO selection), not the per-row dispatch sequence — irrelevant with `max_workers > 1` anyway. Don't rely on within-batch FIFO delivery.
-
-There is **no `state` column**: a row is "available" iff `acquired_token IS NULL` or `acquired_at < now() - lease_ttl_seconds`. Terminal failures `DELETE` by default; opt in to audit via `dlq_table=make_dlq_table(metadata)`.
-
-`validate_schema()` is **opt-in** (call from `/health` or startup hook, not `broker.start()`) so migrations can run against the same DB without a loop. Beyond the alembic column/index diff it also probes the live partial-index **predicates** (alembic ignores `postgresql_where`), catching a drifted or non-partial `timer_id_uq` that would otherwise break `ON CONFLICT` at publish time (S2), **and probes `pg_constraint` for the `<table>_lease_ck` CHECK** (alembic has no check-constraint comparator), catching a missing or drifted lease pairing. Because these two probes (predicates + CHECK) catch drift `alembic revision --autogenerate` **cannot** remediate (no check-constraint comparator; index comparator ignores `postgresql_where`), the raised `RuntimeError` appends a pointer to `docs/operations/alembic.md#fixing-drift-autogenerate-cant-see` (the hand-written-migration recipe) — but **only** when one of those two probes fired; autogenerate-fixable drift (columns, plain indexes, DLQ) gets no pointer. Message composition lives in `_compose_schema_mismatch_message` (`client.py`), gated on `has_blind_drift`. Alembic is optional (`faststream-outbox[validate]`); without it `validate_schema()` raises `ImportError` but every other path works.
-
-### Opt-in DLQ on terminal failure
-
-`make_dlq_table(metadata, table_name="outbox_dlq")` + `OutboxBroker(..., dlq_table=...)` archives terminal failures. With `dlq_table=None` every existing code path is **bit-for-bit identical**.
-
-Atomicity: `delete_with_lease` switches to a single CTE `WITH deleted AS (DELETE … RETURNING …) INSERT INTO <dlq> SELECT …` — preserves writer-connection autocommit + lease-token guard. INSERT failure rolls back DELETE, so DLQ misconfiguration surfaces as outbox growth + `lease_lost` spikes, not silent audit loss.
-
-**DLQ projection.** The outbox→DLQ column mapping is `_DLQ_PROJECTION` (+ `_DLQ_INJECTED_COLUMNS`) in `schema.py` — one declarative `(outbox_col, dlq_col)` list that the real CTE (`OutboxClient._build_dlq_cte_stmt`) and the fake (`FakeOutboxClient.delete_with_lease`) both build their column lists from. Adding a DLQ column is one edit there, not hand-kept parity across SQL and Python.
-
-`OutboxInnerMessage.terminal_failure_reason` is set on three paths: `allow_delivery` False → `"max_deliveries"`, `_nack` exhausted → `"retry_terminal"`, `_reject` → `"rejected"`. **Branch on `terminal_failure_reason` BEFORE `last_exception`** in `dispatch_one` so manual `await msg.reject()` (no exception raised) routes to `nacked_terminal(reason="rejected")`, not `acked`.
-
-**The `DLQFailureReason` `Literal` (`message.py`) is the public contract** — operator queries / dashboards key off these values; changes are API-breaking.
-
-`last_exception` defaults to `repr()` bounded by `_LAST_EXCEPTION_MAX_CHARS=8192` (`subscriber/usecase.py`); truncation appends `…[truncated]`. Because a `repr` can embed the payload / request body / credentials, `OutboxBroker(..., last_exception_renderer=...)` (F3-01) lets PII-sensitive deployments redact (e.g. `lambda exc: type(exc).__name__`) or drop it (return `None`); the rendered string is still length-capped. Rendering happens in `_render_last_exception` (`subscriber/usecase.py`), read from `OutboxBrokerConfig.last_exception_renderer`. DLQ `failure_reason` is `String(64)`. No built-in retention.
-
-Deep dive: `architecture/dlq.md`. User-facing: `docs/usage/dlq.md`.
-
-### Two-loop subscriber (`subscriber/usecase.py`)
-
-Per subscriber:
-
-1. **`_fetch_loop`** — long-lived `AsyncConnection` for the fetch CTE + separate raw asyncpg connection for `LISTEN outbox_<table>`. Single CTE: `SELECT … FOR UPDATE SKIP LOCKED → UPDATE acquired_token=:uuid, acquired_at=now() RETURNING *`. WHERE reclaims unleased rows **and** expired leases (`acquired_at < now() - make_interval(secs => :lease_ttl)`) — no separate reaper. NOTIFY shortcircuits idle sleep via `asyncio.Event` (idle latency from `max_fetch_interval` to ~10ms). LISTEN failures log once and fall back to polling. DB error → connections close, exponential backoff (`_BACKOFF_EXP_CAP=30`), reopen.
-2. **`_worker_loop`** × `max_workers` — pulls from `asyncio.Queue(maxsize=fetch_batch_size)`, dispatches via `consume()`, flushes terminal state. Each worker owns a long-lived `AsyncConnection` (held across reconnect) and routes terminal writes through `delete_with_lease(conn, …)` / `mark_pending_with_lease(conn, …)` — drain of N rows costs O(workers) pool checkouts. Flush exceptions propagate (outer loop rebuilds the connection); inflight slot still releases in `finally`. Default `AckPolicy.NACK_ON_ERROR`; `REJECT_ON_ERROR` and `MANUAL` allowed. **`AckPolicy.ACK_FIRST` is rejected at registration with `ValueError`** — it would delete before the handler runs, defeating the outbox contract. `subscriber/factory.py` raises or warns on other footguns (`lease_ttl_seconds <= max_fetch_interval`, `max_deliveries` without retry, etc.).
-
-`OutboxSubscriber.get_one()` and `__aiter__()` are explicit `NotImplementedError`s — point operators at `broker.fetch_unprocessed(session=..., queue=...)`. A peek that acquires a lease has surprising `deliveries_count` semantics; lease-free reads belong on `fetch_unprocessed`.
-
-**Lease bound.** A subscriber can hold up to `fetch_batch_size + max_workers` leases at once, not `fetch_batch_size` (F1-01): `free = _inflight.maxsize - qsize()` counts only *queued* rows, so once `max_workers` rows are checked out for processing the loop can claim another full batch. Leases are bounded and self-expire via TTL, but size `lease_ttl_seconds` and reason about cross-replica contention against `fetch_batch_size + max_workers`, not `fetch_batch_size`.
-
-**Connection budget.** Each subscriber holds `max_workers + 1` SQLAlchemy pool connections steady-state + one raw asyncpg connection for LISTEN. Size the pool for `Σ subscribers × (max_workers + 1)` or startup blocks on checkout — the asyncpg LISTEN connection lives **outside** the pool, so it does not count toward pool sizing. **Per process** — Postgres `max_connections` must cover `replicas × Σ subscribers × (max_workers + 2)`: the `max_workers + 1` pool connections **plus** the out-of-pool asyncpg LISTEN connection. Undersize it and rolling deploys hit `FATAL: too many connections`.
-
-**NOTIFY semantics.** `broker.publish` / `publish_batch` emit `SELECT pg_notify('outbox_<table>', queue)` on the caller's session right after the INSERT, **except** when future-dated or `timer_id` conflict no-op'd the insert. NOTIFY is transactional — atomicity with the row is automatic; rolled-back transactions silently drop it. The future-dated decision is one shared `is_future_dated(activate_in, activate_at, now)` (in the stdlib-only leaf `_scheduling.py`, alongside `resolve_next_attempt_client_side` and `validate_activate_args` — the pure activate-args helpers the real and fake publish paths share); `activate_at`'s comparison and the `publish_batch` `next_attempt_at` are **worker-clock-relative** (unlike `activate_in`'s server-side `make_interval`), so under worker/DB clock skew NOTIFY may fire slightly early/late — polling backstops it (F2-04/F2-05). NOTIFYs emitted **during a fetch-loop reconnect/backoff window are lost** (LISTEN is not durable); latency degrades to the poll interval until the next tick — a latency, not a correctness, gap (F1-07). Channel naming is `outbox_<table_name>`. Postgres limits identifiers to 63 bytes; `make_outbox_table` **raises `ValueError`** when the longest derived identifier — an index name like `<table>_pending_idx`, longer than the NOTIFY channel itself — would exceed it — so over-long table names (~>51 bytes) are rejected at construction, not silently degraded to polling.
-
-### Lease-token invariant — load-bearing
-
-Every terminal write (`delete_with_lease`, `mark_pending_with_lease`) filters on `acquired_token`. If a slow handler's lease expired and a newer fetch reclaimed the row, the slow handler's `DELETE`/`UPDATE` finds `rowcount == 0` and is silently dropped — preventing it from clobbering the new lease holder. **Any new fetch/terminal path must preserve this.**
-
-`lease_ttl_seconds` (default `60.0`, per-subscriber) **must exceed handler P99 with margin** or healthy handlers race their own expiry. The lease cutoff uses server-side `make_interval(secs => :lease_ttl)` — immune to clock skew. **Sizing tip**: route occasional slow work onto its own subscriber with a tall TTL; keep the fast subscriber's tight. TTL is per-subscriber, so segregation costs only an extra `@broker.subscriber(...)`.
-
-Lease-loss logs at WARNING with `extra={"event": "lease_lost", "phase": "terminal"|"retry", "row_id": …, "queue": …, "deliveries_count": …}`. Recurring `event=lease_lost` means `lease_ttl_seconds < handler P99`.
-
-`deliveries_count` counts **claims, not completed handler runs** — the fetch CTE increments it on every claim, including expired-lease reclaims (F2-07). Under lease churn (`lease_ttl < handler P99`) a row can cross `max_deliveries` after fewer than N successful handler invocations, so set `max_deliveries` with margin. `attempts_count` (via `_record_attempt`) is the handler-run-scoped counter.
-
-**Writer-connection autocommit.** `_open_worker_resources` sets the per-worker writer to `isolation_level="AUTOCOMMIT"`. Terminal writes are single statements; explicit BEGIN/COMMIT would add two round-trips per row. The `WHERE acquired_token = …` clause enforces the invariant, not the transaction wrapping. The fetch connection is **not** autocommit — it owns LISTEN/NOTIFY and amortizes BEGIN/COMMIT across the batch.
-
-**Shutdown race in `dispatch_one`.** If `stop()` flips `running=False` between a worker pulling a row from `_inflight` and entering `consume()`, base `SubscriberUsecase.consume()` early-exits without running the handler. `dispatch_one` detects this (`not row.state_set and not self.running` after `consume()` returns without raising) and returns before `assert_state_set → reject() → _safe_flush` would silently DELETE. Lease lives until expiry; another replica reclaims. No metric fires. **Without this guard, busy subscribers leak rows on every rolling deploy.**
-
-### Drain on stop (subscriber + broker)
-
-Both `OutboxSubscriber.stop()` and `OutboxBroker.stop()` override FastStream parents. Override comments carry `# Upstream equivalent (replaced): …`.
-
-- **Subscriber: two flags during drain.** `self.running` (FastStream's "actively dispatching") stays True for the duration of drain; `self._stopping` (new) signals "no new claims". `_fetch_inner` checks both; the worker loop only `running`. `stop()` flips `_stopping`, kicks `_notify_event`, waits up to `graceful_timeout` for `_inflight.join()`, then flips `running=False` and cancels tasks. `graceful_timeout=None` (unbounded for `ping()`) is **clamped to a finite fallback in the drain** so one wedged handler can't hang `stop()` forever. `super().stop()` is **not** called — its `MultiLock.wait_release` would re-wait stuck handlers for another full budget (2× shutdown regression).
-- **Broker: parallel-gather subscriber stop** via `asyncio.gather(..., return_exceptions=True)` — sequential N × `graceful_timeout` exceeds K8s default `terminationGracePeriodSeconds=30s` once a service has 2+ subscribers. Exceptions logged via `_log_subscriber_stop_error`, never re-raised.
-- **Phase interaction.** During drain `running` stays True so the `dispatch_one` guard is dormant; after drain `running=False` is set before `task.cancel()` so workers mid-`dispatch_one` benefit from the guard. The two changes are complementary.
-- **Upstream divergence flag.** If FastStream adds cleanup to `BrokerUsecase.stop`, `SubscriberUsecase.stop`, or `TasksMixin.stop`, we silently miss it. **Re-check both overrides when touching shutdown.** Regression tests in `tests/test_fake.py` (`test_drain_finishes_inflight_rows_before_returning_in_fake_mode`, `test_broker_stop_cancels_wedged_handler_within_graceful_timeout_in_fake_mode`) and the Postgres-backed `tests/test_integration.py`.
-- **Test-broker gotcha.** `_fake_close` sets `sub.running = False` and bypasses `subscriber.stop()` / `broker.stop()` entirely — drain tests must `await broker.stop()` explicitly inside the `async with` block.
-
-Deep dive: `architecture/drain.md`.
-
-### Test broker
-
-`TestOutboxBroker` (`testing.py`) swaps in `FakeOutboxClient` (in-memory `_FakeRow` dicts). Two modes:
-
-- **Sync (`run_loops=False`, default)** — `broker.publish` routes through `OutboxSubscriber.dispatch_one` synchronously; handler runs before `publish` returns. `producer` slot is swapped for `FakeOutboxProducer` so `broker.publisher("q").publish(...)` lands in the same store. Future-dated rows **fire immediately** in sync mode (sync dispatch ignores `next_attempt_at`).
-- **Loop (`run_loops=True`)** — real `_fetch_loop` / `_worker_loop` against the fake client. Needed for retry rescheduling, lease-expiry reclaim, scheduled delivery firing.
-
-`OutboxSubscriber.dispatch_one(row)` is the public per-row entry point — worker loop and test broker both call it. Caller must hold the row's lease.
-
-`FakeOutboxClient.validate_schema()` raises `NotImplementedError` — a silent pass would let users ship broken schemas while tests stay green. Use a real `OutboxClient(real_engine, table)` for schema validation tests.
-
-**Client contract.** `OutboxClient` (SQL) and `FakeOutboxClient` (Python) implement the same rules in different substrates — they can't share code, so `tests/test_client_contract.py` pins them to one behavioural contract: a single parametrized scenario module run against **both** adapters (fake everywhere; real Postgres auto-skipped when unreachable) over the shared `AbstractOutboxClient` surface (`fetch` / `delete_with_lease` / `mark_pending_with_lease` + DLQ). Drift fails a test instead of shipping. It pins *structural* drift only — an in-process test can't manufacture cross-host DB-vs-worker clock skew, so the real client's server-side `make_interval` clock authority stays a documented invariant, not an assertion. `cancel_timer` and `timer_id` insert-dedup are broker/producer concerns, not on the client interface, so they live in `test_integration.py` / `test_fake.py`.
-
-**Session leniency.** The fake `publish` / `publish_batch` / `cancel_timer` / `fetch_unprocessed` all `del session` — any value (incl. `None`) is accepted, diverging from production's `isinstance(session, AsyncSession)` `TypeError` (F4-09). Tests that need to assert the session contract must use the real `OutboxClient` / a real `AsyncSession`, not the fake. `OutboxResponse` is **not** faked, so its eager session/queue/activate validation does fire under the test broker.
-
-**Gotcha:** subscribers registered via `OutboxRouter` (then `broker.include_router(router)`) live on the router, not `broker._subscribers`. Walk `broker.subscribers` (the property) for full introspection.
-
-Deep dive: `architecture/test-broker.md`. User-facing: `docs/usage/testing.md`.
-
-### Annotations module (`annotations.py`)
-
-Canonical home for `Annotated[..., Context(...)]` shortcuts — `OutboxMessage`, `OutboxBroker`, `OutboxProducer`, `OutboxClient`. Each shadows the underlying class via `from … import X as _X`. Producer path: `Context("broker._producer")` (via `BrokerUsecase._producer` property → `self.config.producer`). Client path: `Context("broker.config.broker_config.client")` (client lives only on the outbox-specific config layer). `faststream_outbox.fastapi` re-exports with FastAPI-aware `Context` (from `faststream._internal.fastapi.context`).
-
-### FastAPI router (`fastapi/router.py`)
-
-`OutboxRouter` subclasses FastStream's `StreamRouter` (which subclasses `APIRouter`). `app.include_router(router)` auto-starts the inner `OutboxBroker` via FastAPI lifespan.
-
-Critical for the transactional contract: `wrap_callable_to_fastapi_compatible` (FastStream internals) bridges FastAPI's dependency resolver into the consume pipeline, so `Depends(get_session)` inside a handler resolves the same `AsyncSession` it would in an HTTP route — and `OutboxResponse(session=...)` commits the follow-on row with the handler's domain writes.
-
-`subscriber()` and `publisher()` are overridden to pin defaults for FastAPI-specific kwargs (`response_model=Default(None)`, etc.) that the base declares keyword-only without defaults. Outbox kwargs flow through unchanged. `apply_types` and broker `dependencies` are intentionally **not exposed**: `StreamRouter` forces `apply_types=False` (FastDepends takes over), and the broker's `Dependant` list isn't useful in this flow.
-
-`fastapi` is an optional dependency (`faststream-outbox[fastapi]`).
-
-### Engine ownership
-
-Caller owns the `AsyncEngine` — the broker never disposes it. The engine lives on `OutboxBrokerConfig` (set by the broker constructor) and may be `None` until wired, so the broker can be constructed before the engine exists (used by the test broker).
-
-### Metrics + native middleware
-
-Two complementary seams — **don't collapse them.**
-
-- **Recorder seam** (`OutboxBroker(..., metrics_recorder=...)`): `Callable[[str, Mapping[str, Any]], None]`. Subscriber emits `fetched`, `dispatched`, `acked`, `nacked_retried`, `nacked_terminal`, `lease_lost`, `drain_timeout` (on a timed-out `stop()` drain), plus `dlq_written` when `dlq_table` is set. Producer emits `published`. The bundled Prometheus/OTel adapters translate every one of these (`drain_timeout` → `_outbox_drain_timeout_total` / `messaging.outbox.drain_timeout`). Default `_noop_recorder` lets sites fire unconditionally. Every call site is wrapped in `try/except` + DEBUG log. **Recorder must not block** (sync `Counter.inc()` fine; HTTP/StatsD not). `dlq_written` vs `nacked_terminal` divergence detects DLQ misconfiguration.
-- **Native middleware** (`opentelemetry/`, `prometheus/`): thin subclasses of upstream's `TelemetryMiddleware[OutboxPublishCommand]` and `PrometheusMiddleware[OutboxInnerMessage, OutboxPublishCommand]`. Register via the public `OutboxBroker(..., middlewares=[...])` constructor kwarg (forwarded internally as `broker_middlewares`). Fire on `consume_scope` (via `dispatch_one → self.consume(row)`) and `publish_scope` (via `_basic_publish`).
-
-Why two: middleware owns `consume_scope` / `publish_scope` (spans, durations, status, size). Recorder owns events **outside** the bus — `fetched` (no `StreamMessage` at fetch time), `lease_lost` (after `consume_scope` exits), `nacked_terminal(reason="max_deliveries")` (before consume opens). Each fires for events the other physically cannot observe.
-
-Bundled adapters are optional extras (`[prometheus]` / `[opentelemetry]`). Canonical `messaging.system` / `broker` label is `"outbox"` (shared by both seams). Prometheus tags consume by `handler`, publish by `destination` (mirrors upstream). OTel adapter is meter-only; spans go via native middleware.
-
-Deep dive: `architecture/metrics.md`. User-facing: `docs/usage/observability.md`.
-
-### Retry strategies (`retry.py`)
-
-`get_next_attempt_delay(*, first_attempt_at, last_attempt_at, attempts_count, exception=None)` returns the **delay in seconds** before the next attempt (the DB computes `next_attempt_at` from it server-side, so timing is skew-immune), or `None` for terminal failure. It receives the raised exception so subclasses can retry only on transient errors. `_RetryStrategyTemplate` enforces `max_attempts` and `max_total_delay_seconds`. `ExponentialRetry` has optional jitter and `max_delay_seconds`. `max_total_delay_seconds` is a **lower bound** on the horizon: `elapsed` is measured `last_attempt_at − first_attempt_at` (both set equal on the first attempt), so the budget always permits roughly one more interval beyond the nominal cap (F2-01) — size it as "at least this long", not an exact ceiling.
-
-**Default**: a subscriber with no explicit `retry_strategy` resolves to `ExponentialRetry(initial_delay_seconds=1.0, multiplier=2.0, max_delay_seconds=300.0, max_attempts=10, jitter_factor=0.2)` (`_default_retry_strategy()` in `registrator.py`). "Delete on first error" is the wrong default for an outbox; opt in with `NoRetry()`.
+**Invariants — do not break (detail in the linked capability file):**
+
+- **Producer / transactional contract** — `broker.publish`/`publish_batch` insert through the caller's `AsyncSession` and **never flush/commit/open their own transaction**; the row commits with the caller's domain writes. Non-`AsyncSession` → `TypeError`; `broker.request` → `NotImplementedError`. → [producer.md](architecture/producer.md)
+- **Relay to foreign broker** — native FastStream publisher-chain (`@kafka_pub @broker_outbox.subscriber("q")`); bad chain composition raises `_OutboxConfigError` and retries via **lease expiry**, not the retry strategy. → [relay.md](architecture/relay.md)
+- **Timers** — `activate_in`/`activate_at` are mutually exclusive and gate eligibility; `timer_id` is "at most one *live* row per `(queue, timer_id)`", not a global idempotency key; `cancel_timer`'s `acquired_token IS NULL` guard is load-bearing. → [timers.md](architecture/timers.md)
+- **User-owned schema** — caller owns the table; the three partial indexes + the `<table>_lease_ck` CHECK are load-bearing; **no `state` column**; `validate_schema()` is opt-in. → [schema.md](architecture/schema.md)
+- **Opt-in DLQ** — with `dlq_table=None` every path is **bit-for-bit identical**; the `DLQFailureReason` `Literal` is the **public contract** (changes are API-breaking); branch on `terminal_failure_reason` **before** `last_exception`. → [dlq.md](architecture/dlq.md)
+- **Two-loop subscriber + lease-token invariant** — fetch loop + N worker loops; **every terminal write filters on `acquired_token`** (a stale write finds `rowcount==0` and is dropped) — any new fetch/terminal path must preserve this; `AckPolicy.ACK_FIRST` is rejected at registration; `lease_ttl_seconds` must exceed handler P99. → [subscriber.md](architecture/subscriber.md)
+- **Drain on stop** — custom `stop()` overrides + the `dispatch_one` shutdown-race guard prevent row leaks on rolling deploys; **re-check both overrides when touching shutdown**. → [drain.md](architecture/drain.md)
+- **Test broker** — `TestOutboxBroker` swaps in `FakeOutboxClient`; sync mode dispatches the handler before `publish` returns; `test_client_contract.py` pins real-vs-fake parity. → [test-broker.md](architecture/test-broker.md)
+- **Integration** — annotations `Context` shortcuts; `OutboxRouter` bridges FastAPI deps so `OutboxResponse(session=...)` commits with the handler's writes; caller owns the `AsyncEngine` (broker never disposes it). → [integration.md](architecture/integration.md)
+- **Metrics + native middleware** — two complementary seams, **don't collapse them**; each fires for events the other physically cannot observe; canonical `messaging.system` label is `"outbox"`. → [metrics.md](architecture/metrics.md)
+- **Retry strategies** — `get_next_attempt_delay` returns delay-seconds or `None` (terminal); the default is `ExponentialRetry(...)`, **not** delete-on-error (`NoRetry()` to opt out); `max_total_delay_seconds` is a lower bound. → [retry.md](architecture/retry.md)
 
 ## Conventions
 

@@ -1,5 +1,4 @@
-"""
-``OutboxProducer`` — the canonical insert path for outbox rows.
+"""``OutboxProducer`` — the canonical insert path for outbox rows.
 
 Both ``OutboxBroker.publish`` / ``publish_batch`` and ``OutboxPublisher.publish``
 route through this producer via FastStream's ``_basic_publish(cmd, producer=...)``

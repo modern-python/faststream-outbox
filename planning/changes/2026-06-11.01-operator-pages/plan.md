@@ -1,11 +1,3 @@
----
-status: shipped
-date: 2026-06-11
-slug: operator-pages
-spec: operator-pages
-pr: "53"
----
-
 # operator-pages — implementation plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
