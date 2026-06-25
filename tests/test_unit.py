@@ -82,8 +82,7 @@ def _make_broker(engine: object | None = None, table_name: str = "outbox") -> Ou
 
 
 def _make_session_mock(*, scalar_return: object = 42) -> AsyncMock:
-    """
-    Build an AsyncSession mock whose ``execute()`` returns a sync MagicMock.
+    """Build an AsyncSession mock whose ``execute()`` returns a sync MagicMock.
 
     AsyncMock(spec=AsyncSession) makes the return_value of execute() default to an
     AsyncMock — so ``result.scalar()`` would itself return a coroutine. The broker's
@@ -1846,8 +1845,7 @@ async def test_open_listen_connection_returns_none_when_asyncpg_connect_fails() 
 
 
 async def test_open_listen_connection_passes_multihost_kwargs_to_asyncpg() -> None:
-    """
-    Multi-host URLs must reach asyncpg as host/port lists, not a re-rendered DSN.
+    """Multi-host URLs must reach asyncpg as host/port lists, not a re-rendered DSN.
 
     ``?host=h1:5432&host=h2:5432`` renders back as URL-encoded host tokens asyncpg
     can't parse. SQLAlchemy-only kwargs (``prepared_statement_cache_size``, ...) must
@@ -1948,8 +1946,7 @@ async def test_fetch_inner_raises_on_listen_health_check_timeout(monkeypatch: py
 
 
 def _make_broker_for_dispatch(fake: FakeOutboxClient) -> tuple[OutboxBroker, TestOutboxBroker]:
-    """
-    Build a broker + TestOutboxBroker harness so logger / config wiring is initialized.
+    """Build a broker + TestOutboxBroker harness so logger / config wiring is initialized.
 
     The caller enters the harness via ``async with`` to run dispatch_one against a real
     subscriber instance whose ``_outer_config.logger`` is wired by FastStream's lifecycle.
@@ -2063,8 +2060,7 @@ async def test_flush_retry_threads_writer_conn_into_mark_pending(writer_conn: ob
 
 
 async def test_dispatch_one_outer_except_swallows_consume_failure() -> None:
-    """
-    The defensive outer except in dispatch_one catches consume/assert_state_set bugs.
+    """The defensive outer except in dispatch_one catches consume/assert_state_set bugs.
 
     Handler errors are normally caught by AckPolicy middleware. The outer except is the
     safety net for middleware-bypassing failures — patch ``consume`` directly to exercise it.
@@ -2085,8 +2081,7 @@ async def test_dispatch_one_outer_except_swallows_consume_failure() -> None:
 
 
 async def test_dispatch_one_preserves_row_when_consume_early_exits_on_shutdown() -> None:
-    """
-    Shutdown race in dispatch_one.
+    """Shutdown race in dispatch_one.
 
     ``SubscriberUsecase.consume()`` returns ``None`` without invoking
     ``process_message`` when ``running`` is False. Previously ``dispatch_one`` fell
@@ -2121,8 +2116,7 @@ async def test_dispatch_one_preserves_row_when_consume_early_exits_on_shutdown()
 
 
 async def test_dispatch_one_preserves_row_when_consume_raises() -> None:
-    """
-    T3: a consume()-escaping exception preserves the row (no DELETE, no false ack/nack).
+    """T3: a consume()-escaping exception preserves the row (no DELETE, no false ack/nack).
 
     ``consume()`` swallows ordinary handler exceptions, but a middleware-bypassing
     failure (or a framework bug) can escape it. ``dispatch_one`` catches that, logs,
@@ -2163,8 +2157,7 @@ async def test_dispatch_one_preserves_row_when_consume_raises() -> None:
 
 
 async def test_dispatch_one_lease_lost_emits_only_lease_lost_not_acked() -> None:
-    """
-    P17: a lease-lost terminal flush emits ``lease_lost`` only — not a false ``acked`` that double-counts.
+    """P17: a lease-lost terminal flush emits ``lease_lost`` only — not a false ``acked`` that double-counts.
 
     Before P17 the acked/nacked metric fired before the flush, so a row whose lease was
     reclaimed (flush rowcount 0 → redelivered) was counted once here and again on redelivery.
@@ -2194,8 +2187,7 @@ async def test_dispatch_one_lease_lost_emits_only_lease_lost_not_acked() -> None
 
 
 async def test_worker_inner_swallows_config_error_without_reconnect() -> None:
-    """
-    P18: an _OutboxConfigError in the worker loop is logged and swallowed, not propagated.
+    """P18: an _OutboxConfigError in the worker loop is logged and swallowed, not propagated.
 
     Letting it reach _run_with_reconnect would tear down the writer connection and back
     off (throttling unrelated rows). The worker must continue; the row's lease expires.
@@ -2222,8 +2214,7 @@ async def test_worker_inner_swallows_config_error_without_reconnect() -> None:
 
 
 async def test_dispatch_one_max_deliveries_emits_terminal_without_dispatched() -> None:
-    """
-    T7: the max_deliveries terminal emits nacked_terminal(reason=max_deliveries) with NO preceding 'dispatched'.
+    """T7: the max_deliveries terminal emits nacked_terminal(reason=max_deliveries) with NO preceding 'dispatched'.
 
     The handler never runs (``allow_delivery`` short-circuits), so ``dispatched`` — which
     carries the in-process gauge's ``.inc()`` — must not fire. The Prometheus adapter tests
@@ -2705,8 +2696,7 @@ async def test_outbox_client_mark_pending_with_lease_uses_caller_conn() -> None:
 
 
 async def test_fetch_inner_does_not_claim_during_drain() -> None:
-    """
-    T4: with _stopping set, _fetch_inner must claim NO rows (the drain "no new claims" invariant).
+    """T4: with _stopping set, _fetch_inner must claim NO rows (the drain "no new claims" invariant).
 
     Goes through the real loop guard. Changing it to ``while self.running:`` (dropping
     the ``_stopping`` conjunct) would keep claiming rows during drain — here the fetch
@@ -2811,8 +2801,7 @@ def test_linear_retry_without_jitter_is_deterministic() -> None:
 
 
 def _register_subscriber(broker: OutboxBroker, **subscriber_kwargs: object) -> None:
-    """
-    Trigger registration-time misconfig validation; no handler needed.
+    """Trigger registration-time misconfig validation; no handler needed.
 
     ``_validate_subscriber_config`` runs inside ``create_subscriber``, before
     ``add_call``, so the warning/error fires from the ``broker.subscriber(...)``
@@ -3325,8 +3314,7 @@ async def test_delete_with_lease_raises_when_dlq_payload_but_no_dlq_table() -> N
 
 
 async def test_fetch_cte_carries_partial_index_predicates_as_conjuncts() -> None:
-    """
-    T6: each OR arm of the fetch WHERE must carry its partial-index predicate as a conjunct.
+    """T6: each OR arm of the fetch WHERE must carry its partial-index predicate as a conjunct.
 
     Branch A is ``acquired_token IS NULL``; Branch B is ``acquired_token IS NOT NULL AND
     acquired_at < cutoff``. The naive single-OR form (``acquired_at < cutoff`` without the
@@ -3652,8 +3640,7 @@ async def test_flush_terminal_dlq_payload_short_exception_not_truncated() -> Non
 
 
 async def test_metrics_manual_reject_without_exception_emits_nacked_terminal_rejected() -> None:
-    """
-    Manual ``msg.reject()`` (no exception raised) emits ``nacked_terminal(reason="rejected")``.
+    """Manual ``msg.reject()`` (no exception raised) emits ``nacked_terminal(reason="rejected")``.
 
     Previously routed to ``acked`` because ``last_exception is None`` was checked first.
     """
@@ -3679,8 +3666,7 @@ async def test_metrics_manual_reject_without_exception_emits_nacked_terminal_rej
 
 
 async def test_metrics_reject_on_error_terminal_emits_reason_rejected() -> None:
-    """
-    REJECT_ON_ERROR + handler raise emits ``reason="rejected"`` (was ``"retry_terminal"``).
+    """REJECT_ON_ERROR + handler raise emits ``reason="rejected"`` (was ``"retry_terminal"``).
 
     The metric branch previously hardcoded ``"retry_terminal"`` for the post-handler
     terminal path; it now reads ``terminal_failure_reason`` and includes ``exception_type``.
@@ -3721,8 +3707,7 @@ def test_default_retry_strategy_pins_documented_parameters() -> None:
 
 
 async def test_dlq_cte_insert_columns_match_make_dlq_table() -> None:
-    """
-    Guard the hardcoded DLQ INSERT column list against drift from ``make_dlq_table``.
+    """Guard the hardcoded DLQ INSERT column list against drift from ``make_dlq_table``.
 
     ``_build_dlq_cte_stmt`` hardcodes the DLQ column list as an f-string with nothing
     linking it to the table definition (audit 2026-06-14). A future NOT-NULL-without-
@@ -3813,8 +3798,7 @@ async def test_fetch_unprocessed_rejects_non_positive_limit() -> None:
 
 
 def test_asyncapi_document_populates_channels_and_operations() -> None:
-    """
-    Regression: ``BrokerSpec(url=[])`` produced a structurally empty AsyncAPI document.
+    """Regression: ``BrokerSpec(url=[])`` produced a structurally empty AsyncAPI document.
 
     Upstream's generator only emits channels/operations for brokers with a non-empty spec
     url; with ``url=[]`` the assembled doc had ``servers={} channels={} operations={}`` even

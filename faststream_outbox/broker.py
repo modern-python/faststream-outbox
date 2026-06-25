@@ -1,5 +1,4 @@
-"""
-OutboxBroker — a FastStream broker whose queue is a Postgres table.
+"""OutboxBroker — a FastStream broker whose queue is a Postgres table.
 
 Producers call ``broker.publish(body, queue=..., session=session)`` inside their
 own SQLAlchemy transaction; the row commits with their domain writes. The broker
@@ -56,8 +55,7 @@ if typing.TYPE_CHECKING:
 
 
 def _spec_url(engine: "AsyncEngine | None", outbox_table: "Table") -> list[str]:
-    """
-    AsyncAPI server URL(s) for the broker spec.
+    """AsyncAPI server URL(s) for the broker spec.
 
     **Must be non-empty.** Upstream's AsyncAPI generator only emits channels/operations
     for brokers whose spec carries a non-empty ``url`` (it populates ``broker_servers``
@@ -73,8 +71,7 @@ def _spec_url(engine: "AsyncEngine | None", outbox_table: "Table") -> list[str]:
 
 
 class _CaptureExceptionMiddleware(BaseMiddleware):
-    """
-    Stash the handler exception on the inner row before AckMiddleware nacks.
+    """Stash the handler exception on the inner row before AckMiddleware nacks.
 
     FastStream's AcknowledgementMiddleware catches the handler exception in its
     own ``after_processed`` and calls ``message.nack()`` directly — the exception
@@ -255,8 +252,7 @@ class OutboxBroker(
             )
 
     def _warn_on_unstarted_foreign_publishers(self) -> None:
-        """
-        Emit one WARNING per foreign-publisher broker that has not been started.
+        """Emit one WARNING per foreign-publisher broker that has not been started.
 
         Foreign-publisher decorators stacked on outbox subscribers only work if
         the foreign broker's producer is wired. When it is not, the first
@@ -377,8 +373,7 @@ class OutboxBroker(
         activate_at: _dt.datetime | None = None,
         timer_id: str | None = None,
     ) -> int | None:
-        """
-        Insert one outbox row using *session*'s open transaction.
+        """Insert one outbox row using *session*'s open transaction.
 
         Must be called inside a transaction the caller owns (typically inside an
         ``async with session.begin():`` block). ``publish`` does not flush, commit,
@@ -415,8 +410,7 @@ class OutboxBroker(
         activate_in: _dt.timedelta | None = None,
         activate_at: _dt.datetime | None = None,
     ) -> None:
-        """
-        Insert multiple outbox rows via *session*. Same transactional contract as ``publish``.
+        """Insert multiple outbox rows via *session*. Same transactional contract as ``publish``.
 
         Each row gets its own auto-generated ``correlation_id``; pass *headers* to
         share static headers across all rows. *activate_in* / *activate_at* schedule
@@ -459,8 +453,7 @@ class OutboxBroker(
         timer_id: str,
         session: AsyncSession,
     ) -> bool:
-        """
-        Delete a not-yet-leased timer row. Idempotent at the ``(queue, timer_id)`` level.
+        """Delete a not-yet-leased timer row. Idempotent at the ``(queue, timer_id)`` level.
 
         Same transactional contract as :meth:`publish` — runs on the caller's session and
         commits with their transaction.
@@ -505,8 +498,7 @@ class OutboxBroker(
         queue: str | None = None,
         limit: int = 1000,
     ) -> list[OutboxInnerMessage]:
-        """
-        Return outbox rows currently in the table — pending, in-flight, or future-dated.
+        """Return outbox rows currently in the table — pending, in-flight, or future-dated.
 
         Intended for test assertions and lease-free operator inspection (the lease-free
         read path `get_one()`/`__aiter__()` point you here): a successful delivery deletes

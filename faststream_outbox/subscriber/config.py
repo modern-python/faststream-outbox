@@ -29,8 +29,7 @@ def _is_internal_frame(filename: str) -> bool:
 
 
 def _subscriber_warn(message: str) -> None:
-    """
-    Attribute a subscriber-config ``UserWarning`` to the user's ``@subscriber`` call (P27).
+    """Attribute a subscriber-config ``UserWarning`` to the user's ``@subscriber`` call (P27).
 
     Computes ``stacklevel`` by walking out to the first non-internal frame instead of using
     ``warnings.warn(skip_file_prefixes=...)``: the 3.13 C ``warn`` does not skip the
@@ -72,8 +71,7 @@ class OutboxSubscriberConfig(SubscriberUsecaseConfig):
         self._validate()
 
     def _validate(self) -> None:  # noqa: C901  # flat sequence of independent knob checks
-        """
-        Reject impossible knob values, warn on combos that silently misbehave.
+        """Reject impossible knob values, warn on combos that silently misbehave.
 
         Errors are raised here (not deferred to runtime) so the user gets a traceback
         pointing at the ``@broker.subscriber(...)`` decorator. Warnings use

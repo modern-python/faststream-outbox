@@ -1,5 +1,4 @@
-"""
-Outbox subclass of FastStream's ``PrometheusMiddleware``.
+"""Outbox subclass of FastStream's ``PrometheusMiddleware``.
 
 Register via ``broker_middlewares=[...]`` for consume + publish counters and
 duration histograms. Same registration pattern as ``KafkaPrometheusMiddleware``

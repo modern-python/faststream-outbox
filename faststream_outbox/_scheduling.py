@@ -1,5 +1,4 @@
-"""
-Pure activate-args resolution + validation, shared by the real and fake publish paths.
+"""Pure activate-args resolution + validation, shared by the real and fake publish paths.
 
 ``activate_in`` / ``activate_at`` are the user-facing scheduling knobs. Turning them
 into a single ``next_attempt_at`` (client clock) and deciding whether a row is

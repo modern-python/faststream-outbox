@@ -1,5 +1,4 @@
-"""
-Internal response publisher for handlers that ``return OutboxResponse(...)``.
+"""Internal response publisher for handlers that ``return OutboxResponse(...)``.
 
 Wired up by ``OutboxSubscriber._make_response_publisher``. The
 ``isinstance(cmd, OutboxPublishCommand)`` gate is load-bearing: plain handler

@@ -1,5 +1,4 @@
-"""
-Public surface for the outbox FastAPI integration.
+"""Public surface for the outbox FastAPI integration.
 
 Mirrors ``faststream.kafka.fastapi``: the router and the ``Annotated[..., Context(...)]``
 shortcuts handlers will reference. Import from this module when wiring an outbox

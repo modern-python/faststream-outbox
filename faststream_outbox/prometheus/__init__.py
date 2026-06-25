@@ -1,5 +1,4 @@
-"""
-Native Prometheus integration for the outbox broker.
+"""Native Prometheus integration for the outbox broker.
 
 Mirrors upstream FastStream's ``faststream/<broker>/prometheus/`` directory
 convention. Use this when you want consume / publish counters + duration

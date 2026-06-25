@@ -1,5 +1,4 @@
-"""
-``OutboxPublisher`` — typed, queue-scoped handle around ``broker.publish``.
+"""``OutboxPublisher`` — typed, queue-scoped handle around ``broker.publish``.
 
 The publisher is intentionally **not** usable as a relay decorator on a
 subscriber (``__call__`` raises). The dispatch flow that would invoke
@@ -76,8 +75,7 @@ class OutboxPublisher(PublisherUsecase):
         activate_at: _dt.datetime | None = None,
         timer_id: str | None = None,
     ) -> int | None:
-        """
-        Insert one outbox row scoped to this publisher's queue.
+        """Insert one outbox row scoped to this publisher's queue.
 
         Same transactional contract as :meth:`OutboxBroker.publish`: runs on the
         caller's session and commits with their transaction. Static *headers* on

@@ -1,5 +1,4 @@
-"""
-Outbox message representations.
+"""Outbox message representations.
 
 ``OutboxInnerMessage`` is the in-memory mirror of a row claimed by the fetch loop.
 Its ``ack``/``nack``/``reject`` methods only mutate in-memory intent — the actual
@@ -39,8 +38,7 @@ DLQFailureReason = Literal["max_deliveries", "retry_terminal", "rejected"]
 
 @dataclass(kw_only=True)
 class OutboxInnerMessage:
-    """
-    In-memory copy of a claimed outbox row, plus ack/nack/reject intent helpers.
+    """In-memory copy of a claimed outbox row, plus ack/nack/reject intent helpers.
 
     The ack/nack/reject methods set in-memory intent flags (``to_delete``,
     ``pending_delay_seconds``). The worker loop reads those flags and issues the
@@ -165,8 +163,7 @@ class OutboxInnerMessage:
         return True
 
     async def assert_state_set(self, logger: "LoggerProto | None") -> None:
-        """
-        Fallback when the consume pipeline returned without recording ack/nack/reject intent.
+        """Fallback when the consume pipeline returned without recording ack/nack/reject intent.
 
         Two distinct shapes land here:
 

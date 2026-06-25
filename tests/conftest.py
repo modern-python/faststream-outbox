@@ -27,8 +27,7 @@ async def pg_engine() -> AsyncIterator[AsyncEngine]:
 
 @pytest.fixture
 async def outbox_table(pg_engine: AsyncEngine) -> AsyncIterator[Table]:
-    """
-    Per-test outbox table.
+    """Per-test outbox table.
 
     The partial fetch index is declared on the Table itself, so ``create_all``
     brings it up alongside the table.

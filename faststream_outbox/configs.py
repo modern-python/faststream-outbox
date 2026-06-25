@@ -1,5 +1,4 @@
-"""
-Broker config for the outbox transport.
+"""Broker config for the outbox transport.
 
 The user owns the ``AsyncEngine``; the broker never closes it. The engine is
 stored on ``OutboxBrokerConfig`` so the broker can hand the same reference to its

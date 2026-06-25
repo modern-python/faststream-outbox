@@ -63,8 +63,7 @@ class OutboxRoute(SubscriberRoute):
 
 
 class OutboxRouter(OutboxRegistrator, BrokerRouter[OutboxInnerMessage, OutboxBrokerConfig]):
-    """
-    Includable router for ``OutboxBroker``.
+    """Includable router for ``OutboxBroker``.
 
     Use it to register subscribers in a separate module and attach them to the
     broker via ``broker.include_router(router)``. There is no ``prefix`` knob:

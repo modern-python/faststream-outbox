@@ -1,5 +1,4 @@
-"""
-Test broker with an in-memory ``OutboxClient`` substitute.
+"""Test broker with an in-memory ``OutboxClient`` substitute.
 
 ``TestOutboxBroker`` wraps an ``OutboxBroker`` and swaps in a ``FakeOutboxClient``
 backed by a list of ``_FakeRow`` records. Defaults to **sync dispatch**: ``await broker.publish(...)``
@@ -56,8 +55,7 @@ class _FakeRow:
 
 
 def _claim_fake_row(row: _FakeRow, *, now: _dt.datetime, token: uuid.UUID) -> None:
-    """
-    Set the lease and bump ``deliveries_count`` — the shared claim mechanics (F1-08).
+    """Set the lease and bump ``deliveries_count`` — the shared claim mechanics (F1-08).
 
     Both ``FakeOutboxClient.fetch`` (loop mode) and ``_sync_dispatch`` (sync mode) route
     through here, so the ``max_deliveries`` boundary is exercised on one path. Eligibility
@@ -258,8 +256,7 @@ def _to_inner(row: _FakeRow) -> OutboxInnerMessage:
 
 
 def _find_subscriber_for_queue(broker: OutboxBroker, queue: str) -> "OutboxSubscriber | None":
-    """
-    First matching subscriber wins (deterministic).
+    """First matching subscriber wins (deterministic).
 
     NB: this does NOT mirror production for *overlapping* subscribers — there, multiple
     subscribers on the same queue compete via ``FOR UPDATE SKIP LOCKED``, so which one
@@ -304,8 +301,7 @@ def _emit_published(broker: OutboxBroker, queue: str, *, count: int, size_bytes:
 
 
 def _notify_subscriber(broker: OutboxBroker, queue: str) -> None:
-    """
-    P30: wake the matching subscriber's fetch loop immediately, mirroring production NOTIFY.
+    """P30: wake the matching subscriber's fetch loop immediately, mirroring production NOTIFY.
 
     Only meaningful in loop mode; callers gate on ``run_loops``. Lets loop-mode tests rely
     on prompt wakeup instead of a tight ``min_fetch_interval`` poll.
@@ -352,8 +348,7 @@ async def _fake_publish_many(
     next_at: "_dt.datetime | None",
     run_loops: bool,
 ) -> None:
-    """
-    Shared batch insert for both batch paths (P29).
+    """Shared batch insert for both batch paths (P29).
 
     S5: insert the WHOLE batch, emit ``published``, then dispatch — mirroring production
     (atomic batch INSERT -> published -> subscriber fetch), so a handler never observes a
@@ -376,8 +371,7 @@ async def _fake_publish_many(
 
 
 class FakeOutboxProducer:
-    """
-    In-memory ``OutboxProducer`` substitute routing inserts through ``FakeOutboxClient``.
+    """In-memory ``OutboxProducer`` substitute routing inserts through ``FakeOutboxClient``.
 
     Used by ``TestOutboxBroker`` so ``broker.publisher(queue).publish(body, session=...)``
     drives the same in-memory fake store as ``broker.publish(body, session=...)``. The
@@ -565,8 +559,7 @@ def _build_fake_fetch_unprocessed(
 
 
 class TestOutboxBroker(TestBroker[OutboxBroker, OutboxBroker]):  # ty: ignore[invalid-type-arguments]
-    """
-    Test harness for ``OutboxBroker``. Two dispatch modes.
+    """Test harness for ``OutboxBroker``. Two dispatch modes.
 
     Default (``run_loops=False``): ``broker.publish`` synchronously drives the matching
     subscriber's consume pipeline, so handlers run before ``publish`` returns. Matches the

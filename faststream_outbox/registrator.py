@@ -21,8 +21,7 @@ if TYPE_CHECKING:
 
 
 def _default_retry_strategy() -> "RetryStrategyProto":
-    """
-    Fallback retry policy when the user passes nothing.
+    """Fallback retry policy when the user passes nothing.
 
     An outbox is a reliability primitive; defaulting to "delete on first error" turns
     every transient handler failure into silent data loss. Defaulting to a bounded
@@ -108,8 +107,7 @@ class OutboxRegistrator(Registrator[OutboxInnerMessage, "OutboxBrokerConfig"]): 
         schema: Any | None = None,
         include_in_schema: bool = True,
     ) -> OutboxPublisher:
-        """
-        Construct a queue-scoped publisher.
+        """Construct a queue-scoped publisher.
 
         The publisher is standalone-only — call ``await pub.publish(body, session=session)``
         from inside your own transaction. Attempting to use it as a relay decorator on a

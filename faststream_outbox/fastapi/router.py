@@ -1,5 +1,4 @@
-"""
-FastAPI integration for the outbox transport.
+"""FastAPI integration for the outbox transport.
 
 ``OutboxRouter`` is a thin subclass of FastStream's ``StreamRouter`` (which is
 itself an ``APIRouter``). Mounting the router into a FastAPI app via

@@ -1,5 +1,4 @@
-"""
-Outbox subclass of FastStream's ``TelemetryMiddleware``.
+"""Outbox subclass of FastStream's ``TelemetryMiddleware``.
 
 Register via ``broker_middlewares=[...]`` to get spans + meters wrapping
 ``publish_scope`` and ``consume_scope`` — same registration pattern as the

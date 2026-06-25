@@ -1,5 +1,4 @@
-"""
-Tests for the FastAPI integration (``faststream_outbox.fastapi.OutboxRouter``).
+"""Tests for the FastAPI integration (``faststream_outbox.fastapi.OutboxRouter``).
 
 Exercises the canonical lifecycle: build a FastAPI app, mount the router,
 publish through the router's inner broker, and verify subscribers fire. The
@@ -78,8 +77,7 @@ async def test_subscriber_registered_via_outbox_router_runs_when_published() -> 
 
 
 def test_subscriber_misconfig_warning_attributed_to_user_via_fastapi_router() -> None:
-    """
-    P27: through the FastAPI router (extra frames) the misconfig warning points at the user's call site.
+    """P27: through the FastAPI router (extra frames) the misconfig warning points at the user's call site.
 
     Old static ``stacklevel=4`` landed on a faststream-internal frame on this path; the
     ``skip_file_prefixes`` attribution lands on the user's ``@router.subscriber(...)`` line.
@@ -212,8 +210,7 @@ async def test_outbox_router_publisher_delegates_to_broker() -> None:
 
 
 async def test_fastapi_handler_chains_via_outbox_response_with_per_delivery_session() -> None:
-    """
-    Exercise the transactional contract end-to-end through the FastAPI wrapper.
+    """Exercise the transactional contract end-to-end through the FastAPI wrapper.
 
     The Depends-resolved session flows into the chained OutboxResponse, and each delivery
     resolves its own fresh session (session-per-delivery).

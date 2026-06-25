@@ -17,8 +17,7 @@ def _encode_payload(
     correlation_id: str | None = None,
     serializer: "SerializerProto | None" = None,
 ) -> tuple[bytes, dict[str, str]]:
-    """
-    Serialize *body* into ``(payload_bytes, headers_dict)`` for an outbox row.
+    """Serialize *body* into ``(payload_bytes, headers_dict)`` for an outbox row.
 
     *body* may be ``bytes``, a pydantic model, a dataclass, a ``dict``, or any value
     FastStream's ``encode_message`` accepts. *correlation_id* is auto-generated if

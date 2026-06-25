@@ -1,5 +1,4 @@
-"""
-OpenTelemetry meter adapter for the ``MetricsRecorder`` seam.
+"""OpenTelemetry meter adapter for the ``MetricsRecorder`` seam.
 
 Instrument names, units, attribute keys, and constructor argument names mirror
 ``faststream.opentelemetry.TelemetryMiddleware`` (meter side). No ``outbox``
@@ -69,8 +68,7 @@ _ATTR_DLQ_REASON = "messaging.outbox.dlq_reason"
 
 
 class OpenTelemetryRecorder:
-    """
-    Drop-in OpenTelemetry meter adapter for ``MetricsRecorder``.
+    """Drop-in OpenTelemetry meter adapter for ``MetricsRecorder``.
 
     Args:
         meter_provider: optional. Defaults to the globally configured meter
