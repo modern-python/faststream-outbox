@@ -2,7 +2,7 @@
 status: shipped
 date: 2026-06-19
 slug: docs-diataxis-nav
-spec: docs-diataxis-nav
+spec: design.md
 pr: 104
 ---
 

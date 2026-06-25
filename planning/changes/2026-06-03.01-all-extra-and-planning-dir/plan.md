@@ -2,7 +2,7 @@
 status: shipped
 date: 2026-06-03
 slug: all-extra-and-planning-dir
-spec: all-extra-and-planning-dir
+spec: design.md
 pr: "41"
 ---
 

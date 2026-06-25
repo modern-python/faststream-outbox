@@ -2,7 +2,7 @@
 status: shipped
 date: 2026-06-13
 slug: portable-planning-convention
-spec: portable-planning-convention
+spec: design.md
 pr: "77"
 ---
 

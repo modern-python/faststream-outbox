@@ -2,7 +2,7 @@
 status: shipped
 date: 2026-06-09
 slug: mkdocs-github-pages
-spec: mkdocs-github-pages
+spec: design.md
 pr: "45"
 ---
 

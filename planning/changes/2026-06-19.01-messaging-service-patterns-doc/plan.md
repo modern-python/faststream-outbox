@@ -2,7 +2,7 @@
 status: shipped
 date: 2026-06-19
 slug: messaging-service-patterns-doc
-spec: messaging-service-patterns-doc
+spec: design.md
 pr: 103
 ---
 

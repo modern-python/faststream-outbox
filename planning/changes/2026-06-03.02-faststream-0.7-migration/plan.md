@@ -2,7 +2,7 @@
 status: shipped
 date: 2026-06-03
 slug: faststream-0.7-migration
-spec: faststream-0.7-migration
+spec: design.md
 pr: "42"
 ---
 

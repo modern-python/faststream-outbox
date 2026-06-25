@@ -2,7 +2,7 @@
 status: shipped
 date: 2026-06-20
 slug: flat-changes-generated-index
-spec: flat-changes-generated-index
+spec: design.md
 pr: 105
 ---
 

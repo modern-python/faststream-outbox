@@ -93,6 +93,10 @@ max-args = 15
     "S101", # allow asserts
     "PLR2004", # allow magic values
 ]
+# planning/index.py is vendored verbatim from lesnik512/planning-convention and
+# linted in that repo's CI; its file-level noqa is tuned for the canonical D212
+# docstring choice, which this repo inverts (D213), so tolerate the unused noqa.
+"planning/index.py" = ["RUF100"]
 
 [tool.pytest.ini_options]
 addopts = "--cov=. --cov-report term-missing --cov-fail-under=100"

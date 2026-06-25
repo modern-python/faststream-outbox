@@ -2,7 +2,7 @@
 status: shipped
 date: 2026-06-04
 slug: foreign-broker-relay
-spec: foreign-broker-relay
+spec: design.md
 pr: "44"
 ---
 

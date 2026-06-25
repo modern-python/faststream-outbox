@@ -2,7 +2,7 @@
 status: shipped
 date: 2026-06-10
 slug: docs-landing-and-comparison
-spec: docs-landing-and-comparison
+spec: design.md
 pr: "50"
 ---
 

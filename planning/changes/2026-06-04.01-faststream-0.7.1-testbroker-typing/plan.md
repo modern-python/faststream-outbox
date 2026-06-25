@@ -2,7 +2,7 @@
 status: shipped
 date: 2026-06-04
 slug: faststream-0.7.1-testbroker-typing
-spec: faststream-0.7.1-testbroker-typing
+spec: design.md
 pr: "43"
 ---
 

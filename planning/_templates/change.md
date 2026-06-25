@@ -1,12 +1,8 @@
 ---
-status: draft
 date: YYYY-MM-DD
 slug: my-change
-summary: One line — shown in the generated index. Fill when creating the change.
-supersedes: null
-superseded_by: null
-pr: null
-outcome: null
+summary: One line — shown in the generated index. Fill at ship time.
+outcome: Realized result — filled at ship time (~1–3 sentences); see README "Frontmatter".
 ---
 
 # Change: One-line capitalized title

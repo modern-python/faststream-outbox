@@ -2,7 +2,7 @@
 status: shipped
 date: 2026-06-09
 slug: drain-test-flaky-fetch-observation
-spec: drain-test-flaky-fetch-observation
+spec: design.md
 pr: "48"
 ---
 

@@ -2,7 +2,7 @@
 status: shipped
 date: 2026-06-11
 slug: docs-tutorials-and-observability-split
-spec: docs-tutorials-and-observability-split
+spec: design.md
 pr: "56"
 ---
 

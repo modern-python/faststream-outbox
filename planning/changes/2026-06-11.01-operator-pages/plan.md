@@ -2,7 +2,7 @@
 status: shipped
 date: 2026-06-11
 slug: operator-pages
-spec: operator-pages
+spec: design.md
 pr: "53"
 ---
 

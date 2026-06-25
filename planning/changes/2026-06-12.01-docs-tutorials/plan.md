@@ -2,7 +2,7 @@
 status: shipped
 date: 2026-06-12
 slug: docs-tutorials
-spec: docs-tutorials
+spec: design.md
 pr: "58"
 ---
 
