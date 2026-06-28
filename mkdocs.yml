@@ -34,8 +34,8 @@ nav:
       - Alembic migrations: operations/alembic.md
 theme:
   name: material
-  logo: assets/modern-python-white.svg
-  favicon: assets/modern-python-mark.svg
+  logo: assets/mark.svg
+  favicon: assets/favicon.svg
   features:
     - content.code.copy
     - content.code.annotate
