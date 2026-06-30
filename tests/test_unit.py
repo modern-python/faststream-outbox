@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from sqlalchemy import MetaData, Table
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from typing_extensions import get_protocol_members
 
 from faststream_outbox import (
     ConstantRetry,
@@ -1198,7 +1199,7 @@ def test_outbox_producer_satisfies_producer_proto() -> None:
     producer = OutboxProducer(table=table, parser=None, decoder=None)
     # Verify all ProducerProto structural members are present (Protocol is not
     # @runtime_checkable so isinstance() raises TypeError; check attrs directly).
-    missing = typing.get_protocol_members(ProducerProto) - set(dir(producer))
+    missing = get_protocol_members(ProducerProto) - set(dir(producer))
     assert not missing, f"OutboxProducer missing ProducerProto attrs: {missing}"
     assert isinstance(producer.codec, DefaultCodec)
 

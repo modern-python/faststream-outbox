@@ -28,6 +28,7 @@ from faststream.specification.schema import BrokerSpec
 from faststream.specification.schema.extra import Tag, TagDict
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from typing_extensions import override
 
 from faststream_outbox.client import AbstractOutboxClient, OutboxClient, _row_to_message
 from faststream_outbox.configs import LastExceptionRenderer, OutboxBrokerConfig
@@ -201,7 +202,7 @@ class OutboxBroker(
             raise RuntimeError(msg)
         return client
 
-    @typing.override
+    @override
     async def _connect(self) -> "AsyncEngine":
         engine = self.config.broker_config.engine
         if engine is None:
@@ -209,7 +210,7 @@ class OutboxBroker(
             raise IncorrectState(msg)
         return engine
 
-    @typing.override
+    @override
     async def __aenter__(self) -> typing.Self:
         # Upstream equivalent (replaced):
         #   BrokerUsecase.__aenter__ -> faststream/_internal/broker/broker.py
@@ -219,7 +220,7 @@ class OutboxBroker(
         await self.start()
         return self
 
-    @typing.override
+    @override
     async def start(self) -> None:
         await self.connect()
         await super().start()
@@ -290,7 +291,7 @@ class OutboxBroker(
                         queues,
                     )
 
-    @typing.override
+    @override
     async def stop(self, *_args: object, **_kwargs: object) -> None:
         # Concurrent subscriber stop. Sequential parent stop (BrokerUsecase.stop's
         # ``for sub in subscribers: await sub.stop()``) would give a total bound of
@@ -332,7 +333,7 @@ class OutboxBroker(
                 exc_info=exc,
             )
 
-    @typing.override
+    @override
     async def ping(self, timeout: float | None = None) -> bool:
         # ``move_on_after(None)`` is an unbounded scope, so threading the caller's
         # timeout keeps the historical "wait forever" default while honoring a bound

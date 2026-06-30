@@ -14,6 +14,7 @@ from faststream.exceptions import NackMessage
 from faststream.middlewares import AckPolicy
 from sqlalchemy import MetaData
 from sqlalchemy.ext.asyncio import AsyncSession
+from typing_extensions import get_protocol_members
 
 from faststream_outbox import (
     ConstantRetry,
@@ -79,7 +80,7 @@ def test_fake_outbox_producer_satisfies_producer_proto() -> None:
     broker = _make_broker()
     fc = FakeOutboxClient()
     fp = FakeOutboxProducer(fc, broker, serializer=None, run_loops=False)
-    missing = typing.get_protocol_members(ProducerProto) - set(dir(fp))
+    missing = get_protocol_members(ProducerProto) - set(dir(fp))
     assert not missing, f"FakeOutboxProducer missing ProducerProto attrs: {missing}"
     assert fp.codec is None
 

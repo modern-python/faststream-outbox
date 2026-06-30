@@ -1,10 +1,11 @@
 import warnings
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, override
+from typing import TYPE_CHECKING, Any
 
 from faststream._internal.broker.registrator import Registrator
 from faststream._internal.types import CustomCallable
 from faststream.middlewares import AckPolicy
+from typing_extensions import override
 
 from faststream_outbox.message import OutboxInnerMessage
 from faststream_outbox.publisher.factory import create_publisher
