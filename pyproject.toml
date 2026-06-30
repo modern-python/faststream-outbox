@@ -6,12 +6,14 @@ authors = [
     { name = "Artur Shiriev", email = "me@shiriev.ru" },
 ]
 readme = "README.md"
-requires-python = ">=3.13,<4"
+requires-python = ">=3.11,<4"
 license = "MIT"
 keywords = ["faststream", "outbox", "transactional-outbox", "postgresql", "messaging", "asyncio", "python"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Typing :: Typed",
@@ -20,6 +22,7 @@ classifiers = [
 dependencies = [
     "faststream>=0.7.1,<0.8",
     "sqlalchemy[asyncio]>=2.0",
+    "typing-extensions>=4.12.0",
 ]
 
 [project.optional-dependencies]
@@ -62,7 +65,7 @@ module-root = ""
 fix = true
 unsafe-fixes = true
 line-length = 120
-target-version = "py313"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["ALL"]

@@ -36,6 +36,7 @@ from faststream.exceptions import StopConsume, SubscriberNotFound
 from faststream.response.utils import ensure_response
 from faststream.specification.asyncapi.utils import resolve_payloads
 from faststream.specification.schema import Message, Operation, SubscriberSpec
+from typing_extensions import override
 
 from faststream_outbox.message import OutboxInnerMessage
 from faststream_outbox.parser.parser import OutboxParser
@@ -229,7 +230,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                 exc_info=exc,
             )
 
-    @typing.override
+    @override
     async def start(self) -> None:
         await super().start()
         # Clear the drain flag so a stop()->start() cycle fetches again. Without
@@ -244,7 +245,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             self.add_task(self._worker_loop)
         self.add_task(self._fetch_loop)
 
-    @typing.override
+    @override
     async def stop(self) -> None:
         # Strict-bound drain. We intentionally DON'T call super().stop() because
         # SubscriberUsecase.stop's MultiLock.wait_release(graceful_timeout) would
@@ -801,11 +802,11 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             return False
         return True
 
-    @typing.override
+    @override
     async def get_one(self, *, timeout: float = 5.0) -> typing.NoReturn:
         raise NotImplementedError(_UNSUPPORTED_PEEK_MSG)
 
-    @typing.override
+    @override
     async def __aiter__(self) -> AsyncIterator["StreamMessage[OutboxInnerMessage]"]:
         # Native FakeStream subscribers (e.g. redis ListSubscriber.__aiter__) implement
         # this against a blocking pop; for the outbox, a true peek would acquire a lease
@@ -815,7 +816,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         # the override stays a coroutine returning AsyncIterator (not an async generator).
         raise NotImplementedError(_UNSUPPORTED_PEEK_MSG)
 
-    @typing.override
+    @override
     async def consume(self, msg: OutboxInnerMessage) -> typing.Any:
         """Override to propagate ``_OutboxConfigError`` from programming guards.
 
@@ -865,7 +866,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         # Safe to ignore — those methods are unreachable for response publishers.
         return (OutboxFakePublisher(producer=self._outer_config.producer),)  # ty: ignore[invalid-return-type]
 
-    @typing.override
+    @override
     async def process_message(self, msg: OutboxInnerMessage) -> "Response":  # noqa: C901
         """Outbox-specific process_message — header propagation (G3) hook.
 

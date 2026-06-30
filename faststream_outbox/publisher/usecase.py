@@ -10,10 +10,10 @@ handler on the same session that owns the inbound row's terminal write.
 
 import datetime as _dt
 import typing
-from typing import override
 
 from faststream._internal.endpoint.publisher import PublisherUsecase
 from sqlalchemy.ext.asyncio import AsyncSession
+from typing_extensions import override
 
 from faststream_outbox.publisher.config import OutboxPublisherConfig
 from faststream_outbox.publisher.specification import OutboxPublisherSpecification
