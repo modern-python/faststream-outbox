@@ -1,4 +1,10 @@
-# faststream-outbox
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)"  srcset="https://raw.githubusercontent.com/modern-python/.github/main/brand/projects/faststream-outbox/lockup-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/modern-python/.github/main/brand/projects/faststream-outbox/lockup-light.svg">
+    <img alt="faststream-outbox" src="https://raw.githubusercontent.com/modern-python/.github/main/brand/projects/faststream-outbox/lockup.png" width="420">
+  </picture>
+</p>
 
 [![PyPI version](https://img.shields.io/pypi/v/faststream-outbox.svg)](https://pypi.org/project/faststream-outbox/)
 [![Supported Python versions](https://img.shields.io/pypi/pyversions/faststream-outbox.svg)](https://pypi.org/project/faststream-outbox/)
