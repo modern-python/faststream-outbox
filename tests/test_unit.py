@@ -1519,6 +1519,11 @@ async def test_broker_ping_honors_timeout_when_probe_hangs() -> None:
         return True  # pragma: no cover - move_on_after cancels the sleep before this returns
 
     broker.config.broker_config.client.ping = _hang  # type: ignore[union-attr]
+    # Run the probe in a child task so move_on_after's cancellation unwinds through
+    # the child frame, not this one. On Python 3.11 a cancellation that unwinds
+    # through the test frame makes coverage.py's C tracer drop the frame's trace
+    # function, leaving the assert below reported as uncovered (99% < 100% gate)
+    # even though it runs and passes. 3.12+ (sys.monitoring) is unaffected.
     result = await asyncio.create_task(broker.ping(timeout=0.05))
     assert result is False
 
