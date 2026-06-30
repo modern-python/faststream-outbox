@@ -18,11 +18,18 @@ minus a PEP 695 type-alias edit that outbox does not need.
 
 The 3.13 floor is stricter than the code requires and excludes the large share
 of users still on 3.11/3.12. Empirical scan of the source against a real
-CPython 3.11.9 interpreter shows the gap is a single backportable construct:
+CPython 3.11.9 interpreter shows the gap is two backportable `typing` symbols,
+both reachable via `typing_extensions`:
 
-| Construct | Locations | 3.12+ | 3.11 |
-|-----------|-----------|-------|------|
-| `override` (from `typing`) | `broker.py` (`@typing.override` ×5), `subscriber/usecase.py` (`@typing.override` ×6), `registrator.py:3` (`from typing import ..., override`), `publisher/usecase.py:13` (`from typing import override`) | OK | `ImportError` / `AttributeError` |
+| Symbol | Since | Locations | 3.11 |
+|--------|-------|-----------|------|
+| `override` | 3.12 | `broker.py` (`@typing.override` ×5), `subscriber/usecase.py` (`@typing.override` ×6), `registrator.py:3` (`from typing import ..., override`), `publisher/usecase.py:13` (`from typing import override`) | `ImportError` / `AttributeError` |
+| `get_protocol_members` | 3.13 | `tests/test_fake.py`, `tests/test_unit.py` (protocol-completeness assertions) | `AttributeError` |
+
+(The `get_protocol_members` use lives in the test suite, which also runs under
+the floor on the CI matrix; `ty` surfaced it once the floor dropped. Both
+symbols are rerouted through `typing_extensions` by the same unconditional
+import; neither requires `sys.version_info` gating.)
 
 Confirmed non-issues (verified, not assumed):
 
