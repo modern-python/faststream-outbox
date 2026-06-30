@@ -8,7 +8,7 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/faststream-outbox.svg)](https://pypi.org/project/faststream-outbox/)
 [![Supported Python versions](https://img.shields.io/pypi/pyversions/faststream-outbox.svg)](https://pypi.org/project/faststream-outbox/)
-[![Downloads](https://img.shields.io/pypi/dm/faststream-outbox.svg)](https://pypistats.org/packages/faststream-outbox)
+[![Downloads](https://static.pepy.tech/badge/faststream-outbox/month)](https://pepy.tech/projects/faststream-outbox)
 [![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen.svg)](https://github.com/modern-python/faststream-outbox/actions/workflows/ci.yml)
 [![CI](https://github.com/modern-python/faststream-outbox/actions/workflows/ci.yml/badge.svg)](https://github.com/modern-python/faststream-outbox/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/modern-python/faststream-outbox.svg)](https://github.com/modern-python/faststream-outbox/blob/main/LICENSE)
