@@ -1519,7 +1519,7 @@ async def test_broker_ping_honors_timeout_when_probe_hangs() -> None:
         return True  # pragma: no cover - move_on_after cancels the sleep before this returns
 
     broker.config.broker_config.client.ping = _hang  # type: ignore[union-attr]
-    result = await broker.ping(timeout=0.05)
+    result = await asyncio.create_task(broker.ping(timeout=0.05))
     assert result is False
 
 
