@@ -1,4 +1,11 @@
-# faststream-outbox
+<div class="mp-hero" markdown>
+
+<h1 class="mp-lockup">
+<img class="mp-logo mp-logo--light" src="assets/lockup-light.svg" alt="faststream-outbox">
+<img class="mp-logo mp-logo--dark" src="assets/lockup-dark.svg" alt="" aria-hidden="true">
+</h1>
+
+</div>
 
 `faststream-outbox` is a [FastStream](https://faststream.airt.ai) broker
 integration for the **transactional outbox pattern** — a Postgres table is
