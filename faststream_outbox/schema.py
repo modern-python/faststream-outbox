@@ -88,8 +88,12 @@ def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table
     The user wires the returned table into their own SQLAlchemy ``MetaData`` so it is
     discovered by Alembic's autogenerate. They are responsible for the actual migration.
 
-    Raises ``ValueError`` if *table_name* would push the NOTIFY channel
-    ``outbox_<table_name>`` past Postgres' 63-byte identifier limit (NAMEDATALEN-1).
+    Raises ``ValueError`` if *table_name* would push any derived identifier past
+    Postgres' 63-byte limit (NAMEDATALEN-1). The binding identifier is the longest
+    one derived — usually an index/constraint name (``<table_name>_pending_idx``,
+    ``<table_name>_timer_id_uq``), which is longer than the NOTIFY channel
+    ``outbox_<table_name>``, so a name that fits the channel can still overflow an
+    index name. See ``validate_table_identifiers``.
     """
     validate_table_identifiers(table_name)
     table = Table(
