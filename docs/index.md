@@ -43,12 +43,15 @@ process, no Kafka.
 
 | If you want to… | Start at |
 |---|---|
+| Install and write the first publisher / subscriber | [Installation](introduction/installation.md) → [Tutorial: Your first outbox app](tutorials/first-outbox-app.md) |
 | See it work end-to-end on a FastAPI app | [FastAPI integration](usage/fastapi.md) |
 | Relay outbox rows to Kafka / RabbitMQ / NATS / Redis | [Relay to Kafka / RabbitMQ / NATS](usage/relay.md) |
 | Understand the architecture before adopting | [How it works](introduction/how-it-works.md) |
 | Compare against CDC / Kafka transactions / a hand-rolled outbox | [Comparison](concepts/comparison.md) |
 | Deploy to production safely | [Production checklist](operations/checklist.md) |
-| Install and write the first publisher / subscriber | [Installation](introduction/installation.md) → [Tutorial: Your first outbox app](tutorials/first-outbox-app.md) |
+
+The categorized index below (also the left-hand nav) lists every page with a
+one-line summary.
 
 ## Documentation
 

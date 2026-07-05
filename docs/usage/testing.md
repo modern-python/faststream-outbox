@@ -37,23 +37,38 @@ async def test_handler() -> None:
     assert received == [1]
 ```
 
-In sync mode, `session=` is optional — the test broker patches
-`broker.publish` to ignore it. The fake client keeps an in-memory list of
-rows you can inspect via `fake_client.rows` — but `fake_client` is an
-attribute of the `TestOutboxBroker` harness, not the broker, so bind the
-harness to a name:
+On `broker.publish` (and `publish_batch`), `session=` is optional in tests —
+the test broker patches those methods to ignore it. This does **not** extend
+to `broker.publisher("q").publish(...)`, which still requires a `session`
+(see [Testing publishers](#testing-publishers) below).
+
+The fake client keeps an in-memory list of rows you can inspect via
+`fake_client.rows` — but `fake_client` is an attribute of the
+`TestOutboxBroker` harness, not the broker, so bind the harness to a name:
 
 ```python
 tb = TestOutboxBroker(broker)
 async with tb:
-    await broker.publish(1, queue="orders")
+    # "orders" has a subscriber, so in sync mode the row is dispatched and
+    # acked (deleted) before publish returns. Publish to a queue with no
+    # subscriber to inspect a row that survives.
+    await broker.publish(1, queue="audit")
 
 assert len(tb.fake_client.rows) == 1
 ```
 
+An unconsumed queue is used deliberately: a row published to a queue that
+*has* a subscriber is dispatched and deleted on ack within `publish`, so
+`fake_client.rows` would be empty (`[]`) for it, not length 1.
+
 ## Testing publishers
 
 ```python
+from unittest.mock import AsyncMock
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+
 async def test_publisher() -> None:
     metadata = MetaData()
     outbox_table = make_outbox_table(metadata, table_name="outbox")
@@ -67,15 +82,21 @@ async def test_publisher() -> None:
     pub = broker.publisher("orders")
 
     async with TestOutboxBroker(broker):
-        await pub.publish({"order_id": 1})
+        # The publisher path builds its publish command (which validates the
+        # session type) before the fake producer is reached, so session= is
+        # required and must be an AsyncSession. The fake never touches it — a
+        # spec'd mock satisfies the check.
+        await pub.publish({"order_id": 1}, session=AsyncMock(spec=AsyncSession))
 
     assert received == [{"order_id": 1}]
 ```
 
-`broker.publisher("q").publish(...)` works identically to
+`broker.publisher("q").publish(...)` lands rows in the same fake store as
 `broker.publish(queue="q", ...)` — the test broker swaps the producer slot
-for a `FakeOutboxProducer` that lands rows in the same fake store via the
-FastStream `_basic_publish` flow.
+for a `FakeOutboxProducer` via the FastStream `_basic_publish` flow. The one
+difference in tests is the `session`: `broker.publish` is patched to make it
+optional, but the publisher path is not, so pass a (mock) `AsyncSession` as
+shown.
 
 ## Loop-driven mode
 
@@ -87,6 +108,10 @@ delays — opt in with `run_loops=True`:
 import asyncio
 import json
 
+# `broker` is built exactly as in the Basic test above:
+#   metadata = MetaData()
+#   outbox_table = make_outbox_table(metadata, table_name="outbox")
+#   broker = OutboxBroker(None, outbox_table=outbox_table)
 received: list[dict] = []
 
 

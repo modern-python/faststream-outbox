@@ -22,7 +22,7 @@
 
 ## Requirements
 
-- Python 3.13+
+- Python 3.11+
 - PostgreSQL 12+ — the features used (partial indexes, `FOR UPDATE SKIP
   LOCKED`, `make_interval`, `pg_notify`) all predate 12. The examples and
   CI run on 17; that is what's exercised, so 17 is the safest choice if

@@ -30,6 +30,7 @@ op.create_table('outbox',
     sa.Column('acquired_at', sa.DateTime(timezone=True), nullable=True),
     sa.Column('acquired_token', sa.Uuid(), nullable=True),
     sa.Column('timer_id', sa.String(length=255), nullable=True),
+    sa.CheckConstraint('(acquired_token IS NULL) = (acquired_at IS NULL)', name='outbox_lease_ck'),
     sa.PrimaryKeyConstraint('id')
 )
 op.create_index('outbox_lease_idx', 'outbox', ['queue', 'acquired_at'], unique=False,
@@ -63,9 +64,18 @@ Columns the operator can mostly ignore: `attempts_count` and
 `last_attempt_at` (debugging aids on retry-heavy rows). All four are
 maintained by the broker; no application code touches them.
 
+The `outbox_lease_ck` CHECK (`(acquired_token IS NULL) = (acquired_at
+IS NULL)`) is equally load-bearing: it enforces that a row's lease token
+and lease timestamp are always set or cleared together, so a half-written
+lease can never exist. Autogenerate renders it here **only because this is
+a fresh `create_table`** — on an incremental migration onto a pre-existing
+table Alembic has no check-constraint comparator and would ship a missing
+or drifted CHECK silently (that gap is what
+[`validate_schema()`](../usage/schema-validation.md) backstops).
+
 The `# please adjust!` comment from Alembic is misleading here —
-**don't adjust**. The column types, predicates, and indexes are
-exactly what the broker depends on. The
+**don't adjust**. The column types, the CHECK, the predicates, and the
+indexes are exactly what the broker depends on. The
 [`validate_schema()`](../usage/schema-validation.md) check — when you wire
 it into a `/health` probe or CI gate — fails when the live DB drifts from
 this declaration. (It is opt-in; it never runs at `broker.start()`.)

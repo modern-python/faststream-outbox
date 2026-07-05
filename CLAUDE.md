@@ -40,7 +40,7 @@ The package wires a FastStream `Broker`/`Registrator`/`Subscriber` trio whose tr
 
 ## Conventions
 
-- Python 3.13+.
+- Python 3.11+.
 - **Never use local/inline imports.** All imports at module top — no `import` inside functions/methods/`if TYPE_CHECKING` exception aside. Tests included. If `# noqa: PLC0415` is the only way to keep an import inline, hoist it instead.
 - `ruff` runs `select = ["ALL"]` with documented ignores in `pyproject.toml`; many `# noqa` are intentional.
 - Type checker is `ty`. Use `# ty: ignore[<rule>]` for intentional escapes.

@@ -15,6 +15,9 @@ For "consume from A → enqueue to B" relay flows, a fourth path is
 available: returning `OutboxResponse(...)` from a handler. See [Chained
 publishing](#chained-publishing) below.
 
+There is no request/reply: the outbox is fire-and-forget, so `broker.request(...)`
+raises `NotImplementedError`.
+
 ## `broker.publish`
 
 ```python
@@ -144,15 +147,18 @@ flow routes the returned value through the producer; the same
 transactional contract applies (you provide the session, the row commits
 with your domain writes):
 
-!!! note "This pattern is FastAPI-specific"
+!!! note "The `session` must outlive the handler return"
     The returned `OutboxResponse` is published **after** the handler
-    returns, so its `session` must outlive the handler call. FastAPI's
-    `Depends(get_session)` provides exactly that — a session torn down by
-    the dependency after the response flow. Opening your own `async with
-    session_factory() as session:` inside the handler does **not** work
-    here: the session closes on `return`, before the row is inserted.
-    Outside FastAPI, call `broker.publish(..., session=session)` directly
-    inside your handler instead (see [§ `broker.publisher`](#not-a-relay-decorator)).
+    returns, so its `session` must still be open at that point. The
+    requirement is about session *lifetime*, not any particular framework:
+    provide the session through a dependency that the framework tears down
+    *after* the response flow — FastAPI's `Depends(get_session)` or
+    FastStream's own `Depends` / `Context` session both do this. Opening
+    your own `async with session_factory() as session:` inside the handler
+    does **not** work here: that session closes on `return`, before the row
+    is inserted — in that case call `broker.publish(..., session=session)`
+    directly inside the `async with` instead (see
+    [§ Not a relay decorator](#not-a-relay-decorator)).
 
 ```python
 from fastapi import Depends

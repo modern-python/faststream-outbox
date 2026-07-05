@@ -24,7 +24,7 @@ await broker.publish(
 # Fire at a specific UTC instant:
 await broker.publish(
     {"x": 1}, queue="orders", session=session,
-    activate_at=dt.datetime(2026, 6, 1, 9, tzinfo=dt.UTC),
+    activate_at=dt.datetime(2027, 6, 1, 9, tzinfo=dt.UTC),
 )
 ```
 
@@ -44,11 +44,15 @@ explicit `ValueError` rather than guessing your intended zone.
 
 ### Server-side vs client-side scheduling
 
-For `publish`, `next_attempt_at` is computed server-side via `now() +
-make_interval(secs => :s)` to stay clock-skew-safe. For `publish_batch`,
-it's client-side (`datetime.now(UTC) + activate_in`) because executemany
-doesn't compose cleanly with column-level SQL expressions, and the few-ms
-drift is harmless for user-supplied scheduling.
+For `publish` with `activate_in`, `next_attempt_at` is computed server-side
+via `now() + make_interval(secs => :s)` to stay clock-skew-safe. With
+`activate_at`, you supply an absolute instant, so it is stored verbatim and
+compared against the *worker's* clock at fetch time — only `activate_in` is
+skew-safe; `activate_at` is as accurate as your producers' and workers'
+clocks agree. For `publish_batch`, `activate_in` is also client-side
+(`datetime.now(UTC) + activate_in`) because executemany doesn't compose
+cleanly with column-level SQL expressions, and the few-ms drift is harmless
+for user-supplied scheduling.
 
 ## Deduplication with `timer_id`
 

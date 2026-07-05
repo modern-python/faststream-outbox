@@ -189,9 +189,14 @@ stack a foreign-broker publisher decorator on the subscriber
 (`@kafka_pub @broker_outbox.subscriber("q")`) and the handler's return
 value is forwarded to the real bus. The outbox row stays the durability
 boundary — the row commits with the domain write, and the relay carries
-at-least-once end to end. If the foreign publish fails, the row is **not**
-nacked through the `retry_strategy`; its lease simply expires and a later
-fetch retries the relay, so a transient bus outage never loses the row.
+at-least-once end to end. Recovery comes from two tiers, so a bus outage
+never loses the row: a **transient blip** is absorbed by the client library
+(e.g. `aiokafka`) — the in-handler publish blocks until the broker returns,
+which the subscriber sees as one slow *successful* publish, no nack; a
+**sustained outage** eventually raises into the handler, which nacks the row
+and hands it to the configured `retry_strategy` to reschedule. (The one path
+that recovers via lease expiry rather than `retry_strategy` is a
+mis-composed publisher chain — see [relay guardrails](../usage/relay.md#what-not-to-do).)
 
 > **Worked end-to-end example → [Relay tutorial](../tutorials/add-kafka-relay.md).**
 

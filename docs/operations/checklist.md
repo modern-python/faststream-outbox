@@ -64,11 +64,14 @@ story.
   `[validate]` extra. Do **not** call at `broker.start()` — that
   would crash-loop on a pending migration. See [Schema validation §
   Where to call it](../usage/schema-validation.md#where-to-call-it).
-- [ ] **Outbox `table_name` short enough for the NOTIFY channel** — the
-  channel name is `outbox_<table_name>`, and `make_outbox_table` raises
-  `ValueError` at table-build time when that exceeds Postgres' 63-**byte**
-  identifier limit. There is no silent truncation or polling fallback — the
-  guard makes an over-long name impossible to ship.
+- [ ] **Outbox `table_name` short enough for every derived identifier** —
+  `make_outbox_table` raises `ValueError` at table-build time when the
+  *longest* identifier it derives exceeds Postgres' 63-**byte** limit. That
+  longest identifier is usually an index/constraint name
+  (`<table_name>_pending_idx`, `<table_name>_timer_id_uq`), which is longer
+  than the NOTIFY channel `outbox_<table_name>` — so a name that fits the
+  channel can still overflow an index name. There is no silent truncation or
+  polling fallback; the guard makes an over-long name impossible to ship.
 
 ## Observability
 

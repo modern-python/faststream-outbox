@@ -241,7 +241,9 @@ the durability boundary, and it stays in the table for the duration of the
 retry budget (the default `ExponentialRetry` allows 10 attempts). Once the
 budget is exhausted the row is deleted — the default configures no DLQ — so
 configure a longer `retry_strategy` or a `dlq_table` to survive outages
-beyond that (with the default schedule, ~13–14 minutes).
+beyond that (the default schedule spans roughly 8-9 minutes: nine backoffs
+of 1, 2, 4, … 256 seconds sum to ~8.5 minutes before the 10th attempt is
+terminal).
 
 In practice, `aiokafka`'s producer has its own client-side reconnect
 and retry logic, so a short Kafka outage usually completes from the

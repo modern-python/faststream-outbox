@@ -9,7 +9,7 @@ print it.
 
 ## Before you start
 
-- Python 3.13+
+- Python 3.11+
 - Docker (for a one-line Postgres container)
 - [uv](https://docs.astral.sh/uv/) for project setup
 - Roughly ten minutes

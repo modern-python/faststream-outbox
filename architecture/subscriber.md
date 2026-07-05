@@ -28,7 +28,7 @@ A subscriber can hold up to `fetch_batch_size + max_workers` leases at once, not
 
 Each subscriber holds `max_workers + 1` SQLAlchemy pool connections steady-state, plus one raw asyncpg connection for `LISTEN`.
 
-- Size the pool for `Σ subscribers × (max_workers + 1)` or startup blocks on checkout. The asyncpg `LISTEN` connection lives outside the pool, so it does not count toward pool sizing.
+- Size the pool for `Σ subscribers × (max_workers + 1)`. Undersizing does **not** block `broker.start()` — `start()` only schedules the loop tasks via `add_task` and returns; instead the fetch/worker loops stall on pool checkout at runtime. The asyncpg `LISTEN` connection lives outside the pool, so it does not count toward pool sizing.
 - Per process, Postgres `max_connections` must cover `replicas × Σ subscribers × (max_workers + 2)`: the `max_workers + 1` pool connections plus the out-of-pool asyncpg `LISTEN` connection. Undersize it and rolling deploys hit `FATAL: too many connections`.
 
 ## NOTIFY semantics
