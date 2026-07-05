@@ -99,13 +99,13 @@ A subscriber owns two async loops: a **fetch** loop claims available rows via a 
 
 The `acquired_token` is the load-bearing invariant: a slow handler whose lease expired and was re-claimed by another worker finds its terminal `DELETE` to be a no-op (the token no longer matches), preventing it from clobbering the new lease holder.
 
-With the `asyncpg` driver, the fetch loop also `LISTEN`s on `outbox_<table>` and `publish` emits `pg_notify(...)`, so idle dispatch latency is sub-100ms instead of up to `max_fetch_interval`.
+With the `asyncpg` driver, the fetch loop also `LISTEN`s on `outbox_<table>` and `publish` emits `pg_notify(...)`, so idle dispatch latency is ~10ms instead of up to `max_fetch_interval`.
 
 See [How it works](https://faststream-outbox.modern-python.org/introduction/how-it-works/) for the full architecture.
 
 ## Optional extras
 
-- `faststream-outbox[asyncpg]` — asyncpg driver (enables `LISTEN/NOTIFY` for sub-100ms idle dispatch)
+- `faststream-outbox[asyncpg]` — asyncpg driver (enables `LISTEN/NOTIFY` for ~10ms idle dispatch)
 - `faststream-outbox[fastapi]` — FastAPI integration via `OutboxRouter`
 - `faststream-outbox[validate]` — Alembic for `broker.validate_schema()`
 - `faststream-outbox[prometheus]` — Prometheus metrics adapter
