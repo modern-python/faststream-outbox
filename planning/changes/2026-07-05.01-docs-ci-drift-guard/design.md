@@ -1,5 +1,5 @@
 ---
-summary: Make mkdocs --strict a PR gate (parallel docs job) with native link/anchor validation, pin docs deps, fix the make_outbox_table 63-byte docstring, and one-time-audit README.
+summary: Made mkdocs --strict a PR gate (parallel docs job) with native link/anchor validation, pinned docs deps (<2 / <10), and fixed the make_outbox_table 63-byte docstring; README audit found no drift (clean).
 ---
 
 # Design: Docs CI drift guard
