@@ -17,8 +17,11 @@ MetricsRecorder = Callable[[str, Mapping[str, Any]], None]
 The default (`_noop_recorder`) lets instrumentation sites call
 unconditionally. The recorder threads through `OutboxBrokerConfig` to:
 
-- The subscriber's seven emission points via `OutboxSubscriber._emit_metric`
-- The producer's single emission point via `OutboxProducer._emit_metric`
+- The subscriber's seven core events via `OutboxSubscriber._emit_metric`
+  (`fetched`, `dispatched`, `acked`, `nacked_retried`, `nacked_terminal`,
+  `lease_lost`, `drain_timeout`), plus a conditional `dlq_written` when a DLQ
+  is configured
+- The producer's single event (`published`) via `OutboxProducer._emit_metric`
 
 ### Bare seam
 

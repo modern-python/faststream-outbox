@@ -83,10 +83,16 @@ Or as a one-shot CI check after running migrations:
 
 ```python
 import asyncio
+
+from sqlalchemy import MetaData
+from sqlalchemy.ext.asyncio import create_async_engine
+
 from faststream_outbox import OutboxBroker, make_outbox_table
 
 
 async def main() -> None:
+    engine = create_async_engine("postgresql+asyncpg://outbox:outbox@localhost/outbox")
+    outbox_table = make_outbox_table(MetaData(), table_name="outbox")
     broker = OutboxBroker(engine, outbox_table=outbox_table)
     await broker.validate_schema()
     print("schema OK")

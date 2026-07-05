@@ -151,6 +151,8 @@ The [DLQ](./dlq.md) and the [metrics-recorder seam](./observability.md)
 `OutboxBroker(...)` — they forward to the inner broker.
 
 ```python
+from faststream_outbox import make_dlq_table  # alongside make_outbox_table
+
 outbox_router = OutboxRouter(
     engine,
     outbox_table=outbox_table,

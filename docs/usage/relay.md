@@ -43,7 +43,7 @@ async def relay(body: dict) -> dict:
     return body
 ```
 
-That's the whole thing. `broker_outbox.publish(body, queue="outbox_queue", session=session)`
+That's the whole thing. `await broker_outbox.publish(body, queue="outbox_queue", session=session)`
 in your domain transaction writes a row; the subscriber dispatches it; the
 handler returns it; the Kafka publisher decorator picks it up and publishes
 to `kafka_topic`. Failure handling, retries, and DLQ are unchanged from
@@ -161,6 +161,8 @@ construction (before lifespan), so it's automatic.
 For the standalone (non-FastAPI) lifecycle, the order is:
 
 ```python
+# kafka_router / outbox_router are constructed exactly as in the FastAPI
+# example above (KafkaRouter(...) / OutboxRouter(...)).
 broker_kafka.include_router(kafka_router)
 broker_outbox.include_router(outbox_router)
 # then start

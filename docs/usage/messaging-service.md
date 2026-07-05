@@ -55,12 +55,18 @@ The broker and routers are wired with a real DI container
 
 ```python title="ioc.py"
 from modern_di import Group, Scope, providers
+from sqlalchemy.ext.asyncio import create_async_engine
 from faststream_outbox import OutboxBroker
 
 from app.tables import OUTBOX_TABLE
 
 
 class Resources(Group):
+    # The caller owns the engine; the broker never disposes it.
+    database_engine = providers.Factory(
+        scope=Scope.APP,
+        creator=lambda: create_async_engine("postgresql+asyncpg://app:app@localhost/app"),
+    )
     outbox_broker = providers.Factory(
         scope=Scope.APP,
         creator=lambda engine: OutboxBroker(engine, outbox_table=OUTBOX_TABLE),
@@ -167,7 +173,9 @@ Register the router on the broker (the `OutboxBroker` built in `ioc.py`) with
 ## Pattern 2 — Fire-unless-cancelled timer
 
 The unread notification is a **delayed** outbox row, armed in the same create
-transaction. `timer_id` makes it idempotent; `activate_in` defers it:
+transaction. `timer_id` deduplicates while a row is live (at most one live
+row per `(queue, timer_id)`, not a global idempotency key); `activate_in`
+defers it:
 
 These two methods live on the same `OutboxEventProducer` from Pattern 1 (shown
 here as a continuation of the class):

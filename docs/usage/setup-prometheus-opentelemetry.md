@@ -126,10 +126,11 @@ and drop the `/metrics` route.
 Instrument names match `faststream.opentelemetry.TelemetryMiddleware` for
 the bus-scope metrics — `messaging.process.duration`,
 `messaging.publish.duration`, and (when `include_messages_counters=True`)
-`messaging.process.messages` / `messaging.publish.messages` — plus three
+`messaging.process.messages` / `messaging.publish.messages` — plus four
 outbox-specific counters the middleware can't emit:
-`messaging.outbox.fetch.batches`, `messaging.outbox.lease_lost`, and
-`messaging.outbox.dlq_written`. Units and constructor args
+`messaging.outbox.fetch.batches`, `messaging.outbox.lease_lost`,
+`messaging.outbox.dlq_written`, and `messaging.outbox.drain_timeout`. Units
+and constructor args
 (`meter_provider`, `meter`, `include_messages_counters`) follow upstream.
 The `messaging.system="outbox"` attribute disambiguates outbox traffic
 from Kafka / Rabbit data on the same instruments.
@@ -154,17 +155,21 @@ observability stack:
 
 ```bash
 pip install 'faststream-outbox[opentelemetry,prometheus]' \
-    opentelemetry-exporter-otlp opentelemetry-exporter-prometheus uvicorn
+    opentelemetry-exporter-otlp uvicorn
 ```
+
+Here OpenTelemetry supplies **spans** (exported to OTLP) and Prometheus
+supplies **all metrics** (two registries scraped over HTTP). The OTel
+middleware runs span-only — its meters would otherwise land on the global
+Prometheus registry, which neither endpoint below exposes, so they are left
+off to avoid a dead, unscraped meter path.
 
 ```python
 # app.py — run with `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
 #                    uvicorn app:app --host 0.0.0.0 --port 8000`
 from faststream.asgi import AsgiFastStream
-from opentelemetry import metrics, trace
+from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-from opentelemetry.exporter.prometheus import PrometheusMetricReader
-from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -184,9 +189,6 @@ tracer_provider = TracerProvider(resource=resource)
 tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
 trace.set_tracer_provider(tracer_provider)
 
-meter_provider = MeterProvider(resource=resource, metric_readers=[PrometheusMetricReader()])
-metrics.set_meter_provider(meter_provider)
-
 # Two registries: the middleware and the recorder both define the same
 # faststream_* consume/publish collectors, so sharing one registry raises
 # "Duplicated timeseries in CollectorRegistry" at broker construction.
@@ -202,8 +204,8 @@ broker = OutboxBroker(
     engine,
     outbox_table=outbox_table,
     middlewares=[
-        # Bus-scope spans + meters around consume_scope / publish_scope.
-        OutboxTelemetryMiddleware(tracer_provider=tracer_provider, meter_provider=meter_provider),
+        # Bus-scope spans around consume_scope / publish_scope (span-only; see note above).
+        OutboxTelemetryMiddleware(tracer_provider=tracer_provider),
         OutboxPrometheusMiddleware(registry=MIDDLEWARE_REGISTRY, app_name="my-outbox-service"),
     ],
     # Outbox-internal events (fetched, lease_lost, terminal reasons, dlq_written)
@@ -226,9 +228,10 @@ app = AsgiFastStream(
 ```
 
 Traces flow to OTLP (Jaeger / Tempo / Honeycomb / collector); the
-middleware's meters land on `/metrics` and the recorder's outbox-internal
-counters on `/metrics/outbox` for Prometheus to scrape — two scrape targets,
-one process.
+Prometheus **middleware's** consume/publish meters land on `/metrics` and the
+**recorder's** outbox-internal counters on `/metrics/outbox` for Prometheus to
+scrape — two scrape targets, one process. (The OTel middleware here
+contributes spans only, per the note above.)
 
 **The two seams overlap on consume/publish series.** Both the middleware
 and the recorder emit the same `faststream_received_*` / `faststream_published_*`

@@ -61,12 +61,14 @@ Three events fire **outside** the handler invocation, with no
 ## What the recorder seam observes naturally
 
 The recorder is a `Callable[[str, Mapping[str, Any]], None]` invoked at
-six core subscriber events (`fetched`, `dispatched`, `acked`,
-`nacked_retried`, `nacked_terminal`, `lease_lost`), a conditional
-`dlq_written` when the DLQ is configured, and one producer event
+seven core subscriber events (`fetched`, `dispatched`, `acked`,
+`nacked_retried`, `nacked_terminal`, `lease_lost`, `drain_timeout`), a
+conditional `dlq_written` when the DLQ is configured, and one producer event
 (`published`). It fires whether or not a handler is in scope:
 
-- All three bus-invisible events above.
+- All four bus-invisible events above: `fetched`, `lease_lost`, the
+  pre-consume `nacked_terminal(reason="max_deliveries")`, and `drain_timeout`
+  (a shutdown-drain overrun, which has no handler scope at all).
 - Plus `acked` / `nacked_retried` / `nacked_terminal` / `dispatched` /
   `published` from inside the handler-execution paths, with explicit
   `subscriber` and `queue` tags.
@@ -91,6 +93,7 @@ physically cannot observe.
 | `fetched` ticks (including empty) | ❌ (no `StreamMessage` at fetch time) | ✅ |
 | `lease_lost` after `consume_scope` exits | ❌ | ✅ |
 | `nacked_terminal(reason="max_deliveries")` before consume opens | ❌ | ✅ |
+| `drain_timeout` during `stop()` shutdown drain | ❌ (no `consume_scope`) | ✅ |
 
 ## Operator implication
 
