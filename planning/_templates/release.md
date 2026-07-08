@@ -1,4 +1,4 @@
-# modern-di <version> — <one-line headline>
+# <project> <version> — <one-line headline>
 
 <One or two sentences: what this release is and its headline change. Say up
 front if there are no behavior/API changes.>
@@ -30,10 +30,9 @@ Context a reader needs for the headline change. Omit for small releases.
 
 ## Downstream
 
-What integrations (FastAPI, Litestar, FastStream, Typer, `modern-di-pytest`)
-must do — e.g. bump their `modern-di` floor — or "No action needed" when there
-is no API change.
+What dependents must do — e.g. bump their version floor — or "No action
+needed" when there is no API change. Omit if the project has no downstreams.
 
 ## Internals
 
-- Coverage / tooling notes (e.g. 100% line coverage across Python 3.10–3.14).
+- Coverage / tooling notes.
