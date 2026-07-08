@@ -11,12 +11,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `just` (task runner) + `uv` (package manager); the [`Justfile`](Justfile) is the source of truth for recipes — run `just --list` or read it. The non-obvious bits:
 
 - `just test [args]` — full suite in docker compose (Postgres 17). Args forward **unquoted**, so a spaced `-k` expression (`-k "a or b"`) word-splits and fails (`file or directory not found: or`) — run one keyword per invocation, or a single substring matching all targets. `tests/test_unit.py` + `tests/test_fake.py` need no Postgres (`uv run pytest tests/test_unit.py` works directly); `tests/test_integration.py` needs Postgres at `POSTGRES_DSN` (default `postgresql+asyncpg://outbox:outbox@localhost:5432/outbox`; `pg_engine` skips if unreachable). Coverage is on with `--cov-fail-under=100` — partial runs fail that gate; pass `--no-cov` or `--cov-fail-under=0` when iterating.
-- `just lint` / `just lint-ci` — autofix vs non-mutating; `lint-ci` also runs the planning-bundle validator.
+- `just lint` / `just lint-ci` — autofix vs non-mutating; `lint-ci` also runs the planning-change validator.
 - `just docs-serve` / `just docs-build` — local hot-reload at `http://127.0.0.1:8000` / one-shot strict `mkdocs build`.
 
 ## Workflow
 
-Planning uses a portable convention — `architecture/` (repo root) is the living **truth home** and promotion target; `planning/changes/` holds the per-change bundles. Start at the [Quick path](planning/README.md#quick-path-start-here) in `planning/README.md` (the authoritative spec) to pick a lane — **Full** (`design.md` + `plan.md`), **Lightweight** (single `change.md`), or **Tiny** (just a commit) — and ship. `just check-planning` validates bundles; `just index` prints the change + decision listing; `planning/_templates/` are copy-and-fill starting points. A design decision taken **without** a code change — especially a **rejected** option with a load-bearing reason — goes in `planning/decisions/YYYY-MM-DD-<slug>.md` (`status: accepted|superseded`) with a **Revisit trigger** so future reviews don't re-litigate it.
+Planning uses a portable convention — `architecture/` (repo root) is the living **truth home** and promotion target; `planning/changes/` holds the per-change files. Start at the [Quick path](planning/README.md#quick-path-start-here) in `planning/README.md` (the authoritative spec) to pick a lane — **Full** (design template), **Lightweight** (change template), or **Tiny** (just a commit) — and ship. `just check-planning` validates changes; `just index` prints the change + decision listing; `planning/_templates/` are copy-and-fill starting points. A design decision taken **without** a code change — especially a **rejected** option with a load-bearing reason — goes in `planning/decisions/YYYY-MM-DD-<slug>.md` (`status: accepted|superseded`) with a **Revisit trigger** so future reviews don't re-litigate it.
 
 ## Architecture
 
