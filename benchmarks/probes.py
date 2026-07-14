@@ -1,35 +1,36 @@
 """Postgres catalog probes: snapshot the server's counters around a workload.
 
-Every statement issued here contains the substring ``pg_stat`` in its SQL text,
-and the round-trip aggregation filters those out (``query NOT ILIKE '%pg_stat%'``).
-That is how the probe avoids counting itself. The workload's own statements
-(INSERT/UPDATE/DELETE/SELECT on the outbox table, ``pg_notify``) never match the
-filter, so they are all counted.
+Every statement the probe issues is a plain ``SELECT`` whose SQL text contains the
+substring ``pg_stat``, and it runs on an **AUTOCOMMIT** connection so SQLAlchemy emits
+no implicit ``BEGIN``/``COMMIT``/``ROLLBACK`` around it. The round-trip aggregation
+filters those SELECTs out (``query NOT ILIKE '%pg_stat%'``); with no implicit
+transaction control to leak, that filter is enough for the probe to fully exclude
+itself. The workload's statements -- including *its* transaction control, which is real
+round-trip work -- never match the filter, so they are all counted, by design.
 
 Two hazards, both hit while prototyping this design:
 
-* ``pg_stat_user_tables`` **lags**. A bare read straight after the workload
-  returned ``n_tup_upd = 0`` for 10,000 updates that had definitely happened.
-  :func:`_settle` polls until the counters stop moving.
+* ``pg_stat_user_tables`` and ``pg_stat_wal`` **lag**: a backend accumulates its stats
+  locally and flushes them to shared memory no more often than ``PGSTAT_MIN_INTERVAL``
+  (1s). Reading straight after a workload can report zero for mutations that definitely
+  happened, and reading straight after a seed can miss the seed -- which then leaks into
+  the delta. Postgres force-flushes a backend's pending stats when the backend *exits*,
+  so the probe calls :meth:`AsyncEngine.dispose` (which closes every pooled connection)
+  immediately before each snapshot. That is deterministic, unlike waiting.
 * ``pg_stat_statements`` is **database-wide**. A stray psql session would silently
   corrupt the round-trip count, so :func:`assert_owns_database` fails loudly rather
   than reporting a quietly wrong number.
 """
 
-import asyncio
 import contextlib
 import dataclasses
 from collections.abc import AsyncIterator
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from benchmarks.config import APPLICATION_NAME
 
-
-_SETTLE_POLL_SECONDS = 0.25
-_SETTLE_STABLE_READS = 3
-_SETTLE_TIMEOUT_SECONDS = 15.0
 
 # Resets the statement counters and captures every cumulative origin in ONE round-trip,
 # so exactly one probe statement lands in pg_stat_statements before the workload runs
@@ -38,26 +39,43 @@ _SETTLE_TIMEOUT_SECONDS = 15.0
 # The table counters MUST be captured here, not assumed zero: pg_stat_user_tables is
 # cumulative from table creation, and the consumer scenario seeds its rows *before* the
 # probe opens. Treating the end-of-run snapshot as the delta would report the seed's
-# 5,000 inserts as workload inserts. coalesce+LEFT JOIN because a freshly created table
-# may have no pg_stat_user_tables row at all until it is first touched.
+# 5,000 inserts as workload inserts. The `present` flag lets probe() fail fast on a
+# missing table instead of dying with NoResultFound at the end of a long run; the
+# coalesce()s keep this statement returning a row either way so that check can run.
+#
+# :schema is NULL by default and resolves to current_schema(); it is echoed back so the
+# end snapshot pins the same schema. pg_stat_user_tables spans every schema, so matching
+# on a bare relname could hit two same-named tables.
 _START_SQL = text(
     """
+    WITH scope AS (SELECT coalesce(CAST(:schema AS text), current_schema()::text) AS schemaname)
     SELECT
       pg_stat_statements_reset() IS NOT NULL AS reset,
       pg_current_wal_lsn() AS lsn,
+      scope.schemaname AS schemaname,
       (SELECT w.wal_records FROM pg_stat_wal w) AS wal_records,
       (SELECT w.wal_fpi FROM pg_stat_wal w) AS wal_fpi,
-      coalesce((SELECT t.n_tup_ins FROM pg_stat_user_tables t WHERE t.relname = :table), 0) AS tup_ins,
-      coalesce((SELECT t.n_tup_upd FROM pg_stat_user_tables t WHERE t.relname = :table), 0) AS tup_upd,
-      coalesce((SELECT t.n_tup_del FROM pg_stat_user_tables t WHERE t.relname = :table), 0) AS tup_del,
-      coalesce((SELECT t.n_tup_hot_upd FROM pg_stat_user_tables t WHERE t.relname = :table), 0) AS tup_hot_upd,
-      coalesce((SELECT t.n_tup_newpage_upd FROM pg_stat_user_tables t WHERE t.relname = :table), 0)
-        AS tup_newpage_upd
+      EXISTS (
+        SELECT 1 FROM pg_stat_user_tables t
+        WHERE t.relname = :table AND t.schemaname = scope.schemaname
+      ) AS present,
+      coalesce((SELECT t.n_tup_ins FROM pg_stat_user_tables t
+        WHERE t.relname = :table AND t.schemaname = scope.schemaname), 0) AS tup_ins,
+      coalesce((SELECT t.n_tup_upd FROM pg_stat_user_tables t
+        WHERE t.relname = :table AND t.schemaname = scope.schemaname), 0) AS tup_upd,
+      coalesce((SELECT t.n_tup_del FROM pg_stat_user_tables t
+        WHERE t.relname = :table AND t.schemaname = scope.schemaname), 0) AS tup_del,
+      coalesce((SELECT t.n_tup_hot_upd FROM pg_stat_user_tables t
+        WHERE t.relname = :table AND t.schemaname = scope.schemaname), 0) AS tup_hot_upd,
+      coalesce((SELECT t.n_tup_newpage_upd FROM pg_stat_user_tables t
+        WHERE t.relname = :table AND t.schemaname = scope.schemaname), 0) AS tup_newpage_upd
+    FROM scope
     """,
 )
 
 # One statement for the whole end-of-run snapshot. Every aggregate excludes the
-# probe's own queries by SQL text.
+# probe's own queries by SQL text. schemaname is pinned: pg_stat_user_tables covers
+# every schema, so a bare relname match could return two rows.
 _SNAPSHOT_SQL = text(
     """
     SELECT
@@ -77,14 +95,8 @@ _SNAPSHOT_SQL = text(
       pg_relation_size(t.relid) AS heap_bytes,
       pg_indexes_size(t.relid) AS index_bytes
     FROM pg_stat_wal w, pg_stat_user_tables t
-    WHERE t.relname = :table
+    WHERE t.relname = :table AND t.schemaname = :schema
     """,
-)
-
-# Contains 'pg_stat', so the settle polls are excluded from the round-trip count too.
-_SETTLE_SQL = text(
-    "SELECT coalesce(n_tup_upd, 0) + coalesce(n_tup_del, 0) AS mutations "
-    "FROM pg_stat_user_tables WHERE relname = :table",
 )
 
 _OWNERSHIP_SQL = text(
@@ -119,9 +131,22 @@ class ProbeResult:
     index_bytes: int
 
 
+@contextlib.asynccontextmanager
+async def _autocommit(engine: AsyncEngine) -> AsyncIterator[AsyncConnection]:
+    """Open a connection that emits no implicit BEGIN/COMMIT/ROLLBACK.
+
+    pg_stat_statements tracks utility statements, and none of BEGIN/COMMIT/ROLLBACK
+    contains 'pg_stat', so SQLAlchemy's implicit transaction control would slip past
+    the probe's self-exclusion filter and inflate `calls` by a run-dependent amount.
+    AUTOCOMMIT removes it at the source.
+    """
+    async with engine.connect() as conn:
+        yield await conn.execution_options(isolation_level="AUTOCOMMIT")
+
+
 async def ensure_extension(engine: AsyncEngine) -> None:
     """Create pg_stat_statements if the server preloaded it; raise a legible error if not."""
-    async with engine.begin() as conn:
+    async with _autocommit(engine) as conn:
         try:
             await conn.execute(_EXTENSION_SQL)
         except Exception as exc:
@@ -137,10 +162,10 @@ async def assert_owns_database(engine: AsyncEngine) -> None:
     """Fail loudly if a foreign backend shares the database.
 
     pg_stat_statements is database-wide, so any other session's queries land in the
-    round-trip count. Checked once, *before* the broker starts — at that point the
+    round-trip count. Checked once, *before* the broker starts -- at that point the
     only connections are the harness' own (tagged with APPLICATION_NAME).
     """
-    async with engine.connect() as conn:
+    async with _autocommit(engine) as conn:
         foreign = (await conn.execute(_OWNERSHIP_SQL, {"app": APPLICATION_NAME})).scalar_one()
     if foreign:
         msg = (
@@ -151,46 +176,49 @@ async def assert_owns_database(engine: AsyncEngine) -> None:
         raise RuntimeError(msg)
 
 
-async def _settle(engine: AsyncEngine, table_name: str) -> None:
-    """Poll until pg_stat_user_tables stops moving.
-
-    The stats collector flushes lazily; a bare read right after the workload can
-    report zero for mutations that have definitely happened.
-    """
-    deadline = asyncio.get_running_loop().time() + _SETTLE_TIMEOUT_SECONDS
-    previous = -1
-    stable = 0
-    while stable < _SETTLE_STABLE_READS:
-        await asyncio.sleep(_SETTLE_POLL_SECONDS)
-        async with engine.connect() as conn:
-            current = (await conn.execute(_SETTLE_SQL, {"table": table_name})).scalar_one_or_none() or 0
-        stable = stable + 1 if current == previous else 0
-        previous = current
-        if asyncio.get_running_loop().time() > deadline:
-            msg = f"pg_stat_user_tables for {table_name!r} never settled within {_SETTLE_TIMEOUT_SECONDS}s"
-            raise RuntimeError(msg)
-
-
 @contextlib.asynccontextmanager
-async def probe(engine: AsyncEngine, table_name: str) -> AsyncIterator[list[ProbeResult]]:
+async def probe(engine: AsyncEngine, table_name: str, schema: str | None = None) -> AsyncIterator[list[ProbeResult]]:
     """Snapshot the catalogs around the wrapped workload.
 
     Yields a list that holds exactly one :class:`ProbeResult` once the block exits.
     A list (rather than a return value) is the only way an async context manager can
-    hand a result back to its caller.
+    hand a result back to its caller. ``schema`` defaults to ``current_schema()``.
+
+    If the workload raises, the exception propagates and the list stays **empty** --
+    the snapshot is deliberately not taken in a ``finally``, because a half-run
+    workload's counters are not a measurement. Callers must not assume ``sink[0]``
+    without first checking that the block completed.
+
+    ``engine`` is disposed (all pooled connections closed) immediately before each
+    snapshot: that is what force-flushes the pending backend stats. The engine stays
+    usable afterwards -- SQLAlchemy just opens fresh connections -- so a sweep can keep
+    sharing one engine across runs. Connections still *checked out* when the probe exits
+    are not disposed, so the workload must have released them before the block ends.
     """
     sink: list[ProbeResult] = []
-    # Settle first: the seed's inserts must be visible in pg_stat_user_tables before we
-    # capture the origin, or they leak into the delta.
-    await _settle(engine, table_name)
-    async with engine.begin() as conn:
-        start = (await conn.execute(_START_SQL, {"table": table_name})).one()
+
+    # Flush the seed's stats before reading the origin, or they leak into the delta.
+    await engine.dispose()
+    async with _autocommit(engine) as conn:
+        start = (await conn.execute(_START_SQL, {"table": table_name, "schema": schema})).one()
+    if not start.present:
+        msg = (
+            f"table {start.schemaname}.{table_name} has no pg_stat_user_tables row: it does not exist "
+            "(or is not a user table). Create it before opening the probe."
+        )
+        raise RuntimeError(msg)
 
     yield sink
 
-    await _settle(engine, table_name)
-    async with engine.connect() as conn:
-        row = (await conn.execute(_SNAPSHOT_SQL, {"lsn0": start.lsn, "table": table_name})).one()
+    # Flush the workload's stats before reading the end snapshot.
+    await engine.dispose()
+    async with _autocommit(engine) as conn:
+        row = (
+            await conn.execute(
+                _SNAPSHOT_SQL,
+                {"lsn0": start.lsn, "table": table_name, "schema": start.schemaname},
+            )
+        ).one()
 
     sink.append(
         ProbeResult(
