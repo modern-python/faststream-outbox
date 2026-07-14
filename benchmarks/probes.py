@@ -193,7 +193,17 @@ async def probe(engine: AsyncEngine, table_name: str, schema: str | None = None)
     snapshot: that is what force-flushes the pending backend stats. The engine stays
     usable afterwards -- SQLAlchemy just opens fresh connections -- so a sweep can keep
     sharing one engine across runs. Connections still *checked out* when the probe exits
-    are not disposed, so the workload must have released them before the block ends.
+    are not disposed by :meth:`AsyncEngine.dispose`, so this raises ``RuntimeError``
+    instead of silently under-reporting; the workload must release every connection
+    (stop the broker, exit all ``async with engine.begin()`` blocks) before the block ends.
+
+    ``engine`` must also be constructed *before* the probe block opens. SQLAlchemy's
+    one-time dialect init (``select pg_catalog.version()``, ``select current_schema()``,
+    ``show standard_conforming_strings``, ``show transaction isolation level``, plus a
+    BEGIN/ROLLBACK) runs on an engine's first connection and inflates ``calls`` by 6;
+    none of those statements contain ``pg_stat``, so the self-exclusion filter cannot
+    catch them. It is deterministic, so it will not flap the gate -- it will just bake
+    a wrong baseline in.
     """
     sink: list[ProbeResult] = []
 
@@ -209,6 +219,18 @@ async def probe(engine: AsyncEngine, table_name: str, schema: str | None = None)
         raise RuntimeError(msg)
 
     yield sink
+
+    checked_out = engine.pool.checkedout()  # ty: ignore[unresolved-attribute]
+    if checked_out:
+        msg = (
+            f"{checked_out} connection(s) are still checked out of the pool. "
+            "AsyncEngine.dispose() only closes checked-in connections, so a checked-out "
+            "backend never exits and its stats are never flushed -- the tuple and WAL "
+            "counters would silently under-report. Release/close all connections (stop "
+            "the broker, exit all `async with engine.begin()` blocks) before leaving "
+            "the probe() block."
+        )
+        raise RuntimeError(msg)
 
     # Flush the workload's stats before reading the end snapshot.
     await engine.dispose()
