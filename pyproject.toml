@@ -109,5 +109,8 @@ Repository = "https://github.com/modern-python/faststream-outbox"
 Issues = "https://github.com/modern-python/faststream-outbox/issues"
 Changelog = "https://github.com/modern-python/faststream-outbox/releases"
 
+[tool.coverage.run]
+omit = ["benchmarks/*"]
+
 [tool.coverage.report]
 exclude_also = ["if typing.TYPE_CHECKING:"]
