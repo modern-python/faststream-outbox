@@ -99,6 +99,21 @@ _SNAPSHOT_SQL = text(
     """,
 )
 
+# Per-operation statement counts. pg_stat_statements holds one row per normalized query;
+# grouping sum(calls) by the lowercased leading SQL keyword isolates each operation so the
+# gate can assert load-independent per-message quantities (the terminal DELETE is exactly 1
+# per message on the happy path) instead of the total `calls`, which scales with the fetch
+# loop's wall-clock polling. Its own text contains 'pg_stat', so it self-excludes like the
+# rest, and it runs on the same AUTOCOMMIT connection.
+_CALLS_BY_OP_SQL = text(
+    """
+    SELECT lower(split_part(btrim(s.query), ' ', 1)) AS op, sum(s.calls) AS calls
+    FROM pg_stat_statements s
+    WHERE s.query NOT ILIKE '%pg_stat%'
+    GROUP BY 1
+    """,
+)
+
 _OWNERSHIP_SQL = text(
     "SELECT count(*) FROM pg_stat_activity "
     "WHERE datname = current_database() "
@@ -109,12 +124,20 @@ _OWNERSHIP_SQL = text(
 
 _EXTENSION_SQL = text("CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
 
+# The leading SQL keywords we classify per-operation; anything else lands in ``other``.
+_KNOWN_OPS = ("select", "insert", "update", "delete", "with")
+
 
 @dataclasses.dataclass(frozen=True)
 class ProbeResult:
     """Catalog deltas across one workload."""
 
     calls: int
+    # Per-operation statement counts (a delta; pg_stat_statements was reset at start),
+    # keyed by the lowercased leading SQL keyword plus a catch-all ``other``. The gate
+    # asserts these load-independent per-message counts (notably ``delete`` == messages
+    # on the happy path), not the load-dependent ``calls`` total.
+    calls_by_op: dict[str, int]
     exec_ms: float
     blks_hit: int
     blks_read: int
@@ -241,11 +264,19 @@ async def probe(engine: AsyncEngine, table_name: str, schema: str | None = None)
                 {"lsn0": start.lsn, "table": table_name, "schema": start.schemaname},
             )
         ).one()
+        # Same AUTOCOMMIT connection; self-excludes via 'pg_stat' in its own text.
+        op_rows = (await conn.execute(_CALLS_BY_OP_SQL)).all()
+
+    calls_by_op = dict.fromkeys((*_KNOWN_OPS, "other"), 0)
+    for op_row in op_rows:
+        key = op_row.op if op_row.op in _KNOWN_OPS else "other"
+        calls_by_op[key] += int(op_row.calls)
 
     sink.append(
         ProbeResult(
             # pg_stat_statements was reset at start, so these are already deltas.
             calls=int(row.calls),
+            calls_by_op=calls_by_op,
             exec_ms=float(row.exec_ms),
             blks_hit=int(row.blks_hit),
             blks_read=int(row.blks_read),
