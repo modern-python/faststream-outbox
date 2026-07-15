@@ -87,6 +87,7 @@ Per-subscriber knobs, passed to `@broker.subscriber("…", …)`:
 | `max_fetch_interval` | `10.0` s | Ceiling for the adaptive idle backoff (with jitter) |
 | `lease_ttl_seconds` | `60.0` s | How long a claim is valid before another fetch may reclaim it. **Must exceed your handler's P99 with margin.** |
 | `max_deliveries` | `None` (unbounded) | Total claims (including lease-expiry re-claims) after which the row is dropped without invoking the handler. Defends against handlers that consistently wedge. |
+| `terminal_flush_batch_size` | `1` (off) | Coalesce completed terminal `DELETE`s into one `DELETE … RETURNING` per N rows. `1` is one round-trip per message (unchanged). Higher trades a wider crash-redelivery window for far fewer round-trips. See [Batching terminal deletes](#batching-terminal-deletes). |
 | `ack_policy` | `AckPolicy.NACK_ON_ERROR` | See [Ack policy](#ack-policy) |
 | `retry_strategy` | `ExponentialRetry(...)` | See [Retry strategies](#retry-strategies) |
 | `propagate_inbound_headers` | `False` | Relay-only. When `True`, fills `Response.headers` from the inbound message *if* the handler returned a `Response` with empty headers (user-set headers always win). See [Relay](./relay.md). |
@@ -154,6 +155,54 @@ to the appropriate queue at `publish` time.
     for the whole batch.
 
 *See also [Troubleshooting § `event=lease_lost`](../operations/troubleshooting.md#event-lease_lost-recurring-in-logs).*
+
+## Batching terminal deletes
+
+By default each processed row is deleted with its own `DELETE` — one round-trip
+per message. At `max_workers=1` those deletes serialise, and the round-trip
+(not the database work) is the throughput ceiling. Set
+`terminal_flush_batch_size` above `1` to coalesce completed rows and flush them
+as a single `DELETE … WHERE (id, acquired_token) IN (…) RETURNING id`:
+
+```python
+@broker.subscriber("orders", terminal_flush_batch_size=100)
+async def handle(order: dict) -> None: ...
+```
+
+A worker buffers completed rows and flushes when the buffer reaches
+`terminal_flush_batch_size` **or** its inflight queue empties — so a
+lightly-loaded queue still flushes immediately and batching adds no latency;
+batching only engages under sustained load.
+
+**What it buys.** In the benchmark (5 000 messages, `fetch_batch_size=100`), the
+terminal round-trips drop from one per message to one per batch — a **100×**
+reduction in terminal `DELETE`s (5 000 → 50) with the same rows deleted. Because
+the terminal write stops being the bottleneck, a single batched worker
+out-throughputs a four-worker per-row subscriber, so you reach high throughput
+without spending the extra [connection budget](#connection-budget) that more
+workers cost. The win is largest at low `max_workers` (where per-row deletes
+serialise) and narrows as worker parallelism rises.
+
+**The tradeoff — read before enabling.** Batching holds completed-but-undeleted
+rows in memory until the flush. On a **graceful** stop the buffer is flushed
+(no redelivery). But on an **ungraceful** crash (SIGKILL / OOM / power loss),
+up to `terminal_flush_batch_size` rows that already ran their handler are
+redelivered when another replica reclaims them. The outbox is *already*
+at-least-once — **handlers must be idempotent** — so this is not a new failure
+class, only a wider window: from at most one at-risk row (per-row) to up to a
+full batch. Two further effects to size for:
+
+- The outbox table shows completed-but-undeleted rows as still present until the
+  flush, so a backlog-depth query (or an autoscaler keyed on it) reads inflated
+  by up to `terminal_flush_batch_size × max_workers`.
+- Buffered rows hold their leases until the flush, so the lease ceiling grows to
+  `fetch_batch_size + max_workers × (terminal_flush_batch_size + 1)`; keep
+  `lease_ttl_seconds` sized against that.
+
+It is **off by default** (`terminal_flush_batch_size=1` is byte-for-byte the
+per-row path). Enable it per subscriber when the queue is high-throughput and
+its handler is idempotent; leave it off for low-volume or
+exactly-once-sensitive queues.
 
 ## Ack policy
 
