@@ -72,5 +72,32 @@ Autogenerate-fixable drift (columns, plain indexes, DLQ) gets no pointer. Messag
 composition lives in `_compose_schema_mismatch_message` (`client.py`), gated on
 `has_blind_drift`.
 
+The alembic diff runs with `include_schemas=True` so a table in a non-default
+`MetaData(schema=...)` is reflected and compared (without it, `compare_metadata`
+only sees the default schema and a named-schema table falsely reads as "table does
+not exist"). `_include_name` narrows schema reflection to the target schema so
+unrelated schemas never surface as false drift. Because Alembic reports the
+connection's default schema to the hook as `None`, `table.schema` is first
+normalized against `connection.dialect.default_schema_name` — a table that
+explicitly names the default schema (`MetaData(schema="public")`, or a named schema
+that is on the connection's `search_path`) becomes `None` so it still matches,
+avoiding a false "table does not exist" on a correct table.
+
 Alembic is optional (`faststream-outbox[validate]`); without it `validate_schema()`
 raises `ImportError`, but every other path works.
+
+## Autovacuum (recommended by default, enforced via a flag)
+
+The outbox is high-churn (`dead_tup ≈ 2 × messages`: the lease `UPDATE` + terminal
+`DELETE` each leave a dead tuple). Aggressive autovacuum
+(`autovacuum_vacuum_scale_factor = 0` + a constant threshold, for both the vacuum and
+insert-triggered pairs) is **recommended by default**: SQLAlchemy's `Table` cannot
+carry reloptions, so autogenerate can't emit them, and the package applies nothing
+itself. `outbox_autovacuum_ddl()` (in `autovacuum.py`) renders the migration
+statement the user runs. Enforcement is opt-in: `validate_schema(check_autovacuum=True)`
+(threaded through `OutboxClient`/`OutboxBroker`) reads `pg_class.reloptions` and
+**raises** a distinctly-labeled "Outbox autovacuum not tuned: " error when the
+table lacks the settings — separate from the "Outbox schema mismatch: " prefix, so
+an operator can tell the two apart. Because it rides `validate_schema()`, the check
+is coupled to the `[validate]` (Alembic) extra. `fillfactor` is excluded on evidence
+(HOT is impossible — the claim `UPDATE` mutates both partial indexes' key columns).

@@ -21,6 +21,7 @@ from faststream_outbox import (
     OutboxResponse,
     make_dlq_table,
     make_outbox_table,
+    outbox_autovacuum_ddl,
 )
 from faststream_outbox.client import OutboxClient
 from faststream_outbox.envelope import _encode_payload as encode_payload
@@ -103,6 +104,49 @@ async def test_validate_schema_detects_non_unique_timer_id_index(
 async def test_validate_schema_passes_for_correct_table(pg_engine, outbox_table) -> None:
     client = OutboxClient(pg_engine, outbox_table)
     await client.validate_schema()  # should not raise
+
+
+async def test_validate_schema_passes_for_table_in_named_schema(pg_engine: AsyncEngine) -> None:
+    """A correct outbox table in a non-default ``MetaData(schema=...)`` must validate.
+
+    ``_run_validate`` configures Alembic with ``include_schemas=True`` so its reflection
+    reaches beyond the default schema; without it, a named-schema table is invisible to
+    ``compare_metadata`` and falsely reads as ``table 'outbox' does not exist``.
+    """
+    schema = f"sch_vs_{uuid.uuid4().hex[:8]}"
+    metadata = MetaData(schema=schema)
+    table = make_outbox_table(metadata, table_name="outbox")
+    async with pg_engine.begin() as conn:
+        await conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+        await conn.run_sync(metadata.create_all)
+    try:
+        client = OutboxClient(pg_engine, table)
+        await client.validate_schema()  # must NOT raise
+    finally:
+        async with pg_engine.begin() as conn:
+            await conn.run_sync(metadata.drop_all)
+            await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+
+
+async def test_validate_schema_passes_for_explicitly_named_default_schema(pg_engine: AsyncEngine) -> None:
+    """A table whose ``MetaData(schema=...)`` explicitly names the connection's DEFAULT schema validates.
+
+    With ``include_schemas=True`` Alembic reports the default schema to ``include_name`` as
+    ``None``, so a naive ``name == table.schema`` excludes a table declared with the literal
+    default-schema name (e.g. ``MetaData(schema="public")``) — the table never reflects and a
+    CORRECT table falsely raises "table 'outbox' does not exist". ``_run_validate`` normalizes
+    the explicitly-named default schema to ``None`` before comparing.
+    """
+    metadata = MetaData(schema="public")
+    table = make_outbox_table(metadata, table_name=f"outbox_pub_{uuid.uuid4().hex[:8]}")
+    async with pg_engine.begin() as conn:
+        await conn.run_sync(metadata.create_all)
+    try:
+        client = OutboxClient(pg_engine, table)
+        await client.validate_schema()  # must NOT raise
+    finally:
+        async with pg_engine.begin() as conn:
+            await conn.run_sync(metadata.drop_all)
 
 
 async def test_validate_schema_fails_for_missing_table(pg_engine) -> None:
@@ -2125,3 +2169,76 @@ async def test_validate_schema_passes_under_ck_convention_with_literally_named_c
     finally:
         async with pg_engine.begin() as conn:
             await conn.run_sync(metadata.drop_all)
+
+
+async def test_validate_schema_autovacuum_raises_when_untuned(pg_engine: AsyncEngine, outbox_table: Table) -> None:
+    """Fresh table (the fixture applies no reloptions) -> distinctly-labeled raise, not a schema mismatch."""
+    client = OutboxClient(pg_engine, outbox_table)
+    with pytest.raises(RuntimeError, match="autovacuum not tuned") as excinfo:
+        await client.validate_schema(check_autovacuum=True)
+    assert "schema mismatch" not in str(excinfo.value)
+
+
+async def test_validate_schema_autovacuum_ok_when_applied(pg_engine: AsyncEngine, outbox_table: Table) -> None:
+    async with pg_engine.begin() as conn:
+        await conn.execute(text(outbox_autovacuum_ddl(outbox_table.name)))
+    client = OutboxClient(pg_engine, outbox_table)
+    await client.validate_schema(check_autovacuum=True)  # must NOT raise
+
+
+async def test_validate_schema_autovacuum_ok_with_custom_threshold(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+) -> None:
+    # scale_factor still 0, but a deliberately different threshold -> no false raise.
+    async with pg_engine.begin() as conn:
+        await conn.execute(text(outbox_autovacuum_ddl(outbox_table.name, vacuum_threshold=5000)))
+    client = OutboxClient(pg_engine, outbox_table)
+    await client.validate_schema(check_autovacuum=True)  # must NOT raise
+
+
+async def test_validate_schema_autovacuum_raises_when_scale_factor_nonzero(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+) -> None:
+    # A user who set a nonzero scale factor is still exposed to the death-spiral.
+    async with pg_engine.begin() as conn:
+        await conn.execute(
+            text(f'ALTER TABLE "{outbox_table.name}" SET (autovacuum_vacuum_scale_factor = 0.1)'),
+        )
+    client = OutboxClient(pg_engine, outbox_table)
+    with pytest.raises(RuntimeError, match="autovacuum not tuned"):
+        await client.validate_schema(check_autovacuum=True)
+
+
+async def test_validate_schema_autovacuum_false_does_not_check(pg_engine: AsyncEngine, outbox_table: Table) -> None:
+    """``check_autovacuum=False`` (the default) never raises for autovacuum, even on an untuned table."""
+    client = OutboxClient(pg_engine, outbox_table)
+    await client.validate_schema(check_autovacuum=False)  # must NOT raise
+    await client.validate_schema()  # default also must NOT raise
+
+
+async def test_validate_schema_autovacuum_ok_when_applied_in_named_schema(pg_engine: AsyncEngine) -> None:
+    """Full round-trip: ``validate_schema(check_autovacuum=True)`` on a named-schema table does not raise.
+
+    The DDL helper's ``schema=`` must target the same table the schema-aware reloptions query
+    reads: ``outbox_autovacuum_ddl(name, schema=table.schema)`` applies the reloptions, and the
+    check (schema-aware via ``COALESCE(:schema, current_schema())``, plus the schema-reflecting
+    ``validate_schema`` diff) confirms them — neither the schema probe nor the autovacuum probe
+    falsely fires for a correct table in a non-default ``MetaData(schema=...)``.
+    """
+    schema = f"sch_av_{uuid.uuid4().hex[:8]}"
+    metadata = MetaData(schema=schema)
+    table = make_outbox_table(metadata, table_name="outbox")
+    async with pg_engine.begin() as conn:
+        await conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+        await conn.run_sync(metadata.create_all)
+    try:
+        async with pg_engine.begin() as conn:
+            await conn.execute(text(outbox_autovacuum_ddl(table.name, schema=table.schema)))
+        client = OutboxClient(pg_engine, table)
+        await client.validate_schema(check_autovacuum=True)  # must NOT raise
+    finally:
+        async with pg_engine.begin() as conn:
+            await conn.run_sync(metadata.drop_all)
+            await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))

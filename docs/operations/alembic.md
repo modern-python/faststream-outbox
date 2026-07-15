@@ -167,6 +167,49 @@ consequence that bites is a missing `server_default=now()` on
 `next_attempt_at`; see the server-defaults caveat in
 [Schema validation](../usage/schema-validation.md).
 
+## Autovacuum tuning (recommended)
+
+The outbox is a high-churn queue table: every message is one `INSERT`, one lease
+`UPDATE`, and one terminal `DELETE`, so dead tuples accumulate at roughly **twice
+the message rate**. Postgres' default `autovacuum_vacuum_scale_factor = 0.2` fires
+vacuum only after a *fraction of the table* is dead — on a queue table that lets
+bloat grow, and if the table bloats the fraction is *of the bloated size*, so vacuum
+fires ever less often. Set the scale factor to `0` so vacuum triggers on a constant
+dead-tuple count instead, tracking churn rather than table size.
+
+SQLAlchemy's `Table` cannot carry these reloptions, so `alembic revision
+--autogenerate` will never emit them — apply them with an explicit statement.
+`faststream_outbox` renders it for you:
+
+```python
+from alembic import op
+from faststream_outbox import outbox_autovacuum_ddl
+
+
+def upgrade() -> None:
+    op.execute(outbox_autovacuum_ddl("outbox"))
+```
+
+This sets `autovacuum_vacuum_scale_factor = 0` and `autovacuum_vacuum_threshold =
+1000` (plus the insert-triggered pair, Postgres 13+). Tune the thresholds for your
+message rate — `outbox_autovacuum_ddl("outbox", vacuum_threshold=5000,
+insert_threshold=5000)` — a higher threshold vacuums less often. `fillfactor` is
+intentionally not set: the lease `UPDATE` touches indexed columns, so HOT updates
+are impossible and `fillfactor` buys almost nothing here.
+
+If your outbox table lives in a non-default `MetaData(schema=...)`, pass the same
+schema — `outbox_autovacuum_ddl("outbox", schema="app")` — so the `ALTER TABLE`
+targets that table rather than an unqualified name resolved via `search_path`.
+
+To catch a table that never had the settings applied, pass `check_autovacuum=True`
+to `validate_schema()`. Requires the `[validate]` (Alembic) extra:
+
+```python
+# In a startup hook or /health check -- raises if the outbox table is not tuned
+# (and if the schema itself has drifted). Requires the [validate] extra.
+await broker.validate_schema(check_autovacuum=True)
+```
+
 ## Fixing drift autogenerate can't see { #fixing-drift-autogenerate-cant-see }
 
 Two kinds of drift that

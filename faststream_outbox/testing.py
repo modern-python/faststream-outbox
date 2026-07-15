@@ -235,7 +235,7 @@ class FakeOutboxClient(AbstractOutboxClient):
                 return True
         return False
 
-    async def validate_schema(self) -> None:
+    async def validate_schema(self, *, check_autovacuum: bool = False) -> None:
         # Silently passing here would give tests false confidence — a user calling
         # ``broker.validate_schema()`` against ``TestOutboxBroker`` would see a green
         # test regardless of whether the real DB schema matches the canonical one.
