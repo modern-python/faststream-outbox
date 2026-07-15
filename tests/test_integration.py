@@ -128,6 +128,27 @@ async def test_validate_schema_passes_for_table_in_named_schema(pg_engine: Async
             await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
 
 
+async def test_validate_schema_passes_for_explicitly_named_default_schema(pg_engine: AsyncEngine) -> None:
+    """A table whose ``MetaData(schema=...)`` explicitly names the connection's DEFAULT schema validates.
+
+    With ``include_schemas=True`` Alembic reports the default schema to ``include_name`` as
+    ``None``, so a naive ``name == table.schema`` excludes a table declared with the literal
+    default-schema name (e.g. ``MetaData(schema="public")``) — the table never reflects and a
+    CORRECT table falsely raises "table 'outbox' does not exist". ``_run_validate`` normalizes
+    the explicitly-named default schema to ``None`` before comparing.
+    """
+    metadata = MetaData(schema="public")
+    table = make_outbox_table(metadata, table_name=f"outbox_pub_{uuid.uuid4().hex[:8]}")
+    async with pg_engine.begin() as conn:
+        await conn.run_sync(metadata.create_all)
+    try:
+        client = OutboxClient(pg_engine, table)
+        await client.validate_schema()  # must NOT raise
+    finally:
+        async with pg_engine.begin() as conn:
+            await conn.run_sync(metadata.drop_all)
+
+
 async def test_validate_schema_fails_for_missing_table(pg_engine) -> None:
     metadata = MetaData()
     table = make_outbox_table(metadata, table_name="does_not_exist_xyz")

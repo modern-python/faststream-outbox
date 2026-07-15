@@ -701,14 +701,20 @@ def _run_validate(
     canonical_metadata = MetaData(schema=table.schema)
     canonical_factory(canonical_metadata, table.name)
 
+    # Alembic reports the connection's DEFAULT schema to ``include_name`` as ``None`` (with
+    # ``include_schemas=True``). So a table that explicitly names the default schema
+    # (``MetaData(schema="public")``, or a named schema that happens to be on the
+    # search_path) must be normalized to ``None`` before comparing, else ``name == "public"``
+    # never matches Alembic's ``None`` and a CORRECT table falsely reads as "does not exist".
+    default_schema_name = connection.dialect.default_schema_name
+    target_schema = None if table.schema == default_schema_name else table.schema
+
     def _include_name(name: str | None, type_: str, parent_names: "Mapping[str, str | None]") -> bool:
         # ``include_schemas=True`` makes Alembic enumerate EVERY schema and call this with
-        # ``type_ == "schema"`` per schema — restrict to the target schema so unrelated
-        # schemas' tables never reflect into the diff (which would surface as false drift).
-        # Alembic reports the default schema as ``None`` here, so ``name == table.schema``
-        # matches None-vs-None for a default-schema table and the literal name otherwise.
+        # ``type_ == "schema"`` per schema — restrict to the (normalized) target schema so
+        # unrelated schemas' tables never reflect into the diff (which would be false drift).
         if type_ == "schema":
-            return name == table.schema
+            return name == target_schema
         if type_ == "table":
             return name == table.name
         return parent_names.get("table_name") == table.name

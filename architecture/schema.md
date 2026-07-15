@@ -75,9 +75,13 @@ composition lives in `_compose_schema_mismatch_message` (`client.py`), gated on
 The alembic diff runs with `include_schemas=True` so a table in a non-default
 `MetaData(schema=...)` is reflected and compared (without it, `compare_metadata`
 only sees the default schema and a named-schema table falsely reads as "table does
-not exist"). `_include_name` narrows schema reflection to the target schema
-(`name == table.schema`, where the default schema is reported as `None`) so
-unrelated schemas never surface as false drift.
+not exist"). `_include_name` narrows schema reflection to the target schema so
+unrelated schemas never surface as false drift. Because Alembic reports the
+connection's default schema to the hook as `None`, `table.schema` is first
+normalized against `connection.dialect.default_schema_name` — a table that
+explicitly names the default schema (`MetaData(schema="public")`, or a named schema
+that is on the connection's `search_path`) becomes `None` so it still matches,
+avoiding a false "table does not exist" on a correct table.
 
 Alembic is optional (`faststream-outbox[validate]`); without it `validate_schema()`
 raises `ImportError`, but every other path works.
