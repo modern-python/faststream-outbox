@@ -33,11 +33,14 @@ from benchmarks.workload import RunResult
 # ``messages / tfbs`` exactly (5000/100 == 50). Empty fetch polls under load inflate total
 # ``calls`` but never ``delete_calls`` (a flush fires only on buffered rows), so this count
 # is structural, not timing-dependent -- Task 4's Step 5 measured it at 50 across 5 runs
-# with zero variance. Two conditions make it exact here: fetch_batch_size == tfbs (full
-# buffers, no partial-buffer flush) AND messages % tfbs == 0 (no partial tail flush). If a
-# future config broke either -- fetch not divisible by tfbs (split buffers), or messages not
-# a multiple of tfbs (a partial final flush, e.g. messages=5050/tfbs=100 -> 51 delete_calls)
-# -- revisit this to a loose upper bound; today both hold and it is deterministic.
+# with zero variance. THREE conditions make it exact here: fetch_batch_size == tfbs (full
+# buffers, no partial-buffer flush); messages % tfbs == 0 (no partial tail flush); AND the
+# bench handler does not suspend mid-drain -- the no-op run_consumer handler never yields, so
+# the worker drains a full generation to the size trigger instead of interleaving with the
+# fetch loop. If a future config broke any -- fetch not divisible by tfbs (split buffers),
+# messages not a multiple of tfbs (a partial final flush, e.g. messages=5050/tfbs=100 -> 51
+# delete_calls), or a bench handler that does real I/O (queue empties mid-buffer -> partial
+# idle flush) -- revisit this to a loose upper bound; today all three hold and it is deterministic.
 EXACT_KEYS: tuple[str, ...] = ("delete_calls", "tup_upd", "tup_del", "tup_ins", "insert_calls", "select_calls")
 
 # Near-deterministic: ~5% observed spread, so a 10% upper-bound band leaves headroom.

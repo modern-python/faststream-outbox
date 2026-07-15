@@ -609,10 +609,12 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                 if len(buffer) >= batch_size:
                     await self._flush_buffer(buffer, writer_conn=writer_conn)
         finally:
-            # Bounded best-effort flush of completed-but-unflushed rows on exit. Only
-            # reachable on a drain timeout (a graceful stop empties the buffer via the
-            # idle flush before join() returns). asyncio.timeout caps a wedged DELETE so
-            # cancellation can't hang stop(); TimeoutError (and any flush error) is
+            # Bounded best-effort flush of completed-but-unflushed rows on exit. Reachable
+            # on a drain timeout (a graceful stop empties the buffer via the idle flush
+            # before join() returns), and on a mid-operation inline retry/DLQ flush error
+            # while the buffer already holds batched rows (the error propagates here and
+            # the outer loop rebuilds the connection). asyncio.timeout caps a wedged DELETE
+            # so cancellation can't hang stop(); TimeoutError (and any flush error) is
             # suppressed and the rows fall back to lease-expiry redelivery.
             if buffer:
                 with suppress(Exception):

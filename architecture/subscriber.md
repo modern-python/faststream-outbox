@@ -26,7 +26,7 @@ The default ack policy is `AckPolicy.NACK_ON_ERROR`; `REJECT_ON_ERROR` and `MANU
 
 A subscriber can hold up to `fetch_batch_size + max_workers` leases at once, not `fetch_batch_size` (F1-01). The free-slot computation `free = _inflight.maxsize - qsize()` counts only queued rows, so once `max_workers` rows are checked out for processing, the loop can claim another full batch. Leases are bounded and self-expire via TTL, but when sizing `lease_ttl_seconds` and reasoning about cross-replica contention, reason against `fetch_batch_size + max_workers`, not `fetch_batch_size`.
 
-With batched terminal flush on (`terminal_flush_batch_size > 1`), each worker also holds up to `terminal_flush_batch_size` completed-but-unflushed leases in its buffer on top of that — the ceiling becomes `fetch_batch_size + max_workers × terminal_flush_batch_size`. These leases release only when the batch `DELETE` lands, so size `lease_ttl_seconds` against the extra hold time a full buffer implies.
+With batched terminal flush on (`terminal_flush_batch_size > 1`), each worker also holds up to `terminal_flush_batch_size` completed-but-unflushed leases in its buffer, on top of the row it is currently processing — so the ceiling becomes `fetch_batch_size + max_workers × (terminal_flush_batch_size + 1)` (the `+ 1` is the in-hand row each worker holds before it buffers). These leases release only when the batch `DELETE` lands, so size `lease_ttl_seconds` against the extra hold time a full buffer implies.
 
 ## Connection budget
 
