@@ -702,8 +702,13 @@ def _run_validate(
     canonical_factory(canonical_metadata, table.name)
 
     def _include_name(name: str | None, type_: str, parent_names: "Mapping[str, str | None]") -> bool:
+        # ``include_schemas=True`` makes Alembic enumerate EVERY schema and call this with
+        # ``type_ == "schema"`` per schema — restrict to the target schema so unrelated
+        # schemas' tables never reflect into the diff (which would surface as false drift).
+        # Alembic reports the default schema as ``None`` here, so ``name == table.schema``
+        # matches None-vs-None for a default-schema table and the literal name otherwise.
         if type_ == "schema":
-            return True
+            return name == table.schema
         if type_ == "table":
             return name == table.name
         return parent_names.get("table_name") == table.name
@@ -713,6 +718,10 @@ def _run_validate(
         opts={
             "compare_type": True,
             "compare_server_default": False,
+            # Reflect beyond the default schema so a table in a non-default
+            # ``MetaData(schema=...)`` is visible to ``compare_metadata`` (else it reads as
+            # "table does not exist"); ``_include_name`` narrows reflection to the target schema.
+            "include_schemas": True,
             "include_name": _include_name,
             "target_metadata": canonical_metadata,
         },

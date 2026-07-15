@@ -72,6 +72,13 @@ Autogenerate-fixable drift (columns, plain indexes, DLQ) gets no pointer. Messag
 composition lives in `_compose_schema_mismatch_message` (`client.py`), gated on
 `has_blind_drift`.
 
+The alembic diff runs with `include_schemas=True` so a table in a non-default
+`MetaData(schema=...)` is reflected and compared (without it, `compare_metadata`
+only sees the default schema and a named-schema table falsely reads as "table does
+not exist"). `_include_name` narrows schema reflection to the target schema
+(`name == table.schema`, where the default schema is reported as `None`) so
+unrelated schemas never surface as false drift.
+
 Alembic is optional (`faststream-outbox[validate]`); without it `validate_schema()`
 raises `ImportError`, but every other path works.
 

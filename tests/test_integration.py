@@ -23,7 +23,6 @@ from faststream_outbox import (
     make_outbox_table,
     outbox_autovacuum_ddl,
 )
-from faststream_outbox.autovacuum import _RELOPTIONS_QUERY, autovacuum_findings
 from faststream_outbox.client import OutboxClient
 from faststream_outbox.envelope import _encode_payload as encode_payload
 from faststream_outbox.publisher.fake import OutboxFakePublisher
@@ -105,6 +104,28 @@ async def test_validate_schema_detects_non_unique_timer_id_index(
 async def test_validate_schema_passes_for_correct_table(pg_engine, outbox_table) -> None:
     client = OutboxClient(pg_engine, outbox_table)
     await client.validate_schema()  # should not raise
+
+
+async def test_validate_schema_passes_for_table_in_named_schema(pg_engine: AsyncEngine) -> None:
+    """A correct outbox table in a non-default ``MetaData(schema=...)`` must validate.
+
+    ``_run_validate`` configures Alembic with ``include_schemas=True`` so its reflection
+    reaches beyond the default schema; without it, a named-schema table is invisible to
+    ``compare_metadata`` and falsely reads as ``table 'outbox' does not exist``.
+    """
+    schema = f"sch_vs_{uuid.uuid4().hex[:8]}"
+    metadata = MetaData(schema=schema)
+    table = make_outbox_table(metadata, table_name="outbox")
+    async with pg_engine.begin() as conn:
+        await conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+        await conn.run_sync(metadata.create_all)
+    try:
+        client = OutboxClient(pg_engine, table)
+        await client.validate_schema()  # must NOT raise
+    finally:
+        async with pg_engine.begin() as conn:
+            await conn.run_sync(metadata.drop_all)
+            await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
 
 
 async def test_validate_schema_fails_for_missing_table(pg_engine) -> None:
@@ -2176,19 +2197,14 @@ async def test_validate_schema_autovacuum_false_does_not_check(pg_engine: AsyncE
     await client.validate_schema()  # default also must NOT raise
 
 
-async def test_autovacuum_findings_ok_when_applied_in_named_schema(pg_engine: AsyncEngine) -> None:
-    """The DDL helper's ``schema=`` must target the same table the schema-aware reloptions query reads.
+async def test_validate_schema_autovacuum_ok_when_applied_in_named_schema(pg_engine: AsyncEngine) -> None:
+    """Full round-trip: ``validate_schema(check_autovacuum=True)`` on a named-schema table does not raise.
 
-    Before the fix, ``outbox_autovacuum_ddl`` had no ``schema`` param and always rendered an
-    unqualified ``ALTER TABLE outbox ...``, which resolves via search_path -- silently missing
-    (or mistargeting) a table that lives in a named schema, while the reloptions query (already
-    schema-aware via ``COALESCE(:schema, current_schema())``) kept reporting the real table as
-    untuned.
-
-    NB: this exercises ``_RELOPTIONS_QUERY`` + ``autovacuum_findings`` directly rather than through
-    ``OutboxClient.validate_schema(check_autovacuum=True)`` — the latter's Alembic-diff schema
-    probe has a pre-existing, unrelated limitation with non-default Postgres schemas (see the
-    autovacuum-refactor report), which is orthogonal to the autovacuum check itself.
+    The DDL helper's ``schema=`` must target the same table the schema-aware reloptions query
+    reads: ``outbox_autovacuum_ddl(name, schema=table.schema)`` applies the reloptions, and the
+    check (schema-aware via ``COALESCE(:schema, current_schema())``, plus the schema-reflecting
+    ``validate_schema`` diff) confirms them — neither the schema probe nor the autovacuum probe
+    falsely fires for a correct table in a non-default ``MetaData(schema=...)``.
     """
     schema = f"sch_av_{uuid.uuid4().hex[:8]}"
     metadata = MetaData(schema=schema)
@@ -2199,11 +2215,8 @@ async def test_autovacuum_findings_ok_when_applied_in_named_schema(pg_engine: As
     try:
         async with pg_engine.begin() as conn:
             await conn.execute(text(outbox_autovacuum_ddl(table.name, schema=table.schema)))
-        async with pg_engine.connect() as conn:
-            reloptions = (
-                await conn.execute(_RELOPTIONS_QUERY, {"table": table.name, "schema": table.schema})
-            ).scalar_one_or_none()
-        assert autovacuum_findings(table.name, reloptions) == []
+        client = OutboxClient(pg_engine, table)
+        await client.validate_schema(check_autovacuum=True)  # must NOT raise
     finally:
         async with pg_engine.begin() as conn:
             await conn.run_sync(metadata.drop_all)
