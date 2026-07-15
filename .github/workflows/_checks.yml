@@ -25,6 +25,13 @@ jobs:
       - uses: astral-sh/setup-uv@v8.2.0
       - run: just docs-build
 
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: extractions/setup-just@v4
+      - run: just bench-check
+
   pytest:
     runs-on: ubuntu-latest
     strategy:
