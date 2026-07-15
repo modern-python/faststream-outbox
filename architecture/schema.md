@@ -74,3 +74,16 @@ composition lives in `_compose_schema_mismatch_message` (`client.py`), gated on
 
 Alembic is optional (`faststream-outbox[validate]`); without it `validate_schema()`
 raises `ImportError`, but every other path works.
+
+## Autovacuum (recommended, not enforced)
+
+The outbox is high-churn (`dead_tup ≈ 2 × messages`: the lease `UPDATE` + terminal
+`DELETE` each leave a dead tuple). Aggressive autovacuum
+(`autovacuum_vacuum_scale_factor = 0` + a constant threshold, for both the vacuum and
+insert-triggered pairs) is **recommended but not enforced**: SQLAlchemy's `Table`
+cannot carry reloptions, so autogenerate can't emit them, and the package applies
+nothing itself. `outbox_autovacuum_ddl()` (in `autovacuum.py`) renders the migration
+statement; `check_outbox_autovacuum()` is a warn-level `pg_class.reloptions` probe,
+kept out of `validate_schema()` so that method's raise-on-mismatch contract is
+unchanged. `fillfactor` is excluded on evidence (HOT is impossible — the claim
+`UPDATE` mutates both partial indexes' key columns).

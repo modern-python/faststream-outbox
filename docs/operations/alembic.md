@@ -167,6 +167,48 @@ consequence that bites is a missing `server_default=now()` on
 `next_attempt_at`; see the server-defaults caveat in
 [Schema validation](../usage/schema-validation.md).
 
+## Autovacuum tuning (recommended)
+
+The outbox is a high-churn queue table: every message is one `INSERT`, one lease
+`UPDATE`, and one terminal `DELETE`, so dead tuples accumulate at roughly **twice
+the message rate**. Postgres' default `autovacuum_vacuum_scale_factor = 0.2` fires
+vacuum only after a *fraction of the table* is dead — on a queue table that lets
+bloat grow, and if the table bloats the fraction is *of the bloated size*, so vacuum
+fires ever less often. Set the scale factor to `0` so vacuum triggers on a constant
+dead-tuple count instead, tracking churn rather than table size.
+
+SQLAlchemy's `Table` cannot carry these reloptions, so `alembic revision
+--autogenerate` will never emit them — apply them with an explicit statement.
+`faststream_outbox` renders it for you:
+
+```python
+from alembic import op
+from faststream_outbox import outbox_autovacuum_ddl
+
+
+def upgrade() -> None:
+    op.execute(outbox_autovacuum_ddl("outbox"))
+```
+
+This sets `autovacuum_vacuum_scale_factor = 0` and `autovacuum_vacuum_threshold =
+1000` (plus the insert-triggered pair, Postgres 13+). Tune the thresholds for your
+message rate — `outbox_autovacuum_ddl("outbox", vacuum_threshold=5000,
+insert_threshold=5000)` — a higher threshold vacuums less often. `fillfactor` is
+intentionally not set: the lease `UPDATE` touches indexed columns, so HOT updates
+are impossible and `fillfactor` buys almost nothing here.
+
+To catch a table that never had the settings applied, call `check_outbox_autovacuum`
+from a startup hook or `/health`. It returns warnings (never raises) and is separate
+from `validate_schema()`:
+
+```python
+from faststream_outbox import check_outbox_autovacuum
+
+warnings = await check_outbox_autovacuum(engine, outbox_table)
+if warnings:
+    logger.warning("outbox autovacuum not tuned: %s", "; ".join(warnings))
+```
+
 ## Fixing drift autogenerate can't see { #fixing-drift-autogenerate-cant-see }
 
 Two kinds of drift that
