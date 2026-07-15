@@ -4,6 +4,7 @@ import typing
 from faststream._internal.broker import BrokerUsecase
 from faststream._internal.testing.broker import TestBroker
 
+from faststream_outbox.autovacuum import outbox_autovacuum_ddl
 from faststream_outbox.broker import OutboxBroker
 from faststream_outbox.message import OutboxMessage
 from faststream_outbox.metrics import MetricsRecorder
@@ -36,6 +37,7 @@ __all__ = [
     "TestOutboxBroker",
     "make_dlq_table",
     "make_outbox_table",
+    "outbox_autovacuum_ddl",
 ]
 
 try:

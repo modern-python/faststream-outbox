@@ -38,6 +38,7 @@ from faststream_outbox import (
     TestOutboxBroker,
     make_dlq_table,
     make_outbox_table,
+    outbox_autovacuum_ddl,
 )
 from faststream_outbox.annotations import OutboxMessage as AnnotatedOutboxMessage
 from faststream_outbox.broker import OutboxParamsStorage
@@ -4105,3 +4106,29 @@ async def test_spec_url_uses_password_masked_engine_dsn_when_engine_present() ->
     assert urls, "spec url must be non-empty when an engine is present"
     assert "supersecret" not in urls[0], "password must be masked in the AsyncAPI server url"
     assert "db.example" in urls[0]
+
+
+def test_outbox_autovacuum_ddl_default() -> None:
+    sql = outbox_autovacuum_ddl("outbox")
+    assert sql == (
+        "ALTER TABLE outbox SET ("
+        "autovacuum_vacuum_scale_factor = 0, "
+        "autovacuum_vacuum_threshold = 1000, "
+        "autovacuum_vacuum_insert_scale_factor = 0, "
+        "autovacuum_vacuum_insert_threshold = 1000)"
+    )
+
+
+def test_outbox_autovacuum_ddl_threshold_overrides() -> None:
+    sql = outbox_autovacuum_ddl("outbox", vacuum_threshold=5000, insert_threshold=2000)
+    assert "autovacuum_vacuum_threshold = 5000" in sql
+    assert "autovacuum_vacuum_insert_threshold = 2000" in sql
+    # scale factors stay structural regardless of threshold overrides
+    assert "autovacuum_vacuum_scale_factor = 0" in sql
+    assert "autovacuum_vacuum_insert_scale_factor = 0" in sql
+
+
+def test_outbox_autovacuum_ddl_quotes_reserved_table_name() -> None:
+    # A reserved word must be quoted so the ALTER TABLE parses.
+    sql = outbox_autovacuum_ddl("user")
+    assert sql.startswith('ALTER TABLE "user" SET (')
