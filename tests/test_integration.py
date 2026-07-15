@@ -19,11 +19,11 @@ from faststream_outbox import (
     NoRetry,
     OutboxBroker,
     OutboxResponse,
-    check_outbox_autovacuum,
     make_dlq_table,
     make_outbox_table,
     outbox_autovacuum_ddl,
 )
+from faststream_outbox.autovacuum import _RELOPTIONS_QUERY, autovacuum_findings
 from faststream_outbox.client import OutboxClient
 from faststream_outbox.envelope import _encode_payload as encode_payload
 from faststream_outbox.publisher.fake import OutboxFakePublisher
@@ -2129,45 +2129,66 @@ async def test_validate_schema_passes_under_ck_convention_with_literally_named_c
             await conn.run_sync(metadata.drop_all)
 
 
-async def test_check_autovacuum_ok_when_applied(pg_engine: AsyncEngine, outbox_table: Table) -> None:
+async def test_validate_schema_autovacuum_raises_when_untuned(pg_engine: AsyncEngine, outbox_table: Table) -> None:
+    """Fresh table (the fixture applies no reloptions) -> distinctly-labeled raise, not a schema mismatch."""
+    client = OutboxClient(pg_engine, outbox_table)
+    with pytest.raises(RuntimeError, match="autovacuum not tuned") as excinfo:
+        await client.validate_schema(check_autovacuum=True)
+    assert "schema mismatch" not in str(excinfo.value)
+
+
+async def test_validate_schema_autovacuum_ok_when_applied(pg_engine: AsyncEngine, outbox_table: Table) -> None:
     async with pg_engine.begin() as conn:
         await conn.execute(text(outbox_autovacuum_ddl(outbox_table.name)))
-    assert await check_outbox_autovacuum(pg_engine, outbox_table) == []
+    client = OutboxClient(pg_engine, outbox_table)
+    await client.validate_schema(check_autovacuum=True)  # must NOT raise
 
 
-async def test_check_autovacuum_warns_when_unset(pg_engine: AsyncEngine, outbox_table: Table) -> None:
-    # Fresh table (the fixture applies no reloptions) -> a warning per required key.
-    warnings = await check_outbox_autovacuum(pg_engine, outbox_table)
-    assert warnings  # non-empty
-    joined = " ".join(warnings)
-    assert "autovacuum_vacuum_scale_factor" in joined
-    assert "autovacuum_vacuum_threshold" in joined
-
-
-async def test_check_autovacuum_ok_with_custom_threshold(pg_engine: AsyncEngine, outbox_table: Table) -> None:
-    # scale_factor still 0, but a deliberately different threshold -> no false warning.
+async def test_validate_schema_autovacuum_ok_with_custom_threshold(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+) -> None:
+    # scale_factor still 0, but a deliberately different threshold -> no false raise.
     async with pg_engine.begin() as conn:
         await conn.execute(text(outbox_autovacuum_ddl(outbox_table.name, vacuum_threshold=5000)))
-    assert await check_outbox_autovacuum(pg_engine, outbox_table) == []
+    client = OutboxClient(pg_engine, outbox_table)
+    await client.validate_schema(check_autovacuum=True)  # must NOT raise
 
 
-async def test_check_autovacuum_warns_when_scale_factor_nonzero(pg_engine: AsyncEngine, outbox_table: Table) -> None:
+async def test_validate_schema_autovacuum_raises_when_scale_factor_nonzero(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+) -> None:
     # A user who set a nonzero scale factor is still exposed to the death-spiral.
     async with pg_engine.begin() as conn:
         await conn.execute(
             text(f'ALTER TABLE "{outbox_table.name}" SET (autovacuum_vacuum_scale_factor = 0.1)'),
         )
-    warnings = await check_outbox_autovacuum(pg_engine, outbox_table)
-    assert any("autovacuum_vacuum_scale_factor" in w for w in warnings)
+    client = OutboxClient(pg_engine, outbox_table)
+    with pytest.raises(RuntimeError, match="autovacuum not tuned"):
+        await client.validate_schema(check_autovacuum=True)
 
 
-async def test_check_autovacuum_ok_when_applied_in_named_schema(pg_engine: AsyncEngine) -> None:
-    """The DDL helper's ``schema=`` must target the same table the schema-aware probe checks.
+async def test_validate_schema_autovacuum_false_does_not_check(pg_engine: AsyncEngine, outbox_table: Table) -> None:
+    """``check_autovacuum=False`` (the default) never raises for autovacuum, even on an untuned table."""
+    client = OutboxClient(pg_engine, outbox_table)
+    await client.validate_schema(check_autovacuum=False)  # must NOT raise
+    await client.validate_schema()  # default also must NOT raise
+
+
+async def test_autovacuum_findings_ok_when_applied_in_named_schema(pg_engine: AsyncEngine) -> None:
+    """The DDL helper's ``schema=`` must target the same table the schema-aware reloptions query reads.
 
     Before the fix, ``outbox_autovacuum_ddl`` had no ``schema`` param and always rendered an
     unqualified ``ALTER TABLE outbox ...``, which resolves via search_path -- silently missing
-    (or mistargeting) a table that lives in a named schema, while the probe (which is already
-    schema-aware) kept warning the real table was untuned.
+    (or mistargeting) a table that lives in a named schema, while the reloptions query (already
+    schema-aware via ``COALESCE(:schema, current_schema())``) kept reporting the real table as
+    untuned.
+
+    NB: this exercises ``_RELOPTIONS_QUERY`` + ``autovacuum_findings`` directly rather than through
+    ``OutboxClient.validate_schema(check_autovacuum=True)`` — the latter's Alembic-diff schema
+    probe has a pre-existing, unrelated limitation with non-default Postgres schemas (see the
+    autovacuum-refactor report), which is orthogonal to the autovacuum check itself.
     """
     schema = f"sch_av_{uuid.uuid4().hex[:8]}"
     metadata = MetaData(schema=schema)
@@ -2178,7 +2199,11 @@ async def test_check_autovacuum_ok_when_applied_in_named_schema(pg_engine: Async
     try:
         async with pg_engine.begin() as conn:
             await conn.execute(text(outbox_autovacuum_ddl(table.name, schema=table.schema)))
-        assert await check_outbox_autovacuum(pg_engine, table) == []
+        async with pg_engine.connect() as conn:
+            reloptions = (
+                await conn.execute(_RELOPTIONS_QUERY, {"table": table.name, "schema": table.schema})
+            ).scalar_one_or_none()
+        assert autovacuum_findings(table.name, reloptions) == []
     finally:
         async with pg_engine.begin() as conn:
             await conn.run_sync(metadata.drop_all)

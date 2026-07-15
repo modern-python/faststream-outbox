@@ -41,6 +41,7 @@ from sqlalchemy import (
 # ``_import_checker`` so every optional-extra site uses the same shape. Users who
 # don't call validate_schema() never trigger the runtime import path.
 from faststream_outbox._import_checker import is_alembic_installed
+from faststream_outbox.autovacuum import _RELOPTIONS_QUERY, autovacuum_findings
 from faststream_outbox.message import OutboxInnerMessage
 from faststream_outbox.schema import (
     _DLQ_INJECTED_COLUMNS,
@@ -137,7 +138,7 @@ class AbstractOutboxClient(abc.ABC):
     ) -> bool: ...
 
     @abc.abstractmethod
-    async def validate_schema(self) -> None: ...
+    async def validate_schema(self, *, check_autovacuum: bool = False) -> None: ...
 
     @abc.abstractmethod
     async def ping(self) -> bool: ...
@@ -435,13 +436,20 @@ class OutboxClient(AbstractOutboxClient):
         result = await conn.execute(stmt, {"delay": max(0.0, delay_seconds)})
         return (result.rowcount or 0) > 0
 
-    async def validate_schema(self) -> None:
+    async def validate_schema(self, *, check_autovacuum: bool = False) -> None:
         """Validate that the database table(s) match the package's expected columns.
 
         Raises ``RuntimeError`` listing every mismatch across the outbox table and,
         when configured, the DLQ table. Opt-in: call from your startup hook or
         ``/health`` endpoint, not from ``broker.start()`` (so Alembic can run
         migrations against the same DB without blocking startup).
+
+        Pass ``check_autovacuum=True`` to also enforce the recommended
+        ``autovacuum_vacuum_scale_factor = 0`` + threshold reloptions (see
+        :func:`faststream_outbox.autovacuum.outbox_autovacuum_ddl`); an untuned table
+        raises a distinctly-labeled "Outbox autovacuum not tuned: " error, separate
+        from a schema mismatch, so an operator can tell the two apart. Default
+        ``False`` never checks it.
         """
         async with self._engine.connect() as conn:
             errors = await conn.run_sync(_validate_schema_sync, self._table)
@@ -456,10 +464,19 @@ class OutboxClient(AbstractOutboxClient):
             errors.extend(blind_errors)
             if self._dlq_table is not None:
                 errors.extend(await conn.run_sync(_validate_dlq_schema_sync, self._dlq_table))
+            autovacuum_errors: list[str] = []
+            if check_autovacuum:
+                reloptions = (
+                    await conn.execute(_RELOPTIONS_QUERY, {"table": self._table.name, "schema": self._table.schema})
+                ).scalar_one_or_none()
+                autovacuum_errors = autovacuum_findings(self._table.name, reloptions)
+        message_parts: list[str] = []
         if errors:
-            raise RuntimeError(
-                _compose_schema_mismatch_message(errors, has_blind_drift=bool(blind_errors)),
-            )
+            message_parts.append(_compose_schema_mismatch_message(errors, has_blind_drift=bool(blind_errors)))
+        if autovacuum_errors:
+            message_parts.append("Outbox autovacuum not tuned: " + "; ".join(autovacuum_errors))
+        if message_parts:
+            raise RuntimeError("\n\n".join(message_parts))
 
     async def ping(self) -> bool:
         # Bound the probe: an unwrapped connect+SELECT 1 against a half-dead TCP socket

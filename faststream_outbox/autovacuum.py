@@ -11,20 +11,13 @@ vacuum frequency tracks *churn* via a constant threshold, not table size.
 SQLAlchemy's ``Table`` cannot carry reloptions (the PG dialect accepts no such
 kwarg), so Alembic autogenerate can never emit them. These settings must be applied
 by an explicit statement the user runs -- :func:`outbox_autovacuum_ddl` renders it
-for an Alembic migration; :func:`check_outbox_autovacuum` reports when a table lacks
-it. The package applies nothing itself and never raises for autovacuum: it is a
-performance recommendation, not a correctness requirement.
+for an Alembic migration; ``validate_schema(check_autovacuum=True)`` enforces it
+(raises) when the table lacks it. The package applies nothing itself; enforcement
+is opt-in via that flag, not a default.
 """
-
-from typing import TYPE_CHECKING
 
 from sqlalchemy import text
 from sqlalchemy.dialects import postgresql
-
-
-if TYPE_CHECKING:
-    from sqlalchemy import Table
-    from sqlalchemy.ext.asyncio import AsyncEngine
 
 
 # Single source of truth for the reloption keys, shared by the renderer and the probe.
@@ -58,9 +51,10 @@ def outbox_autovacuum_ddl(
 
     ``schema`` defaults to ``None``, which renders an unqualified table name that resolves
     via the connection's ``search_path`` -- matching both ``Table.schema=None`` and
-    :func:`check_outbox_autovacuum`'s ``COALESCE(:schema, current_schema())`` lookup. Pass
-    the same ``schema`` as the outbox ``Table`` (e.g. ``table.schema``) when it lives in a
-    named schema, so this DDL targets the same table the probe checks.
+    the ``validate_schema(check_autovacuum=True)`` reloptions lookup's
+    ``COALESCE(:schema, current_schema())``. Pass the same ``schema`` as the outbox
+    ``Table`` (e.g. ``table.schema``) when it lives in a named schema, so this DDL
+    targets the same table the check reads.
     """
     quoted_table = _IDENTIFIER_PREPARER.quote(table_name)
     quoted_name = quoted_table if schema is None else f"{_IDENTIFIER_PREPARER.quote(schema)}.{quoted_table}"
@@ -97,32 +91,25 @@ def _parse_reloptions(reloptions: "list[str] | None") -> dict[str, str]:
     return parsed
 
 
-async def check_outbox_autovacuum(engine: "AsyncEngine", table: "Table") -> list[str]:
-    """Report (do not raise) when *table* lacks the aggressive autovacuum settings.
+def autovacuum_findings(table_name: str, reloptions: "list[str] | None") -> list[str]:
+    """Return one finding string per missing/wrong autovacuum setting; ``[]`` means OK.
 
-    Reads ``pg_class.reloptions`` and returns a human-readable warning per missing
-    requirement; ``[]`` means the recommended settings are present. Opt-in -- call it
-    from a startup hook or ``/health``. Warn-level by design: autovacuum tuning is a
-    performance recommendation, not a correctness requirement, so this is deliberately
-    NOT part of ``validate_schema()`` (which raises on mismatch). It checks the
-    structural ``scale_factor = 0`` and that a threshold is set, not the threshold
-    value, so a user's legitimate threshold tuning does not trip a false warning.
+    Pure -- takes already-fetched ``pg_class.reloptions`` (see :data:`_RELOPTIONS_QUERY`)
+    so the caller (``OutboxClient.validate_schema``) owns the query and the connection.
+    Structural check: each scale-factor key must be present AND 0; each threshold key
+    must be present (any value -- a user's custom threshold must not be flagged).
     """
-    async with engine.connect() as conn:
-        reloptions = (
-            await conn.execute(_RELOPTIONS_QUERY, {"table": table.name, "schema": table.schema})
-        ).scalar_one_or_none()
     options = _parse_reloptions(reloptions)
-    warnings: list[str] = []
+    findings: list[str] = []
     for key in _SCALE_FACTOR_KEYS:
         value = options.get(key)
         if value is None:
-            warnings.append(f"{table.name}: {key} is unset (want 0) -- bloat accumulates under churn; {_SEE_DOCS}.")
+            findings.append(f"{table_name}: {key} is unset (want 0) -- bloat accumulates under churn; {_SEE_DOCS}.")
         elif float(value) != 0.0:
-            warnings.append(f"{table.name}: {key} is {value}, not 0 -- bloat accumulates under churn; {_SEE_DOCS}.")
-    warnings.extend(
-        f"{table.name}: {key} is unset -- {_SEE_DOCS}."
+            findings.append(f"{table_name}: {key} is {value}, not 0 -- bloat accumulates under churn; {_SEE_DOCS}.")
+    findings.extend(
+        f"{table_name}: {key} is unset -- {_SEE_DOCS}."
         for key in (_VACUUM_THRESHOLD_KEY, _INSERT_THRESHOLD_KEY)
         if key not in options
     )
-    return warnings
+    return findings

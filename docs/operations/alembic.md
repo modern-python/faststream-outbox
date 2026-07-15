@@ -201,16 +201,13 @@ If your outbox table lives in a non-default `MetaData(schema=...)`, pass the sam
 schema — `outbox_autovacuum_ddl("outbox", schema="app")` — so the `ALTER TABLE`
 targets that table rather than an unqualified name resolved via `search_path`.
 
-To catch a table that never had the settings applied, call `check_outbox_autovacuum`
-from a startup hook or `/health`. It returns warnings (never raises) and is separate
-from `validate_schema()`:
+To catch a table that never had the settings applied, pass `check_autovacuum=True`
+to `validate_schema()`. Requires the `[validate]` (Alembic) extra:
 
 ```python
-from faststream_outbox import check_outbox_autovacuum
-
-warnings = await check_outbox_autovacuum(engine, outbox_table)
-if warnings:
-    logger.warning("outbox autovacuum not tuned: %s", "; ".join(warnings))
+# In a startup hook or /health check -- raises if the outbox table is not tuned
+# (and if the schema itself has drifted). Requires the [validate] extra.
+await broker.validate_schema(check_autovacuum=True)
 ```
 
 ## Fixing drift autogenerate can't see { #fixing-drift-autogenerate-cant-see }

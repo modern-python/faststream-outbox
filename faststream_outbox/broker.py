@@ -358,9 +358,13 @@ class OutboxBroker(
         # Only reached when the timeout scope cancelled the probe.
         return False
 
-    async def validate_schema(self) -> None:
-        """Validate the user's table matches what the package expects. Opt-in."""
-        await self.client.validate_schema()
+    async def validate_schema(self, *, check_autovacuum: bool = False) -> None:
+        """Validate the user's table matches what the package expects. Opt-in.
+
+        Pass ``check_autovacuum=True`` to also enforce the recommended autovacuum
+        reloptions; see :meth:`OutboxClient.validate_schema`.
+        """
+        await self.client.validate_schema(check_autovacuum=check_autovacuum)
 
     async def publish(  # ty: ignore[invalid-method-override]
         self,
