@@ -16,7 +16,15 @@ it. The package applies nothing itself and never raises for autovacuum: it is a
 performance recommendation, not a correctness requirement.
 """
 
+from typing import TYPE_CHECKING
+
+from sqlalchemy import text
 from sqlalchemy.dialects import postgresql
+
+
+if TYPE_CHECKING:
+    from sqlalchemy import Table
+    from sqlalchemy.ext.asyncio import AsyncEngine
 
 
 # Single source of truth for the reloption keys, shared by the renderer and the probe.
@@ -56,3 +64,57 @@ def outbox_autovacuum_ddl(
     )
     settings = ", ".join(f"{key} = {value}" for key, value in options)
     return f"ALTER TABLE {quoted} SET ({settings})"
+
+
+# reloptions come back from asyncpg as a ``list[str]`` of ``"key=value"`` items, or
+# None when the table has no options set (or does not exist). NULL nspname match uses
+# current_schema() so a search_path-relative table resolves the same way the app does.
+_RELOPTIONS_QUERY = text(
+    "SELECT c.reloptions FROM pg_class c "
+    "JOIN pg_namespace n ON n.oid = c.relnamespace "
+    "WHERE c.relname = :table AND n.nspname = COALESCE(:schema, current_schema())",
+)
+
+_SEE_DOCS = "apply outbox_autovacuum_ddl() in a migration -- see docs/operations/alembic.md"
+
+
+def _parse_reloptions(reloptions: "list[str] | None") -> dict[str, str]:
+    """Turn asyncpg's ``["k=v", …]`` reloptions array (or None) into a dict."""
+    if not reloptions:
+        return {}
+    parsed: dict[str, str] = {}
+    for item in reloptions:
+        key, _, value = item.partition("=")
+        parsed[key] = value
+    return parsed
+
+
+async def check_outbox_autovacuum(engine: "AsyncEngine", table: "Table") -> list[str]:
+    """Report (do not raise) when *table* lacks the aggressive autovacuum settings.
+
+    Reads ``pg_class.reloptions`` and returns a human-readable warning per missing
+    requirement; ``[]`` means the recommended settings are present. Opt-in -- call it
+    from a startup hook or ``/health``. Warn-level by design: autovacuum tuning is a
+    performance recommendation, not a correctness requirement, so this is deliberately
+    NOT part of ``validate_schema()`` (which raises on mismatch). It checks the
+    structural ``scale_factor = 0`` and that a threshold is set, not the threshold
+    value, so a user's legitimate threshold tuning does not trip a false warning.
+    """
+    async with engine.connect() as conn:
+        reloptions = (
+            await conn.execute(_RELOPTIONS_QUERY, {"table": table.name, "schema": table.schema})
+        ).scalar_one_or_none()
+    options = _parse_reloptions(reloptions)
+    warnings: list[str] = []
+    for key in _SCALE_FACTOR_KEYS:
+        value = options.get(key)
+        if value is None:
+            warnings.append(f"{table.name}: {key} is unset (want 0) -- bloat accumulates under churn; {_SEE_DOCS}.")
+        elif float(value) != 0.0:
+            warnings.append(f"{table.name}: {key} is {value}, not 0 -- bloat accumulates under churn; {_SEE_DOCS}.")
+    warnings.extend(
+        f"{table.name}: {key} is unset -- {_SEE_DOCS}."
+        for key in (_VACUUM_THRESHOLD_KEY, _INSERT_THRESHOLD_KEY)
+        if key not in options
+    )
+    return warnings

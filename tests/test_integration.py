@@ -19,8 +19,10 @@ from faststream_outbox import (
     NoRetry,
     OutboxBroker,
     OutboxResponse,
+    check_outbox_autovacuum,
     make_dlq_table,
     make_outbox_table,
+    outbox_autovacuum_ddl,
 )
 from faststream_outbox.client import OutboxClient
 from faststream_outbox.envelope import _encode_payload as encode_payload
@@ -2125,3 +2127,35 @@ async def test_validate_schema_passes_under_ck_convention_with_literally_named_c
     finally:
         async with pg_engine.begin() as conn:
             await conn.run_sync(metadata.drop_all)
+
+
+async def test_check_autovacuum_ok_when_applied(pg_engine: AsyncEngine, outbox_table: Table) -> None:
+    async with pg_engine.begin() as conn:
+        await conn.execute(text(outbox_autovacuum_ddl(outbox_table.name)))
+    assert await check_outbox_autovacuum(pg_engine, outbox_table) == []
+
+
+async def test_check_autovacuum_warns_when_unset(pg_engine: AsyncEngine, outbox_table: Table) -> None:
+    # Fresh table (the fixture applies no reloptions) -> a warning per required key.
+    warnings = await check_outbox_autovacuum(pg_engine, outbox_table)
+    assert warnings  # non-empty
+    joined = " ".join(warnings)
+    assert "autovacuum_vacuum_scale_factor" in joined
+    assert "autovacuum_vacuum_threshold" in joined
+
+
+async def test_check_autovacuum_ok_with_custom_threshold(pg_engine: AsyncEngine, outbox_table: Table) -> None:
+    # scale_factor still 0, but a deliberately different threshold -> no false warning.
+    async with pg_engine.begin() as conn:
+        await conn.execute(text(outbox_autovacuum_ddl(outbox_table.name, vacuum_threshold=5000)))
+    assert await check_outbox_autovacuum(pg_engine, outbox_table) == []
+
+
+async def test_check_autovacuum_warns_when_scale_factor_nonzero(pg_engine: AsyncEngine, outbox_table: Table) -> None:
+    # A user who set a nonzero scale factor is still exposed to the death-spiral.
+    async with pg_engine.begin() as conn:
+        await conn.execute(
+            text(f'ALTER TABLE "{outbox_table.name}" SET (autovacuum_vacuum_scale_factor = 0.1)'),
+        )
+    warnings = await check_outbox_autovacuum(pg_engine, outbox_table)
+    assert any("autovacuum_vacuum_scale_factor" in w for w in warnings)
