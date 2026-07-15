@@ -25,6 +25,20 @@ jobs:
       - uses: astral-sh/setup-uv@v8.2.0
       - run: just docs-build
 
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: extractions/setup-just@v4
+      - uses: astral-sh/setup-uv@v8.2.0
+      # uv.lock is git-ignored (repo convention), so a clean checkout lacks it.
+      # `just bench-check` builds the compose `application` image, whose Dockerfile
+      # does `COPY uv.lock` + `uv sync --frozen`; regenerate the lock first so that
+      # build has it. (The pytest job runs `uv sync` directly and needs no compose.)
+      - run: uv lock
+      - run: just bench-check
+
   pytest:
     runs-on: ubuntu-latest
     strategy:

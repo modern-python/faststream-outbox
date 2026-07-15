@@ -44,6 +44,14 @@ publish:
     uv build
     uv publish
 
+# Run the benchmark sweep and print the report. Args forward unquoted (same caveat as `test`).
+bench *args: down && down
+    docker compose run application uv run python -m benchmarks run {{ args }}
+
+# Gate the deterministic counters against benchmarks/baseline.json. CI runs this.
+bench-check: down && down
+    docker compose run application uv run python -m benchmarks check
+
 # Serve docs at http://127.0.0.1:8000 with hot-reload on save.
 docs-serve:
     uvx --with-requirements docs/requirements.txt mkdocs serve

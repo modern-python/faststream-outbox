@@ -18,6 +18,10 @@ services:
   postgres:
     image: postgres:17
     restart: always
+    command: >-
+      postgres
+      -c shared_preload_libraries=pg_stat_statements
+      -c pg_stat_statements.track=all
     environment:
       - POSTGRES_USER=outbox
       - POSTGRES_PASSWORD=outbox
