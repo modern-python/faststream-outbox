@@ -2503,6 +2503,54 @@ async def test_worker_inner_exit_flush_is_timeout_bounded_when_delete_hangs() ->
     assert not fake.delete_completed, "the hung DELETE must be cancelled, not allowed to land"
 
 
+async def test_worker_inner_exit_flush_timeout_still_task_dones_the_buffer() -> None:
+    """A timed-out exit flush must still balance ``task_done`` -- not just return promptly.
+
+    ``asyncio.timeout`` injects a ``CancelledError`` at the hung ``delete_batch_with_lease``
+    await point; ``CancelledError`` is a ``BaseException``, not an ``Exception``, so
+    ``_flush_buffer``'s error arm must catch ``BaseException`` to still ``task_done`` the
+    buffered row on this path. ``_inflight`` is created once in ``__init__`` and reused across
+    every start()/stop() cycle, so a leaked count here would wedge every *subsequent* graceful
+    ``stop()``'s ``_inflight.join()`` -- not just this one. Regression test for that leak: before
+    the fix, the ``join()`` below hangs past its own timeout because the row's task_done never
+    fires; after the fix it completes promptly.
+    """
+
+    class HangingDeleteFake(FakeOutboxClient):
+        async def delete_batch_with_lease(self, *args: object, **kwargs: object) -> set[int]:  # noqa: ARG002
+            await asyncio.sleep(5.0)  # far past the patched exit-flush budget; must be cancelled
+            return set()  # pragma: no cover  # unreachable: the sleep is cancelled first
+
+    fake = HangingDeleteFake()
+    broker = _make_broker()
+
+    @broker.subscriber("orders", terminal_flush_batch_size=100)
+    async def handle(body: dict) -> None: ...
+
+    test_broker = TestOutboxBroker(broker)
+    test_broker.fake_client = fake
+    async with test_broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        sub.running = True
+        sub._inflight.put_nowait(_make_msg(queue="orders"))  # the buffered row's unfinished task  # noqa: SLF001
+
+        async def _buffer_then_stop(row: OutboxInnerMessage, *, writer_conn: object, buffer: object = None) -> bool:
+            del writer_conn
+            typing.cast("list[_PendingFlush]", buffer).append(_PendingFlush(row=row, event="acked", tags={}))
+            sub.running = False  # exit the loop so the finally-block exit flush runs
+            return True
+
+        with (
+            patch("faststream_outbox.subscriber.usecase._FLUSH_ON_EXIT_TIMEOUT_SECONDS", 0.05),
+            patch.object(sub, "dispatch_one", new=_buffer_then_stop),
+        ):
+            await sub._worker_inner(writer_conn=MagicMock())  # noqa: SLF001
+
+        # The accounting must be balanced despite the cancellation: a future graceful stop()'s
+        # _inflight.join() must not inherit an un-task_done'd row from this timed-out exit flush.
+        await asyncio.wait_for(sub._inflight.join(), timeout=1.0)  # noqa: SLF001
+
+
 async def test_worker_loop_opens_writer_conn_once_when_engine_available() -> None:
     """The worker loop opens exactly one writer conn per iteration of its outer reconnect wrapper."""
     fake = FakeOutboxClient()

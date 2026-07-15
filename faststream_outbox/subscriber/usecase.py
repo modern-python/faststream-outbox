@@ -789,16 +789,17 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
     ) -> None:
         """Delete all buffered rows in one statement, emit their per-row metrics, task_done each.
 
-        On DB error, task_done every buffered row (so ``_inflight.join()`` can't hang), clear
-        the buffer, and re-raise so ``_worker_loop`` rebuilds the connection; the undeleted rows
-        keep their leases and redeliver via lease expiry.
+        On DB error OR cancellation (the bounded exit-flush timeout), task_done every buffered
+        row (so ``_inflight.join()`` can't hang), clear the buffer, and re-raise so
+        ``_worker_loop`` rebuilds the connection; the undeleted rows keep their leases and
+        redeliver via lease expiry.
         """
         if not buffer:
             return
         pairs = [(p.row.id, p.row.acquired_token) for p in buffer if p.row.acquired_token is not None]
         try:
             deleted = await self._client.delete_batch_with_lease(writer_conn, pairs)
-        except Exception:
+        except BaseException:  # incl. CancelledError from the exit-flush timeout: balance task_done before re-raising
             for _ in buffer:
                 self._inflight.task_done()
             buffer.clear()
