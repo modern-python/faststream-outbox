@@ -21,6 +21,7 @@ in the next iteration.
 """
 
 import asyncio
+import dataclasses
 import logging
 import random
 import time
@@ -62,6 +63,19 @@ _BACKOFF_RESET_THRESHOLD_SECONDS = 60.0
 # (anyio.move_on_after(None) has deadline=inf), so the drain path clamps to this.
 # Mirrors OutboxBroker/OutboxRouter's graceful_timeout=15.0 default.
 _DEFAULT_DRAIN_TIMEOUT_SECONDS = 15.0
+# Cap the best-effort buffer flush on worker exit so a wedged connection at drain
+# timeout cannot extend stop() past its budget; on timeout the rows fall back to
+# lease-expiry redelivery (the same fate as any in-flight row on a drain timeout).
+_FLUSH_ON_EXIT_TIMEOUT_SECONDS = 2.0
+
+
+@dataclasses.dataclass(slots=True)
+class _PendingFlush:
+    """A batchable terminal delete awaiting its batch flush, with the metric to emit once it lands."""
+
+    row: OutboxInnerMessage
+    event: str
+    tags: dict[str, typing.Any]
 
 
 # Marker exception raised by programming guards inside ``process_message`` (e.g.
@@ -557,35 +571,63 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                 await anyio.sleep(_compute_backoff(error_attempt, _BACKOFF_MAX_SECONDS))
 
     async def _worker_inner(self, *, writer_conn: "AsyncConnection | None") -> None:
-        """Pull rows from the inflight queue and dispatch each, threading *writer_conn* through.
+        """Pull rows, dispatch each, and flush the batched-delete buffer when full or idle.
 
-        Returns when ``self.running`` goes False, or raises on any DB error from the
-        terminal write so :meth:`_worker_loop` can rebuild the connection.
+        ``task_done`` is called here for inline/skipped rows and inside ``_flush_buffer`` for
+        buffered rows, so ``_inflight.join()`` (the drain barrier in ``stop()``) waits for the
+        actual delete, not merely for dispatch.
         """
-        while self.running:
-            row = await self._inflight.get()
-            try:
-                await self.dispatch_one(row, writer_conn=writer_conn)
-            except _OutboxConfigError as e:
-                # P18: a config error (e.g. OutboxResponse + foreign publisher) is not a
-                # connection failure. Letting it propagate to _run_with_reconnect would tear
-                # down the writer connection and back off (up to 30s), throttling unrelated
-                # rows. Log it and continue; the row's lease expires and it is reclaimed.
-                # Fix the configuration to stop the error.
-                self._log(
-                    log_level=logging.ERROR,
-                    message=f"Outbox configuration error (fix required; row left to lease-expiry retry): {e!r}",
-                    exc_info=e,
-                )
-            finally:
-                self._inflight.task_done()
+        buffer: list[_PendingFlush] = []
+        batch_size = self._config.terminal_flush_batch_size
+        try:
+            while self.running:
+                if buffer:
+                    try:
+                        row = self._inflight.get_nowait()
+                    except asyncio.QueueEmpty:
+                        await self._flush_buffer(buffer, writer_conn=writer_conn)
+                        row = await self._inflight.get()
+                else:
+                    row = await self._inflight.get()
+                buffered = False
+                try:
+                    buffered = await self.dispatch_one(row, writer_conn=writer_conn, buffer=buffer)
+                except _OutboxConfigError as e:
+                    # P18: a config error (e.g. OutboxResponse + foreign publisher) is not a
+                    # connection failure. Letting it propagate to _run_with_reconnect would tear
+                    # down the writer connection and back off (up to 30s), throttling unrelated
+                    # rows. Log it and continue; the row's lease expires and it is reclaimed.
+                    # Fix the configuration to stop the error.
+                    self._log(
+                        log_level=logging.ERROR,
+                        message=f"Outbox configuration error (fix required; row left to lease-expiry retry): {e!r}",
+                        exc_info=e,
+                    )
+                finally:
+                    if not buffered:
+                        self._inflight.task_done()
+                if len(buffer) >= batch_size:
+                    await self._flush_buffer(buffer, writer_conn=writer_conn)
+        finally:
+            # Bounded best-effort flush of completed-but-unflushed rows on exit. Reachable
+            # on a drain timeout (a graceful stop empties the buffer via the idle flush
+            # before join() returns), and on a mid-operation inline retry/DLQ flush error
+            # while the buffer already holds batched rows (the error propagates here and
+            # the outer loop rebuilds the connection). asyncio.timeout caps a wedged DELETE
+            # so cancellation can't hang stop(); TimeoutError (and any flush error) is
+            # suppressed and the rows fall back to lease-expiry redelivery.
+            if buffer:
+                with suppress(Exception):
+                    async with asyncio.timeout(_FLUSH_ON_EXIT_TIMEOUT_SECONDS):
+                        await self._flush_buffer(buffer, writer_conn=writer_conn)
 
     async def dispatch_one(  # linear pipeline: guard, consume, branch on outcome, flush
         self,
         row: OutboxInnerMessage,
         *,
         writer_conn: "AsyncConnection | None" = None,
-    ) -> None:
+        buffer: "list[_PendingFlush] | None" = None,
+    ) -> bool:
         """Run a single already-leased row through the full consume pipeline.
 
         Mirrors the per-row body of ``_worker_loop`` so ``TestOutboxBroker`` can drive
@@ -599,20 +641,26 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         failing on every row. When *writer_conn* is None (test broker / one-shot dispatch),
         flush exceptions are swallowed like the legacy behavior since there's no shared
         connection to rebuild.
+
+        Returns True iff the row was buffered for batched flush (its ``task_done``/metric
+        are deferred to :meth:`_flush_buffer`); False when handled inline (flushed here, or
+        skipped).
         """
         logger = self._outer_config.logger.logger.logger if self._outer_config.logger else None
         row.retry_strategy = self._config.retry_strategy
         base = self._base_tags(row.queue)
         if not row.allow_delivery(max_deliveries=self._config.max_deliveries, logger=logger):
-            # P17: flush first; emit the terminal metric only if the DELETE landed. A
-            # lease-lost delete (rowcount 0 → redelivered) emits ``lease_lost`` from the
-            # flush instead, so emitting nacked_terminal here too would double-count.
-            if await self._safe_flush(row, terminal=True, writer_conn=writer_conn):
-                self._emit_metric(
-                    "nacked_terminal",
-                    {**base, "deliveries_count": row.deliveries_count, "reason": "max_deliveries"},
-                )
-            return
+            # P17: the metric fires only when the delete lands — inline via _flush_or_buffer,
+            # or deferred via _flush_buffer. A lease-lost delete (rowcount 0 → redelivered)
+            # emits ``lease_lost`` instead, so emitting nacked_terminal here too would double-count.
+            tags = {**base, "deliveries_count": row.deliveries_count, "reason": "max_deliveries"}
+            return await self._flush_or_buffer(
+                row,
+                event="nacked_terminal",
+                tags=tags,
+                buffer=buffer,
+                writer_conn=writer_conn,
+            )
         # AckPolicy middleware catches handler exceptions; _CaptureExceptionMiddleware
         # stashes exc onto row.last_exception before nack runs, so retry strategies
         # can branch on exception type. We still wrap to log any escapes (manual-ack
@@ -642,14 +690,14 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                 message=f"Outbox handler error escaped consume(); row left to lease-expiry retry: {e!r}",
                 exc_info=e,
             )
-            return
+            return False
         # Shutdown race: SubscriberUsecase.consume() returns None without invoking
         # process_message when self.running has been flipped to False by stop().
         # Detecting that here lets us preserve the row instead of falling through
         # to assert_state_set → reject() → _safe_flush → DELETE. The row's lease
         # expires after lease_ttl_seconds and is reclaimed on next start.
         if not row.state_set and not self.running:
-            return
+            return False
         await row.assert_state_set(logger)
         duration_seconds = time.perf_counter() - start_perf
         common = {**base, "deliveries_count": row.deliveries_count, "duration_seconds": duration_seconds}
@@ -661,17 +709,25 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         # ordering. Successful handlers leave ``terminal_failure_reason=None``.
         if row.terminal_failure_reason is not None:
             terminal_tags = self._with_exception_type({**common, "reason": row.terminal_failure_reason}, row)
-            outcome: tuple[str, dict[str, typing.Any]] = ("nacked_terminal", terminal_tags)
+            event, tags = "nacked_terminal", terminal_tags
         elif row.pending_delay_seconds is not None:
             retry_tags = self._with_exception_type({**common, "next_delay_seconds": row.pending_delay_seconds}, row)
-            outcome = ("nacked_retried", retry_tags)
+            # Retry is a per-row UPDATE -- never batched. Flush inline, unchanged.
+            # P17: emit only after the flush lands; a lease-lost update emits lease_lost instead.
+            if await self._safe_flush(row, terminal=False, writer_conn=writer_conn):
+                self._emit_metric("nacked_retried", retry_tags)
+            return False
         else:
-            outcome = ("acked", common)
-        # P17: emit the outcome metric only after the flush actually lands. A lease-lost
-        # flush (rowcount 0 → the row gets redelivered) emits ``lease_lost`` from the flush
-        # method instead; emitting acked/nacked here too would count the row twice.
-        if await self._safe_flush(row, terminal=row.to_delete, writer_conn=writer_conn):
-            self._emit_metric(*outcome)
+            event, tags = "acked", common
+        # Terminal delete: batch it if batchable, else flush inline. P17 holds either way —
+        # the metric fires only when the delete lands (inline here, or deferred in _flush_buffer).
+        return await self._flush_or_buffer(
+            row,
+            event=event,
+            tags=tags,
+            buffer=buffer,
+            writer_conn=writer_conn,
+        )
 
     async def _safe_flush(
         self,
@@ -705,6 +761,59 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                 return False
         return await flush(row, writer_conn=writer_conn)
 
+    async def _flush_or_buffer(
+        self,
+        row: OutboxInnerMessage,
+        *,
+        event: str,
+        tags: dict[str, typing.Any],
+        buffer: "list[_PendingFlush] | None",
+        writer_conn: "AsyncConnection | None",
+    ) -> bool:
+        """Buffer a batchable terminal delete, or flush it inline. Returns True iff buffered.
+
+        Batchable = plain terminal DELETE (no DLQ payload) with batching enabled and a real
+        buffer (worker path). Otherwise flush inline exactly as before and emit the metric
+        here. When buffered, the metric is deferred to :meth:`_flush_buffer`.
+        """
+        if buffer is not None and self._config.terminal_flush_batch_size > 1 and not self._terminal_has_dlq(row):
+            buffer.append(_PendingFlush(row=row, event=event, tags=tags))
+            return True
+        if await self._safe_flush(row, terminal=True, writer_conn=writer_conn):
+            self._emit_metric(event, tags)
+        return False
+
+    async def _flush_buffer(
+        self,
+        buffer: "list[_PendingFlush]",
+        *,
+        writer_conn: "AsyncConnection | None",
+    ) -> None:
+        """Delete all buffered rows in one statement, emit their per-row metrics, task_done each.
+
+        On DB error OR cancellation (the bounded exit-flush timeout), task_done every buffered
+        row (so ``_inflight.join()`` can't hang), clear the buffer, and re-raise so
+        ``_worker_loop`` rebuilds the connection; the undeleted rows keep their leases and
+        redeliver via lease expiry.
+        """
+        if not buffer:
+            return
+        pairs = [(p.row.id, p.row.acquired_token) for p in buffer if p.row.acquired_token is not None]
+        try:
+            deleted = await self._client.delete_batch_with_lease(writer_conn, pairs)
+        except BaseException:  # incl. CancelledError from the exit-flush timeout: balance task_done before re-raising
+            for _ in buffer:
+                self._inflight.task_done()
+            buffer.clear()
+            raise
+        for pending in buffer:
+            if pending.row.id in deleted:
+                self._emit_metric(pending.event, pending.tags)
+            else:
+                self._emit_lease_lost(pending.row, phase="terminal")
+            self._inflight.task_done()
+        buffer.clear()
+
     def _emit_lease_lost(self, row: OutboxInnerMessage, *, phase: str) -> None:
         """Log + record the ``lease_lost`` event shared by the terminal and retry flush paths.
 
@@ -733,6 +842,10 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                 "deliveries_count": row.deliveries_count,
             },
         )
+
+    def _terminal_has_dlq(self, row: OutboxInnerMessage) -> bool:
+        """Report whether this terminal row must write a DLQ audit copy (a CTE, not a plain DELETE)."""
+        return row.terminal_failure_reason is not None and self._outer_config.dlq_table is not None
 
     async def _flush_terminal(
         self,

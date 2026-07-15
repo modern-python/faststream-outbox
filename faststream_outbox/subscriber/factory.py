@@ -23,6 +23,7 @@ def create_subscriber(
     max_fetch_interval: float,
     lease_ttl_seconds: float,
     max_deliveries: int | None,
+    terminal_flush_batch_size: int,
     config: "OutboxBrokerConfig",
     ack_policy: AckPolicy | None = None,
     propagate_inbound_headers: bool = False,
@@ -43,6 +44,7 @@ def create_subscriber(
         max_fetch_interval=max_fetch_interval,
         lease_ttl_seconds=lease_ttl_seconds,
         max_deliveries=max_deliveries,
+        terminal_flush_batch_size=terminal_flush_batch_size,
         propagate_inbound_headers=propagate_inbound_headers,
     )
     specification_config = OutboxSubscriberSpecificationConfig(

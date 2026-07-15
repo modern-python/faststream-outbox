@@ -26,6 +26,21 @@ from benchmarks.workload import RunResult
 # Raw structural totals, gated on EXACT equality. Load-independent across idle/loaded runs.
 # For a consumer run insert/select are 0; for a producer run delete is 0. Exact-0 ==
 # exact-0 passes, so the same key set gates both scenarios.
+#
+# ``delete_calls`` stays EXACT even for the batched (tfbs>1) point. On the per-row path it
+# is ``messages`` (one DELETE per row); on the batched path it is the flush count, and with
+# fetch_batch_size==terminal_flush_batch_size the fetch delivers full buffers, so it is
+# ``messages / tfbs`` exactly (5000/100 == 50). Empty fetch polls under load inflate total
+# ``calls`` but never ``delete_calls`` (a flush fires only on buffered rows), so this count
+# is structural, not timing-dependent -- Task 4's Step 5 measured it at 50 across 5 runs
+# with zero variance. THREE conditions make it exact here: fetch_batch_size == tfbs (full
+# buffers, no partial-buffer flush); messages % tfbs == 0 (no partial tail flush); AND the
+# bench handler does not suspend mid-drain -- the no-op run_consumer handler never yields, so
+# the worker drains a full generation to the size trigger instead of interleaving with the
+# fetch loop. If a future config broke any -- fetch not divisible by tfbs (split buffers),
+# messages not a multiple of tfbs (a partial final flush, e.g. messages=5050/tfbs=100 -> 51
+# delete_calls), or a bench handler that does real I/O (queue empties mid-buffer -> partial
+# idle flush) -- revisit this to a loose upper bound; today all three hold and it is deterministic.
 EXACT_KEYS: tuple[str, ...] = ("delete_calls", "tup_upd", "tup_del", "tup_ins", "insert_calls", "select_calls")
 
 # Near-deterministic: ~5% observed spread, so a 10% upper-bound band leaves headroom.
@@ -74,8 +89,14 @@ def normalize(result: RunResult) -> dict[str, float]:
 
 
 def _key(result: RunResult) -> str:
+    # The tfbs segment is appended ONLY when batching is enabled (>1) so pre-batching
+    # baseline keys (all tfbs=1) stay byte-identical and are not orphaned; a batched
+    # point (e.g. consumer/w1/b100/tfbs100) never collides with its tfbs=1 sibling.
     cfg = result.config
-    return f"{result.scenario}/w{cfg.max_workers}/b{cfg.fetch_batch_size}"
+    base = f"{result.scenario}/w{cfg.max_workers}/b{cfg.fetch_batch_size}"
+    if cfg.terminal_flush_batch_size != 1:
+        return f"{base}/tfbs{cfg.terminal_flush_batch_size}"
+    return base
 
 
 def to_baseline(results: list[RunResult]) -> dict[str, typing.Any]:

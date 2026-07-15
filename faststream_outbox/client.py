@@ -33,6 +33,7 @@ from sqlalchemy import (
     or_,
     select,
     text,
+    tuple_,
     update,
 )
 
@@ -114,6 +115,13 @@ class AbstractOutboxClient(abc.ABC):
         *,
         dlq_payload: "Mapping[str, typing.Any] | None" = None,
     ) -> bool: ...
+
+    @abc.abstractmethod
+    async def delete_batch_with_lease(
+        self,
+        conn: "AsyncConnection | None",
+        pairs: "Sequence[tuple[int, uuid.UUID]]",
+    ) -> set[int]: ...
 
     @abc.abstractmethod
     async def mark_pending_with_lease(
@@ -356,6 +364,34 @@ class OutboxClient(AbstractOutboxClient):
             "last_exception": dlq_payload["last_exception"],
         }
         return sql, params
+
+    async def delete_batch_with_lease(
+        self,
+        conn: "AsyncConnection | None",
+        pairs: "Sequence[tuple[int, uuid.UUID]]",
+    ) -> set[int]:
+        """Delete every ``(id, acquired_token)`` pair that still holds its lease in one statement.
+
+        Returns the set of ids actually deleted. A row whose lease was reclaimed by a newer
+        fetch is absent from ``pairs``' matches and thus absent from the returned set -- the
+        caller treats it as ``lease_lost``. One round-trip on *conn* (production writer is
+        AUTOCOMMIT), atomic: all matching rows delete or the statement fails wholesale. Used
+        only by the batched terminal-flush path; the DLQ and per-row paths keep
+        :meth:`delete_with_lease`. See :meth:`fetch` for why *conn* is ``AsyncConnection | None``.
+        """
+        if conn is None:
+            msg = "OutboxClient.delete_batch_with_lease requires a live AsyncConnection (got None)"
+            raise TypeError(msg)
+        if not pairs:
+            return set()
+        t = self._table
+        stmt = (
+            delete(t)
+            .where(tuple_(t.c.id, t.c.acquired_token).in_([(pid, ptok) for pid, ptok in pairs]))
+            .returning(t.c.id)
+        )
+        result = await conn.execute(stmt)
+        return {row_id for (row_id,) in result.all()}
 
     async def mark_pending_with_lease(
         self,

@@ -189,6 +189,21 @@ class FakeOutboxClient(AbstractOutboxClient):
                 return True
         return False
 
+    async def delete_batch_with_lease(
+        self,
+        conn: typing.Any,  # noqa: ARG002
+        pairs: "Sequence[tuple[int, uuid.UUID]]",
+    ) -> set[int]:
+        wanted = {(pid, ptok) for pid, ptok in pairs if ptok is not None}
+        deleted: set[int] = set()
+        # Iterate a copy of indices high-to-low so deletions don't shift unscanned rows.
+        for i in range(len(self._rows) - 1, -1, -1):
+            row = self._rows[i]
+            if row.acquired_token is not None and (row.id, row.acquired_token) in wanted:
+                deleted.add(row.id)
+                del self._rows[i]
+        return deleted
+
     async def mark_pending_with_lease(
         self,
         conn: typing.Any,  # noqa: ARG002

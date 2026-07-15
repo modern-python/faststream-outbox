@@ -51,6 +51,7 @@ class OutboxRegistrator(Registrator[OutboxInnerMessage, "OutboxBrokerConfig"]): 
         max_fetch_interval: float = 10.0,
         lease_ttl_seconds: float = 60.0,
         max_deliveries: int | None = None,
+        terminal_flush_batch_size: int = 1,
         ack_policy: AckPolicy | None = None,
         propagate_inbound_headers: bool = False,
         dependencies: Iterable["Dependant"] = (),
@@ -74,6 +75,7 @@ class OutboxRegistrator(Registrator[OutboxInnerMessage, "OutboxBrokerConfig"]): 
             max_fetch_interval=max_fetch_interval,
             lease_ttl_seconds=lease_ttl_seconds,
             max_deliveries=max_deliveries,
+            terminal_flush_batch_size=terminal_flush_batch_size,
             ack_policy=ack_policy,
             propagate_inbound_headers=propagate_inbound_headers,
             config=self.config,  # ty: ignore[invalid-argument-type]

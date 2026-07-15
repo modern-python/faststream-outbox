@@ -23,3 +23,6 @@ class RunConfig:
     fetch_batch_size: int = 100
     payload_bytes: int = DEFAULT_PAYLOAD_BYTES
     queue: str = "bench"
+    # 1 = today's per-row terminal DELETE; >1 coalesces plain-delete acks into one
+    # batched ``DELETE ... RETURNING`` per batch (the opt-in batched-flush path).
+    terminal_flush_batch_size: int = 1

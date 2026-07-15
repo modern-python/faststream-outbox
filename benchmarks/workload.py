@@ -129,6 +129,7 @@ async def run_consumer(engine: AsyncEngine, cfg: RunConfig) -> RunResult:
             # max_fetch_interval whenever _inflight drains. min must be <= max.
             min_fetch_interval=0.001,
             max_fetch_interval=0.001,
+            terminal_flush_batch_size=cfg.terminal_flush_batch_size,
         )
         async def _handler(msg: bytes) -> None:
             seen_ids.add(msg)

@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import re
+import time
 import typing
 import uuid
 import warnings
@@ -65,6 +66,7 @@ from faststream_outbox.subscriber.usecase import (
     OutboxSubscriber,
     _compute_backoff,
     _OutboxConfigError,
+    _PendingFlush,
 )
 from faststream_outbox.testing import FakeOutboxClient, FakeOutboxProducer
 
@@ -1586,6 +1588,14 @@ async def test_client_delete_with_lease_raises_typeerror_on_none_conn() -> None:
         await client.delete_with_lease(None, 1, uuid.uuid4())
 
 
+async def test_client_delete_batch_with_lease_raises_typeerror_on_none_conn() -> None:
+    metadata = MetaData()
+    t = make_outbox_table(metadata)
+    client = OutboxClient(AsyncMock(), t)
+    with pytest.raises(TypeError, match=r"OutboxClient\.delete_batch_with_lease requires a live AsyncConnection"):
+        await client.delete_batch_with_lease(None, [(1, uuid.uuid4())])
+
+
 async def test_client_mark_pending_with_lease_raises_typeerror_on_none_conn() -> None:
     metadata = MetaData()
     t = make_outbox_table(metadata)
@@ -2206,8 +2216,8 @@ async def test_worker_inner_swallows_config_error_without_reconnect() -> None:
         sub._inflight.put_nowait(_make_msg(queue="orders"))  # noqa: SLF001
         calls = {"n": 0}
 
-        async def _raise_then_stop(row: object, *, writer_conn: object) -> None:
-            del row, writer_conn
+        async def _raise_then_stop(row: object, *, writer_conn: object, buffer: object = None) -> None:
+            del row, writer_conn, buffer
             calls["n"] += 1
             sub.running = False  # let the worker loop exit after this row
             msg = "bad relay chain"
@@ -2322,6 +2332,230 @@ async def test_flush_retry_propagates_error_with_writer_conn() -> None:
         sub = next(iter(broker._subscribers))  # noqa: SLF001
         with pytest.raises(RuntimeError, match="retry write poisoned"):
             await sub._flush_retry(msg, writer_conn=MagicMock())  # noqa: SLF001
+
+
+async def test_flush_buffer_empty_is_a_noop() -> None:
+    """An empty batch buffer flushes without a DB round-trip (the guard before building VALUES).
+
+    Every production call site guards ``if buffer:`` before ``_flush_buffer``, so the empty
+    case is defensive; assert it issues no ``delete_batch_with_lease`` rather than an empty
+    ``IN (VALUES ...)``.
+    """
+    fake = FakeOutboxClient()
+    broker, test_broker = _make_broker_for_dispatch(fake)
+    async with test_broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        with patch.object(fake, "delete_batch_with_lease", new=AsyncMock()) as spy:
+            await sub._flush_buffer([], writer_conn=None)  # noqa: SLF001
+    spy.assert_not_awaited()
+
+
+async def test_flush_buffer_db_error_task_dones_each_row_and_reraises() -> None:
+    """A DB error in the batched delete task_done's every buffered row, clears the buffer, and re-raises.
+
+    The ``task_done`` accounting is the drain's correctness: without it ``_inflight.join()``
+    (the stop() barrier) hangs on the rows the failed flush never accounted for. The re-raise
+    is what drives ``_worker_loop`` to rebuild the writer connection; the undeleted rows keep
+    their leases and redeliver via lease expiry.
+    """
+
+    class RaisingFake(FakeOutboxClient):
+        async def delete_batch_with_lease(self, *args: object, **kwargs: object) -> set[int]:  # noqa: ARG002
+            msg = "batch delete poisoned"
+            raise RuntimeError(msg)
+
+    broker, test_broker = _make_broker_for_dispatch(RaisingFake())
+    async with test_broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        sub._inflight.put_nowait(_make_msg(queue="orders"))  # one unfinished task for the buffered row  # noqa: SLF001
+        buffer = [_PendingFlush(row=_make_msg(id=7, queue="orders"), event="acked", tags={})]
+        with pytest.raises(RuntimeError, match="batch delete poisoned"):
+            await sub._flush_buffer(buffer, writer_conn=MagicMock())  # noqa: SLF001
+        assert buffer == [], "the buffer must be cleared on the error path"
+        # task_done fired for the buffered row, so the drain barrier does not hang.
+        await asyncio.wait_for(sub._inflight.join(), timeout=1.0)  # noqa: SLF001
+
+
+async def test_flush_buffer_emits_lease_lost_for_ids_absent_from_returning_set() -> None:
+    """The batched delete's RETURNING set is the per-row lease check: id present -> acked, absent -> lease_lost.
+
+    A row reclaimed mid-handler is absent from ``delete_batch_with_lease``'s returned set, so it
+    must emit ``lease_lost(phase=terminal)`` -- not a false ``acked`` -- while the rows that
+    landed emit their intended metric. This is the lease-token invariant at batch granularity.
+    """
+    events, recorder = _events_recorder()
+
+    class PartialDeleteFake(FakeOutboxClient):
+        async def delete_batch_with_lease(self, conn: object, pairs: object) -> set[int]:  # noqa: ARG002
+            return {1}  # only row 1 still held its lease; row 2 was reclaimed and is absent
+
+    broker = _make_broker_with_recorder(recorder)
+    test_broker = TestOutboxBroker(broker)
+    test_broker.fake_client = PartialDeleteFake()
+    async with test_broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        # Two unfinished queue tasks, one per buffered row, so _flush_buffer's per-row task_done balances.
+        sub._inflight.put_nowait(_make_msg(queue="orders"))  # noqa: SLF001
+        sub._inflight.put_nowait(_make_msg(queue="orders"))  # noqa: SLF001
+        buffer = [
+            _PendingFlush(row=_make_msg(id=1, queue="orders"), event="acked", tags={"row_id": 1}),
+            _PendingFlush(row=_make_msg(id=2, queue="orders"), event="acked", tags={"row_id": 2}),
+        ]
+        await sub._flush_buffer(buffer, writer_conn=MagicMock())  # noqa: SLF001
+        await asyncio.wait_for(sub._inflight.join(), timeout=1.0)  # both rows task_done'd  # noqa: SLF001
+
+    acked = [t for e, t in events if e == "acked"]
+    lease_lost = [t for e, t in events if e == "lease_lost"]
+    assert [t["row_id"] for t in acked] == [1], "only the row still in the RETURNING set is acked"
+    assert len(lease_lost) == 1, "the reclaimed row emits exactly one lease_lost"
+    assert lease_lost[0]["phase"] == "terminal"
+    assert lease_lost[0]["row_id"] == 2
+
+
+async def test_worker_inner_flushes_partial_buffer_on_loop_exit() -> None:
+    """A worker loop exiting with a non-empty batch buffer flushes it as its final drain step.
+
+    With ``terminal_flush_batch_size`` well above the row count the size trigger never fires,
+    so a graceful exit (``running`` flipped False) must flush the still-buffered completions
+    or they leak (redeliver). Drives one row into the buffer, stops the loop, and asserts the
+    exit path flushed the partial buffer.
+    """
+    fake = FakeOutboxClient()
+    broker = _make_broker()
+
+    @broker.subscriber("orders", terminal_flush_batch_size=100)
+    async def handle(body: dict) -> None: ...
+
+    test_broker = TestOutboxBroker(broker)
+    test_broker.fake_client = fake
+    async with test_broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        sub.running = True
+        sub._inflight.put_nowait(_make_msg(queue="orders"))  # noqa: SLF001
+
+        async def _buffer_then_stop(row: OutboxInnerMessage, *, writer_conn: object, buffer: object = None) -> bool:
+            del writer_conn
+            typing.cast("list[_PendingFlush]", buffer).append(_PendingFlush(row=row, event="acked", tags={}))
+            sub.running = False  # exit the loop before any size/idle flush fires
+            return True
+
+        flush_spy = AsyncMock()
+        with (
+            patch.object(sub, "dispatch_one", new=_buffer_then_stop),
+            patch.object(sub, "_flush_buffer", new=flush_spy),
+        ):
+            await sub._worker_inner(writer_conn=None)  # noqa: SLF001
+
+    flush_spy.assert_awaited_once()
+    assert flush_spy.await_args is not None
+    flushed_buffer = flush_spy.await_args.args[0]
+    assert len(flushed_buffer) == 1, "the loop-exit flush must carry the still-buffered row"
+
+
+async def test_worker_inner_exit_flush_is_timeout_bounded_when_delete_hangs() -> None:
+    """The loop-exit flush is capped by ``_FLUSH_ON_EXIT_TIMEOUT_SECONDS`` so a wedged DELETE can't hang exit.
+
+    Only reachable on a drain timeout, where the writer connection may be unresponsive.
+    Drives ``_worker_inner`` with one row buffered at exit and a ``delete_batch_with_lease``
+    that sleeps far past a tiny exit-flush budget. ``asyncio.timeout`` must cancel the hung
+    DELETE, the suppressed ``TimeoutError`` lets ``_worker_inner`` return promptly, and the
+    row is abandoned to lease-expiry (the delete never lands).
+    """
+
+    class HangingDeleteFake(FakeOutboxClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.delete_completed = False
+
+        async def delete_batch_with_lease(self, *args: object, **kwargs: object) -> set[int]:  # noqa: ARG002
+            await asyncio.sleep(5.0)  # far past the patched exit-flush budget; must be cancelled
+            self.delete_completed = True  # pragma: no cover  # unreachable: the sleep is cancelled first
+            return set()  # pragma: no cover  # unreachable: the sleep is cancelled first
+
+    fake = HangingDeleteFake()
+    broker = _make_broker()
+
+    @broker.subscriber("orders", terminal_flush_batch_size=100)
+    async def handle(body: dict) -> None: ...
+
+    test_broker = TestOutboxBroker(broker)
+    test_broker.fake_client = fake
+    async with test_broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        sub.running = True
+        sub._inflight.put_nowait(_make_msg(queue="orders"))  # noqa: SLF001
+
+        async def _buffer_then_stop(row: OutboxInnerMessage, *, writer_conn: object, buffer: object = None) -> bool:
+            del writer_conn
+            typing.cast("list[_PendingFlush]", buffer).append(_PendingFlush(row=row, event="acked", tags={}))
+            sub.running = False  # exit the loop so the finally-block exit flush runs
+            return True
+
+        with (
+            patch("faststream_outbox.subscriber.usecase._FLUSH_ON_EXIT_TIMEOUT_SECONDS", 0.05),
+            patch.object(sub, "dispatch_one", new=_buffer_then_stop),
+        ):
+            started = time.monotonic()
+            # Run via create_task so the internal asyncio.timeout cancellation stays within the
+            # task's own frame, not through this test frame -- otherwise coverage.py loses the
+            # trace for the lines below on Python 3.11 (a phantom sub-100% miss).
+            task = asyncio.create_task(sub._worker_inner(writer_conn=MagicMock()))  # noqa: SLF001
+            await task
+            elapsed = time.monotonic() - started
+
+    assert elapsed < 1.0, f"the bounded exit flush must not hang; took {elapsed:.3f}s"
+    assert not fake.delete_completed, "the hung DELETE must be cancelled, not allowed to land"
+
+
+async def test_worker_inner_exit_flush_timeout_still_task_dones_the_buffer() -> None:
+    """A timed-out exit flush must still balance ``task_done`` -- not just return promptly.
+
+    ``asyncio.timeout`` injects a ``CancelledError`` at the hung ``delete_batch_with_lease``
+    await point; ``CancelledError`` is a ``BaseException``, not an ``Exception``, so
+    ``_flush_buffer``'s error arm must catch ``BaseException`` to still ``task_done`` the
+    buffered row on this path. ``_inflight`` is created once in ``__init__`` and reused across
+    every start()/stop() cycle, so a leaked count here would wedge every *subsequent* graceful
+    ``stop()``'s ``_inflight.join()`` -- not just this one. Regression test for that leak: before
+    the fix, the ``join()`` below hangs past its own timeout because the row's task_done never
+    fires; after the fix it completes promptly.
+    """
+
+    class HangingDeleteFake(FakeOutboxClient):
+        async def delete_batch_with_lease(self, *args: object, **kwargs: object) -> set[int]:  # noqa: ARG002
+            await asyncio.sleep(5.0)  # far past the patched exit-flush budget; must be cancelled
+            return set()  # pragma: no cover  # unreachable: the sleep is cancelled first
+
+    fake = HangingDeleteFake()
+    broker = _make_broker()
+
+    @broker.subscriber("orders", terminal_flush_batch_size=100)
+    async def handle(body: dict) -> None: ...
+
+    test_broker = TestOutboxBroker(broker)
+    test_broker.fake_client = fake
+    async with test_broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        sub.running = True
+        sub._inflight.put_nowait(_make_msg(queue="orders"))  # the buffered row's unfinished task  # noqa: SLF001
+
+        async def _buffer_then_stop(row: OutboxInnerMessage, *, writer_conn: object, buffer: object = None) -> bool:
+            del writer_conn
+            typing.cast("list[_PendingFlush]", buffer).append(_PendingFlush(row=row, event="acked", tags={}))
+            sub.running = False  # exit the loop so the finally-block exit flush runs
+            return True
+
+        with (
+            patch("faststream_outbox.subscriber.usecase._FLUSH_ON_EXIT_TIMEOUT_SECONDS", 0.05),
+            patch.object(sub, "dispatch_one", new=_buffer_then_stop),
+        ):
+            # Run via create_task so the timeout's cancellation stays within the task frame,
+            # not through this test frame (else coverage.py phantom-misses the line below on 3.11).
+            task = asyncio.create_task(sub._worker_inner(writer_conn=MagicMock()))  # noqa: SLF001
+            await task
+
+        # The accounting must be balanced despite the cancellation: a future graceful stop()'s
+        # _inflight.join() must not inherit an un-task_done'd row from this timed-out exit flush.
+        await asyncio.wait_for(sub._inflight.join(), timeout=1.0)  # noqa: SLF001
 
 
 async def test_worker_loop_opens_writer_conn_once_when_engine_available() -> None:
@@ -2861,6 +3095,18 @@ def test_subscriber_rejects_ack_first() -> None:
     broker = _make_broker()
     with pytest.raises(ValueError, match="ACK_FIRST is not supported"):
         _register_subscriber(broker, ack_policy=AckPolicy.ACK_FIRST)
+
+
+def test_subscriber_rejects_zero_terminal_flush_batch_size() -> None:
+    broker = _make_broker()
+    with pytest.raises(ValueError, match="terminal_flush_batch_size must be >= 1"):
+        _register_subscriber(broker, terminal_flush_batch_size=0)
+
+
+def test_subscriber_defaults_terminal_flush_batch_size_to_one() -> None:
+    broker = _make_broker()
+    sub = broker.subscriber("q")
+    assert sub._config.terminal_flush_batch_size == 1  # noqa: SLF001
 
 
 def test_subscriber_warns_on_reject_with_retry_strategy() -> None:
