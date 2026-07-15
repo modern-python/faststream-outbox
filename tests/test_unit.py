@@ -2496,7 +2496,11 @@ async def test_worker_inner_exit_flush_is_timeout_bounded_when_delete_hangs() ->
             patch.object(sub, "dispatch_one", new=_buffer_then_stop),
         ):
             started = time.monotonic()
-            await sub._worker_inner(writer_conn=MagicMock())  # noqa: SLF001
+            # Run via create_task so the internal asyncio.timeout cancellation stays within the
+            # task's own frame, not through this test frame -- otherwise coverage.py loses the
+            # trace for the lines below on Python 3.11 (a phantom sub-100% miss).
+            task = asyncio.create_task(sub._worker_inner(writer_conn=MagicMock()))  # noqa: SLF001
+            await task
             elapsed = time.monotonic() - started
 
     assert elapsed < 1.0, f"the bounded exit flush must not hang; took {elapsed:.3f}s"
@@ -2544,7 +2548,10 @@ async def test_worker_inner_exit_flush_timeout_still_task_dones_the_buffer() -> 
             patch("faststream_outbox.subscriber.usecase._FLUSH_ON_EXIT_TIMEOUT_SECONDS", 0.05),
             patch.object(sub, "dispatch_one", new=_buffer_then_stop),
         ):
-            await sub._worker_inner(writer_conn=MagicMock())  # noqa: SLF001
+            # Run via create_task so the timeout's cancellation stays within the task frame,
+            # not through this test frame (else coverage.py phantom-misses the line below on 3.11).
+            task = asyncio.create_task(sub._worker_inner(writer_conn=MagicMock()))  # noqa: SLF001
+            await task
 
         # The accounting must be balanced despite the cancellation: a future graceful stop()'s
         # _inflight.join() must not inherit an un-task_done'd row from this timed-out exit flush.
