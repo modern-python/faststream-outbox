@@ -2206,8 +2206,8 @@ async def test_worker_inner_swallows_config_error_without_reconnect() -> None:
         sub._inflight.put_nowait(_make_msg(queue="orders"))  # noqa: SLF001
         calls = {"n": 0}
 
-        async def _raise_then_stop(row: object, *, writer_conn: object) -> None:
-            del row, writer_conn
+        async def _raise_then_stop(row: object, *, writer_conn: object, buffer: object = None) -> None:
+            del row, writer_conn, buffer
             calls["n"] += 1
             sub.running = False  # let the worker loop exit after this row
             msg = "bad relay chain"

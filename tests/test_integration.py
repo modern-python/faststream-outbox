@@ -927,6 +927,170 @@ async def test_concurrent_drain_with_eight_workers_holds_pool_bounded(pg_engine,
         await local_engine.dispose()
 
 
+async def test_batched_flush_deletes_all_rows(pg_engine: AsyncEngine, outbox_table: Table) -> None:
+    """terminal_flush_batch_size>1 coalesces terminal deletes; every row still lands.
+
+    A no-op handler acks each row; the worker buffers the batchable terminal deletes and
+    flushes them in one ``DELETE ... RETURNING`` (on queue-idle, since the buffer never
+    reaches 100). After drain the table must be empty and exactly N ``acked`` metrics fire
+    (one per deleted row, emitted from the batch flush).
+    """
+    n_rows = 50
+    received: list[int] = []
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    def recorder(event: str, tags: Mapping[str, Any]) -> None:
+        events.append((event, dict(tags)))
+
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table, metrics_recorder=recorder)
+
+    @broker.subscriber(
+        "orders",
+        min_fetch_interval=0.02,
+        max_fetch_interval=0.1,
+        fetch_batch_size=50,
+        terminal_flush_batch_size=100,
+    )
+    async def handle(body: dict) -> None:
+        received.append(body["i"])
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with broker:
+        async with session_factory() as session, session.begin():
+            for i in range(n_rows):
+                payload, headers = encode_payload({"i": i})
+                await session.execute(insert(outbox_table).values(queue="orders", payload=payload, headers=headers))
+        await _wait_until(lambda: len(received) == n_rows, timeout=15.0)
+
+        # The batched DELETE lands on queue-idle after the last dispatch; poll until empty
+        # while the broker is still running so the flush isn't racing shutdown.
+        deadline = asyncio.get_event_loop().time() + 5.0
+        while asyncio.get_event_loop().time() < deadline:
+            if await _row_count(pg_engine, outbox_table) == 0:
+                break
+            await asyncio.sleep(0.05)
+
+    assert sorted(received) == list(range(n_rows))
+    assert await _row_count(pg_engine, outbox_table) == 0
+    acked = [t for e, t in events if e == "acked"]
+    assert len(acked) == n_rows, f"one acked metric per deleted row expected, got {len(acked)}"
+
+
+async def test_batched_flush_lease_lost_row_redelivers(pg_engine: AsyncEngine, outbox_table: Table) -> None:
+    """A buffered row whose lease is stolen before its batch flush emits lease_lost, not acked.
+
+    While its handler runs, one row's ``acquired_token`` is overwritten from a separate
+    connection (a fresh, still-valid lease). When the batched ``DELETE`` fires, that row's
+    ``(id, token)`` pair no longer matches, so it is absent from the ``RETURNING`` set: the
+    worker emits ``lease_lost(phase=terminal)`` for exactly that row and leaves it in place;
+    every other buffered row is deleted. This proves the lease-token invariant holds through
+    the batched DELETE's ``RETURNING`` set.
+    """
+    n_rows = 5
+    received: list[Any] = []
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    def recorder(event: str, tags: Mapping[str, Any]) -> None:
+        events.append((event, dict(tags)))
+
+    # Capture the marker row's id up front so we can both steal its lease and assert on it.
+    marker_payload, marker_headers = encode_payload({"marker": True})
+    async with pg_engine.begin() as conn:
+        marker_id = (
+            await conn.execute(
+                insert(outbox_table)
+                .values(queue="orders", payload=marker_payload, headers=marker_headers)
+                .returning(outbox_table.c.id),
+            )
+        ).scalar_one()
+        for i in range(n_rows - 1):
+            payload, headers = encode_payload({"i": i})
+            await conn.execute(insert(outbox_table).values(queue="orders", payload=payload, headers=headers))
+
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table, metrics_recorder=recorder)
+
+    @broker.subscriber(
+        "orders",
+        max_workers=1,
+        min_fetch_interval=0.02,
+        max_fetch_interval=0.1,
+        fetch_batch_size=10,
+        terminal_flush_batch_size=100,
+        lease_ttl_seconds=30.0,  # long: the stolen (still-valid) lease must not be re-fetched
+    )
+    async def handle(body: dict) -> None:
+        received.append(body)
+        if body.get("marker"):
+            # Steal the marker's lease mid-handler: overwrite its token so the buffered
+            # batch DELETE (built with the fetch-time token) can no longer match it.
+            async with pg_engine.begin() as steal_conn:
+                await steal_conn.execute(
+                    outbox_table.update().where(outbox_table.c.id == marker_id).values(acquired_token=uuid.uuid4()),
+                )
+
+    async with broker:
+        await _wait_until(lambda: len(received) == n_rows, timeout=15.0)
+        await _wait_until(
+            lambda: any(e == "lease_lost" and t.get("phase") == "terminal" for e, t in events),
+            timeout=15.0,
+        )
+
+    lease_lost = [t for e, t in events if e == "lease_lost" and t.get("phase") == "terminal"]
+    assert len(lease_lost) == 1, f"exactly one row's batched DELETE must miss, got {len(lease_lost)}"
+    assert lease_lost[0]["row_id"] == marker_id, "the lease_lost row must be the one whose token was stolen"
+    acked = [t for e, t in events if e == "acked"]
+    assert len(acked) == n_rows - 1, f"every other buffered row must be deleted, got {len(acked)} acked"
+    # The marker survives (its stolen lease still holds it); the other four are gone.
+    async with pg_engine.connect() as conn:
+        remaining = (await conn.execute(select(outbox_table.c.id))).scalars().all()
+    assert remaining == [marker_id], f"only the lease-lost marker row must survive, got {remaining}"
+
+
+async def test_batch_size_one_matches_per_row(pg_engine: AsyncEngine, outbox_table: Table) -> None:
+    """terminal_flush_batch_size=1 (the default) keeps every row on the inline per-row path.
+
+    N seeded rows drain to empty and emit exactly N ``acked`` metrics -- identical to the
+    pre-batching behavior. This guards the default-identity axis: batching must not leak
+    into the ``==1`` path.
+    """
+    n_rows = 20
+    received: list[int] = []
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    def recorder(event: str, tags: Mapping[str, Any]) -> None:
+        events.append((event, dict(tags)))
+
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table, metrics_recorder=recorder)
+
+    @broker.subscriber(
+        "orders",
+        min_fetch_interval=0.02,
+        max_fetch_interval=0.1,
+        fetch_batch_size=20,
+        terminal_flush_batch_size=1,
+    )
+    async def handle(body: dict) -> None:
+        received.append(body["i"])
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with broker:
+        async with session_factory() as session, session.begin():
+            for i in range(n_rows):
+                payload, headers = encode_payload({"i": i})
+                await session.execute(insert(outbox_table).values(queue="orders", payload=payload, headers=headers))
+        await _wait_until(lambda: len(received) == n_rows, timeout=15.0)
+        deadline = asyncio.get_event_loop().time() + 5.0
+        while asyncio.get_event_loop().time() < deadline:
+            if await _row_count(pg_engine, outbox_table) == 0:
+                break
+            await asyncio.sleep(0.05)
+
+    assert sorted(received) == list(range(n_rows))
+    assert await _row_count(pg_engine, outbox_table) == 0
+    acked = [t for e, t in events if e == "acked"]
+    assert len(acked) == n_rows, f"batch_size=1 must emit one acked per row, got {len(acked)}"
+
+
 # --- Publisher tests --------------------------------------------------------------------
 
 
