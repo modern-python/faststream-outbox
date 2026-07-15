@@ -1091,6 +1091,133 @@ async def test_batch_size_one_matches_per_row(pg_engine: AsyncEngine, outbox_tab
     assert len(acked) == n_rows, f"batch_size=1 must emit one acked per row, got {len(acked)}"
 
 
+async def test_batched_flush_size_trigger_deletes_all(pg_engine: AsyncEngine, outbox_table: Table) -> None:
+    """``len(buffer) >= batch_size`` (the primary under-load path) actually fires and drains.
+
+    The other batched tests use ``terminal_flush_batch_size=100`` with <=50 rows, so the
+    buffer never reaches its cap and every flush goes through the idle/``QueueEmpty`` path.
+    Here ``fetch_batch_size >= n_rows`` keeps the inflight queue populated so the worker's
+    buffer fills to ``batch_size`` while more rows remain queued -- the size-trigger branch,
+    not idle. A spy on ``delete_batch_with_lease`` confirms at least one flush carried
+    exactly ``batch_size`` pairs, then every row must still land.
+    """
+    n_rows = 30
+    batch_size = 3
+    received: list[int] = []
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    def recorder(event: str, tags: Mapping[str, Any]) -> None:
+        events.append((event, dict(tags)))
+
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table, metrics_recorder=recorder)
+
+    @broker.subscriber(
+        "orders",
+        max_workers=1,
+        min_fetch_interval=0.02,
+        max_fetch_interval=0.1,
+        fetch_batch_size=n_rows,
+        terminal_flush_batch_size=batch_size,
+    )
+    async def handle(body: dict) -> None:
+        received.append(body["i"])
+
+    client = broker.client
+    original_batch_delete = client.delete_batch_with_lease
+    batch_sizes: list[int] = []
+
+    async def spy_delete_batch(*args: Any, **kwargs: Any) -> Any:
+        pairs = args[1] if len(args) > 1 else kwargs["pairs"]
+        batch_sizes.append(len(pairs))
+        return await original_batch_delete(*args, **kwargs)
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    with mock.patch.object(client, "delete_batch_with_lease", side_effect=spy_delete_batch):
+        async with broker:
+            async with session_factory() as session, session.begin():
+                for i in range(n_rows):
+                    payload, headers = encode_payload({"i": i})
+                    await session.execute(
+                        insert(outbox_table).values(queue="orders", payload=payload, headers=headers),
+                    )
+            await _wait_until(lambda: len(received) == n_rows, timeout=15.0)
+
+            deadline = asyncio.get_event_loop().time() + 5.0
+            while asyncio.get_event_loop().time() < deadline:
+                if await _row_count(pg_engine, outbox_table) == 0:
+                    break
+                await asyncio.sleep(0.05)
+
+    assert sorted(received) == list(range(n_rows))
+    assert await _row_count(pg_engine, outbox_table) == 0
+    acked = [t for e, t in events if e == "acked"]
+    assert len(acked) == n_rows, f"one acked metric per deleted row expected, got {len(acked)}"
+    assert batch_size in batch_sizes, (
+        f"expected at least one flush with exactly batch_size={batch_size} pairs (the size "
+        f"trigger, not idle), got flush sizes {batch_sizes}"
+    )
+
+
+async def test_batched_flush_dlq_row_stays_inline(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+    dlq_table: Table,
+) -> None:
+    """A DLQ-writing terminal row stays on the inline CTE path even with batching enabled.
+
+    ``_terminal_has_dlq`` excludes a failure-terminal row from the batchable buffer whenever
+    ``dlq_table`` is configured -- its terminal write is a DELETE+INSERT CTE, which a plain
+    batched DELETE cannot express. This seeds one row that fails terminally alongside several
+    rows that succeed, with ``terminal_flush_batch_size>1``: the failing row's DLQ audit must
+    land (not be silently dropped by a batched delete), and the successful rows must still be
+    batch-deleted normally -- proving the mixed inline-DLQ + batched-success paths coexist.
+    """
+    n_success = 4
+    received: list[dict[str, Any]] = []
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    def recorder(event: str, tags: Mapping[str, Any]) -> None:
+        events.append((event, dict(tags)))
+
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table, dlq_table=dlq_table, metrics_recorder=recorder)
+
+    @broker.subscriber(
+        "orders",
+        retry_strategy=NoRetry(),
+        max_workers=1,
+        min_fetch_interval=0.02,
+        max_fetch_interval=0.1,
+        fetch_batch_size=10,
+        terminal_flush_batch_size=5,
+    )
+    async def handle(body: dict) -> None:
+        received.append(body)
+        if body.get("fail"):
+            msg = "always fails"
+            raise RuntimeError(msg)
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with broker:
+        async with session_factory() as session, session.begin():
+            await broker.publish({"fail": True}, queue="orders", session=session, correlation_id="trace-dlq")
+            for i in range(n_success):
+                await broker.publish({"i": i}, queue="orders", session=session)
+        await _wait_until(lambda: len(received) == n_success + 1, timeout=15.0)
+        await _wait_until(lambda: any(e == "dlq_written" for e, _ in events), timeout=15.0)
+        deadline = asyncio.get_event_loop().time() + 5.0
+        while asyncio.get_event_loop().time() < deadline:
+            if await _row_count(pg_engine, outbox_table) == 0:
+                break
+            await asyncio.sleep(0.05)
+
+    assert await _row_count(pg_engine, outbox_table) == 0
+    rows = await _dlq_rows(pg_engine, dlq_table)
+    assert len(rows) == 1, "exactly the failing row must land in the DLQ"
+    assert rows[0]["failure_reason"] == "retry_terminal"
+    acked = [t for e, t in events if e == "acked"]
+    assert len(acked) == n_success, "the success rows must still be batch-deleted alongside the inline DLQ row"
+
+
 # --- Publisher tests --------------------------------------------------------------------
 
 
