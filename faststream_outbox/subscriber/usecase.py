@@ -63,6 +63,10 @@ _BACKOFF_RESET_THRESHOLD_SECONDS = 60.0
 # (anyio.move_on_after(None) has deadline=inf), so the drain path clamps to this.
 # Mirrors OutboxBroker/OutboxRouter's graceful_timeout=15.0 default.
 _DEFAULT_DRAIN_TIMEOUT_SECONDS = 15.0
+# Cap the best-effort buffer flush on worker exit so a wedged connection at drain
+# timeout cannot extend stop() past its budget; on timeout the rows fall back to
+# lease-expiry redelivery (the same fate as any in-flight row on a drain timeout).
+_FLUSH_ON_EXIT_TIMEOUT_SECONDS = 2.0
 
 
 @dataclasses.dataclass(slots=True)
@@ -605,12 +609,15 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                 if len(buffer) >= batch_size:
                     await self._flush_buffer(buffer, writer_conn=writer_conn)
         finally:
-            # Loop exited (self.running False, or an error propagating to _worker_loop).
-            # Best-effort flush of any completed-but-unflushed rows so a graceful exit does
-            # not leak leases; _flush_buffer task_done's them either way so join() can't hang.
+            # Bounded best-effort flush of completed-but-unflushed rows on exit. Only
+            # reachable on a drain timeout (a graceful stop empties the buffer via the
+            # idle flush before join() returns). asyncio.timeout caps a wedged DELETE so
+            # cancellation can't hang stop(); TimeoutError (and any flush error) is
+            # suppressed and the rows fall back to lease-expiry redelivery.
             if buffer:
                 with suppress(Exception):
-                    await self._flush_buffer(buffer, writer_conn=writer_conn)
+                    async with asyncio.timeout(_FLUSH_ON_EXIT_TIMEOUT_SECONDS):
+                        await self._flush_buffer(buffer, writer_conn=writer_conn)
 
     async def dispatch_one(  # linear pipeline: guard, consume, branch on outcome, flush
         self,

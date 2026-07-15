@@ -1223,16 +1223,23 @@ async def test_batched_flush_dlq_row_stays_inline(
     assert len(acked) == n_success, "the success rows must still be batch-deleted alongside the inline DLQ row"
 
 
-async def test_graceful_drain_flushes_partial_batch(pg_engine: AsyncEngine, outbox_table: Table) -> None:
-    """A graceful stop() flushes a partial terminal buffer -- no redelivery, no leak.
+async def test_graceful_stop_leaves_no_undeleted_rows_via_join_barrier(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+) -> None:
+    """A graceful stop() leaves zero undeleted rows -- no redelivery, no leak.
 
-    Seeds FEWER rows than ``terminal_flush_batch_size`` (50 rows, batch 1000) so the buffer
-    never reaches its size cap: only the drain/idle flush can clear it. After the handler has
-    seen all 50 rows, ``stop()`` must flush the buffered completions (via the deferred
-    ``task_done`` + ``_inflight.join()`` drain barrier) before the writer connections tear
-    down. No polling-for-empty happens before ``stop()`` -- the assertion is that the graceful
-    stop itself left zero rows. A survivor means the drain barrier leaked a
-    completed-but-undeleted row and Task 3's batching is broken.
+    This proves the *graceful* guarantee, and names the mechanism honestly: the buffer is
+    cleared by the queue-idle flush inside ``_worker_inner`` and the ``_inflight.join()``
+    drain barrier in ``stop()`` (every buffered row's deferred ``task_done`` fires only after
+    its ``DELETE`` lands, so ``join()`` returns only once the buffer is empty). It does NOT
+    exercise ``_worker_inner``'s exit-flush ``finally`` block -- that path is reachable only
+    on a drain *timeout*, and here the idle flush empties the buffer before ``stop()`` even
+    calls ``join()``. Seeds FEWER rows than ``terminal_flush_batch_size`` (50 rows, batch
+    1000) so the size cap never fires: only the idle/join barrier can clear the buffer. No
+    polling-for-empty happens before ``stop()`` -- the assertion is that the graceful stop
+    itself left zero rows. A survivor means the join barrier leaked a completed-but-undeleted
+    row and Task 3's batching is broken.
     """
     n_rows = 50
     received: list[int] = []
