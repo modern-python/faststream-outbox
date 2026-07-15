@@ -197,6 +197,10 @@ insert_threshold=5000)` — a higher threshold vacuums less often. `fillfactor` 
 intentionally not set: the lease `UPDATE` touches indexed columns, so HOT updates
 are impossible and `fillfactor` buys almost nothing here.
 
+If your outbox table lives in a non-default `MetaData(schema=...)`, pass the same
+schema — `outbox_autovacuum_ddl("outbox", schema="app")` — so the `ALTER TABLE`
+targets that table rather than an unqualified name resolved via `search_path`.
+
 To catch a table that never had the settings applied, call `check_outbox_autovacuum`
 from a startup hook or `/health`. It returns warnings (never raises) and is separate
 from `validate_schema()`:

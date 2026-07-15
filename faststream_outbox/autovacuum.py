@@ -45,6 +45,7 @@ _IDENTIFIER_PREPARER = postgresql.dialect().identifier_preparer
 def outbox_autovacuum_ddl(
     table_name: str = "outbox",
     *,
+    schema: str | None = None,
     vacuum_threshold: int = 1000,
     insert_threshold: int = 1000,
 ) -> str:
@@ -54,8 +55,15 @@ def outbox_autovacuum_ddl(
     or run it via psql. ``vacuum_threshold`` / ``insert_threshold`` tune how many dead
     (resp. inserted) tuples trigger autovacuum; the scale factors are fixed at 0 -- that
     is the structural fix, not a knob. The insert-triggered reloptions require Postgres 13+.
+
+    ``schema`` defaults to ``None``, which renders an unqualified table name that resolves
+    via the connection's ``search_path`` -- matching both ``Table.schema=None`` and
+    :func:`check_outbox_autovacuum`'s ``COALESCE(:schema, current_schema())`` lookup. Pass
+    the same ``schema`` as the outbox ``Table`` (e.g. ``table.schema``) when it lives in a
+    named schema, so this DDL targets the same table the probe checks.
     """
-    quoted = _IDENTIFIER_PREPARER.quote(table_name)
+    quoted_table = _IDENTIFIER_PREPARER.quote(table_name)
+    quoted_name = quoted_table if schema is None else f"{_IDENTIFIER_PREPARER.quote(schema)}.{quoted_table}"
     options = (
         (_SCALE_FACTOR_KEYS[0], "0"),
         (_VACUUM_THRESHOLD_KEY, str(vacuum_threshold)),
@@ -63,7 +71,7 @@ def outbox_autovacuum_ddl(
         (_INSERT_THRESHOLD_KEY, str(insert_threshold)),
     )
     settings = ", ".join(f"{key} = {value}" for key, value in options)
-    return f"ALTER TABLE {quoted} SET ({settings})"
+    return f"ALTER TABLE {quoted_name} SET ({settings})"
 
 
 # reloptions come back from asyncpg as a ``list[str]`` of ``"key=value"`` items, or

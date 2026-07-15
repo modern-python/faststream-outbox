@@ -2159,3 +2159,27 @@ async def test_check_autovacuum_warns_when_scale_factor_nonzero(pg_engine: Async
         )
     warnings = await check_outbox_autovacuum(pg_engine, outbox_table)
     assert any("autovacuum_vacuum_scale_factor" in w for w in warnings)
+
+
+async def test_check_autovacuum_ok_when_applied_in_named_schema(pg_engine: AsyncEngine) -> None:
+    """The DDL helper's ``schema=`` must target the same table the schema-aware probe checks.
+
+    Before the fix, ``outbox_autovacuum_ddl`` had no ``schema`` param and always rendered an
+    unqualified ``ALTER TABLE outbox ...``, which resolves via search_path -- silently missing
+    (or mistargeting) a table that lives in a named schema, while the probe (which is already
+    schema-aware) kept warning the real table was untuned.
+    """
+    schema = f"sch_av_{uuid.uuid4().hex[:8]}"
+    metadata = MetaData(schema=schema)
+    table = make_outbox_table(metadata, table_name="outbox")
+    async with pg_engine.begin() as conn:
+        await conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+        await conn.run_sync(metadata.create_all)
+    try:
+        async with pg_engine.begin() as conn:
+            await conn.execute(text(outbox_autovacuum_ddl(table.name, schema=table.schema)))
+        assert await check_outbox_autovacuum(pg_engine, table) == []
+    finally:
+        async with pg_engine.begin() as conn:
+            await conn.run_sync(metadata.drop_all)
+            await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))

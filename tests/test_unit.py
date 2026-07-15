@@ -4132,3 +4132,16 @@ def test_outbox_autovacuum_ddl_quotes_reserved_table_name() -> None:
     # A reserved word must be quoted so the ALTER TABLE parses.
     sql = outbox_autovacuum_ddl("user")
     assert sql.startswith('ALTER TABLE "user" SET (')
+
+
+def test_outbox_autovacuum_ddl_schema_qualified() -> None:
+    # A named schema must qualify the table so the DDL targets the same table the
+    # schema-aware probe checks, rather than an unqualified search_path-relative one.
+    sql = outbox_autovacuum_ddl("outbox", schema="app")
+    assert sql == (
+        "ALTER TABLE app.outbox SET ("
+        "autovacuum_vacuum_scale_factor = 0, "
+        "autovacuum_vacuum_threshold = 1000, "
+        "autovacuum_vacuum_insert_scale_factor = 0, "
+        "autovacuum_vacuum_insert_threshold = 1000)"
+    )
