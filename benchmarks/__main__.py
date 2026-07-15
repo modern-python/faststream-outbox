@@ -52,6 +52,12 @@ async def _run_sweep(dsn: str, messages: int, repeats: int) -> list[RunResult]:
                 cfg = RunConfig(messages=messages, max_workers=workers, fetch_batch_size=batch)
                 runs = [await run_consumer(engine, cfg) for _ in range(repeats)]
                 results.append(_median_by_wall(runs))
+        # Batched-flush before/after: the tfbs=1 sibling above is consumer/w1/b100; this
+        # tfbs=100 counterpart (consumer/w1/b100/tfbs100) coalesces the terminal DELETEs
+        # so delete_calls drops ~100x. YAGNI: one batched point, not a full cross-product.
+        batched_cfg = RunConfig(messages=messages, max_workers=1, fetch_batch_size=100, terminal_flush_batch_size=100)
+        batched_runs = [await run_consumer(engine, batched_cfg) for _ in range(repeats)]
+        results.append(_median_by_wall(batched_runs))
         producer_cfg = RunConfig(messages=messages)
         producer_runs = [await run_producer(engine, producer_cfg) for _ in range(repeats)]
         results.append(_median_by_wall(producer_runs))
