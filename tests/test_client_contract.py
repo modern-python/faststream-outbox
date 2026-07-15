@@ -91,6 +91,9 @@ class _FakeHarness:
     ) -> bool:
         return await self._client.delete_with_lease(None, message_id, token, dlq_payload=dlq_payload)
 
+    async def delete_batch(self, pairs: list[tuple[int, uuid.UUID]]) -> set[int]:
+        return await self._client.delete_batch_with_lease(None, pairs)
+
     async def mark_pending(
         self,
         message_id: int,
@@ -184,6 +187,11 @@ class _RealHarness:
         async with self._engine.connect() as raw:
             writer = await raw.execution_options(isolation_level="AUTOCOMMIT")
             return await self._client.delete_with_lease(writer, message_id, token, dlq_payload=dlq_payload)
+
+    async def delete_batch(self, pairs: list[tuple[int, uuid.UUID]]) -> set[int]:
+        async with self._engine.connect() as raw:
+            writer = await raw.execution_options(isolation_level="AUTOCOMMIT")
+            return await self._client.delete_batch_with_lease(writer, pairs)
 
     async def mark_pending(
         self,
@@ -355,6 +363,38 @@ async def test_delete_with_dlq_materializes_audit_row(contract: _Harness) -> Non
     assert dlq[0]["failure_reason"] == "boom"
     assert dlq[0]["last_exception"] == "Traceback..."
     assert dlq[0]["timer_id"] == "t-1"
+
+
+# --- delete_batch_with_lease -----------------------------------------------
+
+
+async def test_delete_batch_deletes_only_token_matches(contract: _Harness) -> None:
+    a = await contract.seed(queue="q")
+    b = await contract.seed(queue="q")
+    c = await contract.seed(queue="q")
+    leased = await contract.fetch(["q"], limit=10, lease_ttl_seconds=60.0)
+    tokens: dict[int, uuid.UUID] = {}
+    for row in leased:
+        assert row.acquired_token is not None
+        tokens[row.id] = row.acquired_token
+    # a and b with correct tokens; c with a wrong token -> only a and b delete.
+    wrong = uuid.uuid4()
+    deleted = await contract.delete_batch([(a, tokens[a]), (b, tokens[b]), (c, wrong)])
+    assert deleted == {a, b}
+    assert await contract.get_row(a) is None
+    assert await contract.get_row(b) is None
+    assert await contract.get_row(c) is not None
+
+
+async def test_delete_batch_empty_is_noop(contract: _Harness) -> None:
+    assert await contract.delete_batch([]) == set()
+
+
+async def test_delete_batch_ignores_unleased_row(contract: _Harness) -> None:
+    a = await contract.seed(queue="q")  # never fetched -> acquired_token is None
+    deleted = await contract.delete_batch([(a, uuid.uuid4())])
+    assert deleted == set()
+    assert await contract.get_row(a) is not None
 
 
 # --- mark_pending_with_lease -----------------------------------------------
