@@ -980,6 +980,7 @@ async def test_subscriber_with_no_handler_skips_loop_setup() -> None:
         max_fetch_interval=10.0,
         lease_ttl_seconds=60.0,
         max_deliveries=None,
+        terminal_flush_batch_size=1,
         config=broker.config.broker_config,  # type: ignore[arg-type]
     )
     broker._subscribers.add(sub)  # noqa: SLF001
@@ -1142,6 +1143,7 @@ async def test_sync_publish_skips_callless_subscriber() -> None:
         max_fetch_interval=10.0,
         lease_ttl_seconds=60.0,
         max_deliveries=None,
+        terminal_flush_batch_size=1,
         config=broker.config.broker_config,  # type: ignore[arg-type]
     )
     broker._subscribers.add(sub)  # noqa: SLF001
@@ -1489,6 +1491,7 @@ async def test_subscriber_config_ack_policy_returns_explicit_value() -> None:
         max_fetch_interval=10.0,
         lease_ttl_seconds=60.0,
         max_deliveries=None,
+        terminal_flush_batch_size=1,
         propagate_inbound_headers=False,
     )
     assert cfg.ack_policy is AckPolicy.REJECT_ON_ERROR

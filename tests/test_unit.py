@@ -2863,6 +2863,18 @@ def test_subscriber_rejects_ack_first() -> None:
         _register_subscriber(broker, ack_policy=AckPolicy.ACK_FIRST)
 
 
+def test_subscriber_rejects_zero_terminal_flush_batch_size() -> None:
+    broker = _make_broker()
+    with pytest.raises(ValueError, match="terminal_flush_batch_size must be >= 1"):
+        _register_subscriber(broker, terminal_flush_batch_size=0)
+
+
+def test_subscriber_defaults_terminal_flush_batch_size_to_one() -> None:
+    broker = _make_broker()
+    sub = broker.subscriber("q")
+    assert sub._config.terminal_flush_batch_size == 1  # noqa: SLF001
+
+
 def test_subscriber_warns_on_reject_with_retry_strategy() -> None:
     broker = _make_broker()
     with pytest.warns(UserWarning, match="REJECT_ON_ERROR rejects on the first handler error"):

@@ -56,6 +56,7 @@ class OutboxSubscriberConfig(SubscriberUsecaseConfig):
     max_fetch_interval: float
     lease_ttl_seconds: float
     max_deliveries: int | None
+    terminal_flush_batch_size: int
     propagate_inbound_headers: bool
 
     def __post_init__(self) -> None:
@@ -88,6 +89,9 @@ class OutboxSubscriberConfig(SubscriberUsecaseConfig):
             raise ValueError(msg)
         if self.fetch_batch_size <= 0:
             msg = f"fetch_batch_size must be >= 1, got {self.fetch_batch_size}"
+            raise ValueError(msg)
+        if self.terminal_flush_batch_size <= 0:
+            msg = f"terminal_flush_batch_size must be >= 1, got {self.terminal_flush_batch_size}"
             raise ValueError(msg)
         # P12: non-positive intervals/TTL turn the adaptive backoff into a busy-poll (or an
         # instantly-expiring lease). Reject up front rather than spin a hot loop at runtime.
