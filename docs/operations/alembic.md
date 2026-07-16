@@ -174,6 +174,9 @@ The outbox is a high-churn queue table: every message is one `INSERT`, one lease
 the message rate**, and autovacuum has to reclaim them. Two independent levers
 matter, and they do different things.
 
+For how this fits with the outbox's other performance levers, see the
+[Performance](../concepts/performance.md) guide.
+
 ### Eligibility — when autovacuum fires
 
 Postgres' default `autovacuum_vacuum_scale_factor = 0.2` fires vacuum only after a
