@@ -16,6 +16,10 @@ Session-type / queue / activate-args-mutex / tz validation lives in one shared `
 
 `from_cmd` raises (relay chaining is unsupported here).
 
+## NOTIFY dedup per transaction
+
+`_notify` emits at most one `pg_notify` per `(transaction, queue)`, deduped via a `WeakKeyDictionary` memo keyed on the innermost active *sync* transaction (`session.sync_session.get_nested_transaction() or session.sync_session.get_transaction()`). This is behavior-preserving and default-on — no config knob: Postgres already coalesces identical NOTIFYs per transaction at delivery, so the dedup only removes redundant round-trips, and the subscriber already tolerates coalesced/duplicate wakes. The memo entry for a transaction GCs when that transaction object is collected, so a rolled-back savepoint's entry can never suppress a later real NOTIFY for the same queue once control returns to the outer transaction. The guarantee holds for the caller's transaction regardless of whether they use an explicit `session.begin()` or rely on autobegin: keying on the sync `SessionTransaction` (which the `Session` holds strongly for the transaction's lifetime) rather than the async `AsyncSessionTransaction` proxy (regenerated per call, only weak-referenced) means the memo entry survives between autobegin publishes instead of GC'ing and silently losing the dedup.
+
 ## Publisher wrapper
 
 `broker.publisher(queue, *, headers=None, title=None, description=None, schema=None, include_in_schema=True)` returns an `OutboxPublisher` — a typed wrapper around `broker.publish` with the same transactional contract. Static decorator headers merge with per-call headers (per-call wins).

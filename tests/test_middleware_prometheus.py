@@ -41,6 +41,8 @@ def _session_mock() -> AsyncMock:
     s = AsyncMock(spec=AsyncSession)
     s.execute.return_value = MagicMock()
     s.execute.return_value.scalar.return_value = 42
+    # _notify keys its dedup memo on session.sync_session -- give it a plain mock.
+    s.sync_session = MagicMock()
     return s
 
 

@@ -9,6 +9,7 @@ producer never opens its own session — every command carries the caller's
 
 import time
 import typing
+from weakref import WeakKeyDictionary
 
 from faststream._internal.endpoint.utils import ParserComposition
 from faststream._internal.parser import DefaultCodec
@@ -47,6 +48,10 @@ class OutboxProducer:
     ) -> None:
         self._table = table
         self._channel = f"outbox_{table.name}"
+        # Per-transaction NOTIFY dedup memo (see _notify). Keyed on the innermost active
+        # transaction object, weak-referenced so entries GC when the transaction ends -- no
+        # explicit reset, and a rolled-back savepoint cannot suppress a later real NOTIFY.
+        self._notified: WeakKeyDictionary[typing.Any, set[str]] = WeakKeyDictionary()
         self.serializer: SerializerProto | None = None
         # ProducerProto[0.7] requires a `codec` attribute. The outbox owns its
         # own encoding pipeline (_encode_payload) and never reads this attribute
@@ -210,10 +215,30 @@ class OutboxProducer:
         raise NotImplementedError(_REQUEST_UNSUPPORTED_MSG)
 
     async def _notify(self, session: typing.Any, queue: str) -> None:
-        # ``pg_notify(:channel, :payload)`` — parameterized so channel and payload
-        # bind cleanly (raw NOTIFY accepts only literals — injection-prone). Runs
-        # on the caller's session so NOTIFY commits with the row insert; rollback
-        # silently discards it. Non-Postgres dialects ignore it.
+        # ``pg_notify(:channel, :payload)`` -- parameterized so channel and payload
+        # bind cleanly (raw NOTIFY accepts only literals -- injection-prone). Runs on
+        # the caller's session so NOTIFY commits with the row insert; rollback silently
+        # discards it. Non-Postgres dialects ignore it.
+        #
+        # Dedup: Postgres already coalesces identical (channel, payload) NOTIFYs per
+        # transaction at delivery, so a second pg_notify for the same queue in the same
+        # transaction only wastes a round-trip. Memoize emitted queues per innermost
+        # active transaction (get_nested_transaction() during a savepoint, else the outer
+        # transaction) -- each a distinct, weak-referenceable object that GCs when the
+        # transaction ends, so a rolled-back savepoint cannot suppress a later real NOTIFY.
+        # Key on the *sync* SessionTransaction, not the async AsyncSessionTransaction proxy:
+        # SQLAlchemy regenerates that proxy on every call and only weak-references it, so
+        # under autobegin (no explicit `session.begin()`) it would GC between publishes and
+        # defeat the memo. The Session holds the sync transaction strongly for its lifetime,
+        # so the key survives across publishes whether the caller uses `session.begin()` or
+        # autobegin. No active transaction -> emit unconditionally.
+        sync_session = session.sync_session
+        txn = sync_session.get_nested_transaction() or sync_session.get_transaction()
+        if txn is not None:
+            emitted = self._notified.setdefault(txn, set())
+            if queue in emitted:
+                return
+            emitted.add(queue)
         await session.execute(
             text("SELECT pg_notify(:channel, :payload)"),
             {"channel": self._channel, "payload": queue},
