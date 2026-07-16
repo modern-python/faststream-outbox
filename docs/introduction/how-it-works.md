@@ -52,6 +52,10 @@ genuinely future-dated (a future `activate_in` / `activate_at` — a *past*
 after the user's transaction commits — atomicity with the row insert is
 automatic.
 
+Repeated publishes to the same queue within one transaction emit a single
+`pg_notify` (Postgres coalesces identical notifications at delivery anyway), so a
+bulk publish costs one NOTIFY, not one per row.
+
 ## Subscriber: two async loops
 
 Per subscriber, two loops run concurrently:
