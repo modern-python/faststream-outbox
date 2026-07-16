@@ -2336,3 +2336,17 @@ async def test_notify_still_skipped_for_future_dated(pg_engine, outbox_table) ->
         async with session_factory() as session, session.begin():
             await broker.publish({"n": 1}, queue="orders", session=session, activate_in=_dt.timedelta(minutes=5))
     assert count[0] == 0  # future-dated -> no NOTIFY (unchanged), dedup did not break the skip
+
+
+async def test_notify_deduped_in_autobegin_transaction(pg_engine, outbox_table) -> None:
+    # Autobegin (no explicit session.begin()): the dedup must still collapse N publishes
+    # of one queue to one pg_notify. Guards against keying the memo on the GC-fragile async
+    # transaction proxy.
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    with _count_pg_notify(pg_engine) as count:
+        async with session_factory() as session:
+            for _ in range(5):
+                await broker.publish({"n": 1}, queue="orders", session=session)
+            await session.commit()
+    assert count[0] == 1  # 5 publishes, one queue, one autobegin transaction -> one pg_notify

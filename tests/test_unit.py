@@ -95,6 +95,9 @@ def _make_session_mock(*, scalar_return: object = 42) -> AsyncMock:
     session = AsyncMock(spec=AsyncSession)
     session.execute.return_value = MagicMock()
     session.execute.return_value.scalar.return_value = scalar_return
+    # _notify keys its dedup memo on session.sync_session (the sync SessionTransaction),
+    # not the spec'd AsyncSession -- give it a plain mock so attribute access succeeds.
+    session.sync_session = MagicMock()
     return session
 
 
@@ -1039,7 +1042,7 @@ async def test_broker_publish_batch_with_activate_at_skips_notify() -> None:
 
 async def test_broker_publish_batch_emits_notify_when_activate_at_is_past() -> None:
     broker = _make_broker()
-    session = AsyncMock(spec=AsyncSession)
+    session = _make_session_mock()
     past = _dt.datetime.now(tz=_dt.UTC) - _dt.timedelta(seconds=5)
     await broker.publish_batch(b"a", b"b", queue="orders", session=session, activate_at=past)
     # INSERT + NOTIFY: past activate_at is immediately eligible.
@@ -1159,7 +1162,7 @@ async def test_broker_cancel_timer_returns_false_when_nothing_deleted() -> None:
 async def test_broker_publish_batch_executes_single_insert_for_many_rows() -> None:
 
     broker = _make_broker()
-    session = AsyncMock(spec=AsyncSession)
+    session = _make_session_mock()
     await broker.publish_batch(b"a", b"b", b"c", queue="orders", session=session)
     # Two execute calls: the multi-row INSERT, then SELECT pg_notify(...).
     assert session.execute.await_count == 2

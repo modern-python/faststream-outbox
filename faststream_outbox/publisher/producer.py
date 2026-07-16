@@ -226,8 +226,14 @@ class OutboxProducer:
         # active transaction (get_nested_transaction() during a savepoint, else the outer
         # transaction) -- each a distinct, weak-referenceable object that GCs when the
         # transaction ends, so a rolled-back savepoint cannot suppress a later real NOTIFY.
-        # No active transaction -> emit unconditionally.
-        txn = session.get_nested_transaction() or session.get_transaction()
+        # Key on the *sync* SessionTransaction, not the async AsyncSessionTransaction proxy:
+        # SQLAlchemy regenerates that proxy on every call and only weak-references it, so
+        # under autobegin (no explicit `session.begin()`) it would GC between publishes and
+        # defeat the memo. The Session holds the sync transaction strongly for its lifetime,
+        # so the key survives across publishes whether the caller uses `session.begin()` or
+        # autobegin. No active transaction -> emit unconditionally.
+        sync_session = session.sync_session
+        txn = sync_session.get_nested_transaction() or sync_session.get_transaction()
         if txn is not None:
             emitted = self._notified.setdefault(txn, set())
             if queue in emitted:
