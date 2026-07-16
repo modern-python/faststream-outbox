@@ -171,15 +171,17 @@ consequence that bites is a missing `server_default=now()` on
 
 The outbox is a high-churn queue table: every message is one `INSERT`, one lease
 `UPDATE`, and one terminal `DELETE`, so dead tuples accumulate at roughly **twice
-the message rate**. Postgres' default `autovacuum_vacuum_scale_factor = 0.2` fires
-vacuum only after a *fraction of the table* is dead — on a queue table that lets
-bloat grow, and if the table bloats the fraction is *of the bloated size*, so vacuum
-fires ever less often. Set the scale factor to `0` so vacuum triggers on a constant
-dead-tuple count instead, tracking churn rather than table size.
+the message rate**, and autovacuum has to reclaim them. Two independent levers
+matter, and they do different things.
 
-SQLAlchemy's `Table` cannot carry these reloptions, so `alembic revision
---autogenerate` will never emit them — apply them with an explicit statement.
-`faststream_outbox` renders it for you:
+### Eligibility — when autovacuum fires
+
+Postgres' default `autovacuum_vacuum_scale_factor = 0.2` fires vacuum only after a
+*fraction of the table* is dead. On a queue table whose `reltuples` estimate can go
+stale (a table that backed up once keeps a high estimate), that fraction is a high,
+size-dependent bar that fires rarely — the classic queue-table death-spiral.
+Setting the scale factor to `0` with a constant threshold makes vacuum eligible on a
+fixed dead-tuple count instead, independent of table size and of a stale estimate:
 
 ```python
 from alembic import op
@@ -193,16 +195,44 @@ def upgrade() -> None:
 This sets `autovacuum_vacuum_scale_factor = 0` and `autovacuum_vacuum_threshold =
 1000` (plus the insert-triggered pair, Postgres 13+). Tune the thresholds for your
 message rate — `outbox_autovacuum_ddl("outbox", vacuum_threshold=5000,
-insert_threshold=5000)` — a higher threshold vacuums less often. `fillfactor` is
-intentionally not set: the lease `UPDATE` touches indexed columns, so HOT updates
-are impossible and `fillfactor` buys almost nothing here.
+insert_threshold=5000)`.
+
+This is standard queue-table hygiene: it keeps vacuum behavior predictable and
+size-independent, and it matters most under the **default 60-second autovacuum
+daemon** with variable or bursty backlogs, where being eligible at *every* wake
+(rather than rarely) bounds how many dead tuples pile up between vacuums. Treat it as
+insurance against a size-dependent bar going stale, not a guaranteed bloat
+reduction.
+
+### Throughput — how fast autovacuum reclaims
+
+Eligibility is necessary but not sufficient. Under **heavy sustained churn** the
+binding constraint is vacuum *throughput*: a throttled autovacuum (Postgres default
+`autovacuum_vacuum_cost_delay`) falls behind the dead-tuple rate no matter how
+eagerly it is eligible, and the table bloats anyway. The `vacuum_cost_delay` /
+`vacuum_cost_limit` params let vacuum keep pace:
+
+```python
+# heavy-churn outbox: let autovacuum run unthrottled so it keeps up
+op.execute(outbox_autovacuum_ddl("outbox", vacuum_cost_delay=0))
+```
+
+`vacuum_cost_delay=0` removes autovacuum's I/O throttle for this table — the lever
+that actually bounds bloat under heavy churn. But it is **I/O-heavy**: on a shared
+cluster, an unthrottled vacuum of a large table can spike disk load, so raise it
+deliberately and measure. Both cost params default to unset (the cluster default),
+so a plain `outbox_autovacuum_ddl("outbox")` changes only eligibility.
+
+`fillfactor` is intentionally not set: the lease `UPDATE` touches indexed columns, so
+HOT updates are impossible and `fillfactor` buys almost nothing here.
 
 If your outbox table lives in a non-default `MetaData(schema=...)`, pass the same
 schema — `outbox_autovacuum_ddl("outbox", schema="app")` — so the `ALTER TABLE`
 targets that table rather than an unqualified name resolved via `search_path`.
 
-To catch a table that never had the settings applied, pass `check_autovacuum=True`
-to `validate_schema()`. Requires the `[validate]` (Alembic) extra:
+To catch a table that never had the eligibility settings applied, pass
+`check_autovacuum=True` to `validate_schema()` (it checks `scale_factor = 0` + a
+threshold, not the cost knobs). Requires the `[validate]` (Alembic) extra:
 
 ```python
 # In a startup hook or /health check -- raises if the outbox table is not tuned

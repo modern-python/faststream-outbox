@@ -41,6 +41,8 @@ def outbox_autovacuum_ddl(
     schema: str | None = None,
     vacuum_threshold: int = 1000,
     insert_threshold: int = 1000,
+    vacuum_cost_delay: int | None = None,
+    vacuum_cost_limit: int | None = None,
 ) -> str:
     """Render the recommended ``ALTER TABLE … SET (autovacuum_*)`` statement.
 
@@ -48,6 +50,13 @@ def outbox_autovacuum_ddl(
     or run it via psql. ``vacuum_threshold`` / ``insert_threshold`` tune how many dead
     (resp. inserted) tuples trigger autovacuum; the scale factors are fixed at 0 -- that
     is the structural fix, not a knob. The insert-triggered reloptions require Postgres 13+.
+
+    ``vacuum_cost_delay`` / ``vacuum_cost_limit`` control vacuum *throughput* (how fast
+    autovacuum reclaims dead tuples once eligible), not eligibility. Both default to
+    ``None``, which omits the reloption entirely (cluster default) -- so a plain call
+    renders byte-identical output to before these params existed. ``vacuum_cost_delay=0``
+    runs vacuum unthrottled (fast but I/O-heavy) -- the lever that bounds bloat under
+    heavy sustained churn.
 
     ``schema`` defaults to ``None``, which renders an unqualified table name that resolves
     via the connection's ``search_path`` -- matching both ``Table.schema=None`` and
@@ -58,12 +67,16 @@ def outbox_autovacuum_ddl(
     """
     quoted_table = _IDENTIFIER_PREPARER.quote(table_name)
     quoted_name = quoted_table if schema is None else f"{_IDENTIFIER_PREPARER.quote(schema)}.{quoted_table}"
-    options = (
+    options = [
         (_SCALE_FACTOR_KEYS[0], "0"),
         (_VACUUM_THRESHOLD_KEY, str(vacuum_threshold)),
         (_SCALE_FACTOR_KEYS[1], "0"),
         (_INSERT_THRESHOLD_KEY, str(insert_threshold)),
-    )
+    ]
+    if vacuum_cost_delay is not None:
+        options.append(("autovacuum_vacuum_cost_delay", str(vacuum_cost_delay)))
+    if vacuum_cost_limit is not None:
+        options.append(("autovacuum_vacuum_cost_limit", str(vacuum_cost_limit)))
     settings = ", ".join(f"{key} = {value}" for key, value in options)
     return f"ALTER TABLE {quoted_name} SET ({settings})"
 

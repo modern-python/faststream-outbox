@@ -101,3 +101,11 @@ table lacks the settings — separate from the "Outbox schema mismatch: " prefix
 an operator can tell the two apart. Because it rides `validate_schema()`, the check
 is coupled to the `[validate]` (Alembic) extra. `fillfactor` is excluded on evidence
 (HOT is impossible — the claim `UPDATE` mutates both partial indexes' key columns).
+
+`scale_factor`/threshold control vacuum *eligibility* — this is the structural fix
+above, shipped and enforced by the probe. `outbox_autovacuum_ddl()` also accepts
+optional `vacuum_cost_delay`/`vacuum_cost_limit`, which control vacuum *throughput*
+instead; they default to unset, are not checked by the probe (situational tuning,
+not a structural requirement), and are the binding constraint under heavy sustained
+churn — eligibility alone cannot keep vacuum ahead of the dead-tuple rate if it runs
+throttled.

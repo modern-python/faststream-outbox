@@ -4145,3 +4145,19 @@ def test_outbox_autovacuum_ddl_schema_qualified() -> None:
         "autovacuum_vacuum_insert_scale_factor = 0, "
         "autovacuum_vacuum_insert_threshold = 1000)"
     )
+
+
+def test_outbox_autovacuum_ddl_cost_delay_emitted() -> None:
+    sql = outbox_autovacuum_ddl("outbox", vacuum_cost_delay=0)
+    assert "autovacuum_vacuum_cost_delay = 0" in sql
+
+
+def test_outbox_autovacuum_ddl_cost_limit_emitted() -> None:
+    sql = outbox_autovacuum_ddl("outbox", vacuum_cost_limit=2000)
+    assert "autovacuum_vacuum_cost_limit = 2000" in sql
+
+
+def test_outbox_autovacuum_ddl_default_omits_cost_options() -> None:
+    sql = outbox_autovacuum_ddl("outbox")
+    assert "cost_delay" not in sql
+    assert "cost_limit" not in sql
