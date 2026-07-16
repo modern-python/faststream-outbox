@@ -12,6 +12,7 @@ nav:
       - 'Tutorial: Add a Kafka relay': tutorials/add-kafka-relay.md
   - Concepts:
       - How it works: introduction/how-it-works.md
+      - Performance: concepts/performance.md
       - Comparison: concepts/comparison.md
       - Instrumentation seams: concepts/instrumentation-seams.md
   - Guides:

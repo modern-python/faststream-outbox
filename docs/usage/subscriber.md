@@ -204,6 +204,9 @@ per-row path). Enable it per subscriber when the queue is high-throughput and
 its handler is idempotent; leave it off for low-volume or
 exactly-once-sensitive queues.
 
+For where this sits among the outbox's tuning levers and which workloads want it,
+see the [Performance](../concepts/performance.md) guide.
+
 ## Ack policy
 
 The default is `AckPolicy.NACK_ON_ERROR`: on a handler exception, the retry
