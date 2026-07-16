@@ -1,6 +1,7 @@
 """Integration tests against real Postgres. Requires docker-compose postgres up."""
 
 import asyncio
+import contextlib
 import datetime as _dt
 import logging
 import uuid
@@ -2242,3 +2243,96 @@ async def test_validate_schema_autovacuum_ok_when_applied_in_named_schema(pg_eng
         async with pg_engine.begin() as conn:
             await conn.run_sync(metadata.drop_all)
             await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+
+
+@contextlib.contextmanager
+def _count_pg_notify(engine: AsyncEngine):
+    """Count executed ``pg_notify`` statements on *engine* via a cursor-execute listener.
+
+    Returns a one-element mutable list so a test can also reset it mid-transaction.
+    Listens on ``engine.sync_engine`` (the AsyncEngine routes DBAPI execution through it).
+    """
+    count = [0]
+
+    def _listener(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ARG001
+        if "pg_notify" in statement.lower():
+            count[0] += 1
+
+    event.listen(engine.sync_engine, "before_cursor_execute", _listener)
+    try:
+        yield count
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", _listener)
+
+
+async def test_notify_deduped_within_transaction_same_queue(pg_engine, outbox_table) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    with _count_pg_notify(pg_engine) as count:
+        async with session_factory() as session, session.begin():
+            for _ in range(5):
+                await broker.publish({"n": 1}, queue="orders", session=session)
+    assert count[0] == 1  # 5 publishes, one queue, one txn -> one pg_notify
+
+
+async def test_notify_one_per_distinct_queue_within_transaction(pg_engine, outbox_table) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    with _count_pg_notify(pg_engine) as count:
+        async with session_factory() as session, session.begin():
+            await broker.publish({"n": 1}, queue="a", session=session)
+            await broker.publish({"n": 2}, queue="b", session=session)
+            await broker.publish({"n": 3}, queue="a", session=session)  # deduped
+    assert count[0] == 2  # queues a, b -> two pg_notify
+
+
+async def test_notify_re_emits_in_separate_transaction(pg_engine, outbox_table) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    with _count_pg_notify(pg_engine) as count:
+        async with session_factory() as session:
+            async with session.begin():
+                await broker.publish({"n": 1}, queue="orders", session=session)
+                await broker.publish({"n": 2}, queue="orders", session=session)  # deduped
+            async with session.begin():  # new transaction, same session
+                await broker.publish({"n": 3}, queue="orders", session=session)  # must re-emit
+    assert count[0] == 2  # one per transaction (the per-transaction reset)
+
+
+async def test_notify_re_emits_after_savepoint_rollback(pg_engine, outbox_table) -> None:
+    # Innermost-transaction key: a publish inside a rolled-back savepoint must NOT
+    # suppress a later publish of the same queue in the outer transaction.
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+
+    class _RollbackError(Exception):
+        pass
+
+    with _count_pg_notify(pg_engine) as count:
+        async with session_factory() as session, session.begin():
+            with contextlib.suppress(_RollbackError):
+                async with session.begin_nested():
+                    await broker.publish({"n": 1}, queue="orders", session=session)
+                    raise _RollbackError  # roll the savepoint back
+            count[0] = 0  # reset AFTER the savepoint: isolate the outer publish
+            await broker.publish({"n": 2}, queue="orders", session=session)  # must emit
+    assert count[0] == 1  # the outer republish emitted despite the rolled-back savepoint's publish
+
+
+async def test_notify_dedup_spans_publish_batch_and_publish(pg_engine, outbox_table) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    with _count_pg_notify(pg_engine) as count:
+        async with session_factory() as session, session.begin():
+            await broker.publish_batch({"n": 1}, {"n": 2}, queue="orders", session=session)  # 1 pg_notify
+            await broker.publish({"n": 3}, queue="orders", session=session)  # deduped
+    assert count[0] == 1
+
+
+async def test_notify_still_skipped_for_future_dated(pg_engine, outbox_table) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    with _count_pg_notify(pg_engine) as count:
+        async with session_factory() as session, session.begin():
+            await broker.publish({"n": 1}, queue="orders", session=session, activate_in=_dt.timedelta(minutes=5))
+    assert count[0] == 0  # future-dated -> no NOTIFY (unchanged), dedup did not break the skip
