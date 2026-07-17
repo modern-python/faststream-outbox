@@ -52,6 +52,10 @@ bench *args: down && down
 bench-check: down && down
     docker compose run application uv run python -m benchmarks check
 
+# Gate + emit the markdown report to stdout (CI PR comment). -T keeps stdout clean.
+bench-report: down && down
+    docker compose run -T application uv run python -m benchmarks check --markdown
+
 # Serve docs at http://127.0.0.1:8000 with hot-reload on save.
 docs-serve:
     uvx --with-requirements docs/requirements.txt mkdocs serve
