@@ -371,14 +371,15 @@ def _make_msg(**overrides: object) -> OutboxInnerMessage:
 async def test_inner_message_ack_marks_for_delete() -> None:
     msg = _make_msg()
     await msg.ack()
-    assert msg.to_delete
+    assert msg.terminal_failure_reason is None
+    assert msg.pending_delay_seconds is None
     assert msg.state_set
 
 
 async def test_inner_message_nack_with_no_strategy_is_terminal() -> None:
     msg = _make_msg()
     await msg.nack()
-    assert msg.to_delete
+    assert msg.terminal_failure_reason == "retry_terminal"
 
 
 def test_constant_retry_rejects_oversize_jitter() -> None:
@@ -455,7 +456,7 @@ def test_warn_on_duplicate_queues_across_routers() -> None:
 async def test_inner_message_nack_with_strategy_schedules_retry() -> None:
     msg = _make_msg(retry_strategy=ConstantRetry(delay_seconds=60))
     await msg.nack()
-    assert not msg.to_delete
+    assert msg.terminal_failure_reason is None  # retry scheduled, not terminal
     assert msg.last_attempt_at is not None
     assert msg.pending_delay_seconds == 60.0
 
@@ -463,7 +464,7 @@ async def test_inner_message_nack_with_strategy_schedules_retry() -> None:
 async def test_inner_message_reject_is_terminal() -> None:
     msg = _make_msg()
     await msg.reject()
-    assert msg.to_delete
+    assert msg.terminal_failure_reason == "rejected"
 
 
 async def test_inner_message_double_ack_is_noop() -> None:
@@ -477,13 +478,13 @@ async def test_inner_message_double_ack_is_noop() -> None:
 def test_allow_delivery_under_cap() -> None:
     msg = _make_msg(deliveries_count=3)
     assert msg.allow_delivery(max_deliveries=5, logger=None) is True
-    assert not msg.to_delete
+    assert not msg.state_set
 
 
 def test_allow_delivery_exceeds_cap_marks_for_delete() -> None:
     msg = _make_msg(deliveries_count=10)
     assert msg.allow_delivery(max_deliveries=5, logger=None) is False
-    assert msg.to_delete
+    assert msg.terminal_failure_reason == "max_deliveries"
 
 
 def test_allow_delivery_no_cap_is_always_true() -> None:
@@ -495,7 +496,7 @@ async def test_assert_state_set_rejects_when_not_set() -> None:
     msg = _make_msg()
     await msg.assert_state_set(logger=None)
     assert msg.state_set
-    assert msg.to_delete  # reject path → terminal
+    assert msg.terminal_failure_reason == "rejected"  # reject path → terminal
 
 
 async def test_assert_state_set_with_exception_nacks_for_retry() -> None:
@@ -503,7 +504,7 @@ async def test_assert_state_set_with_exception_nacks_for_retry() -> None:
     msg = _make_msg(retry_strategy=ConstantRetry(delay_seconds=60), last_exception=RuntimeError("boom"))
     await msg.assert_state_set(logger=None)
     assert msg.state_set
-    assert not msg.to_delete  # nack scheduled a retry, did not delete
+    assert msg.pending_delay_seconds is not None  # nack scheduled a retry, did not delete
     assert msg.pending_delay_seconds == 60.0
     assert msg.terminal_failure_reason is None
 
@@ -513,7 +514,6 @@ async def test_assert_state_set_with_exception_no_strategy_is_terminal_retry() -
     msg = _make_msg(last_exception=RuntimeError("boom"))
     await msg.assert_state_set(logger=None)
     assert msg.state_set
-    assert msg.to_delete
     assert msg.terminal_failure_reason == "retry_terminal"
 
 
@@ -552,7 +552,6 @@ async def test_nack_with_raising_strategy_degrades_to_retry_terminal() -> None:
     msg = _make_msg(retry_strategy=_RaisingRetryStrategy())
     await msg.nack()
     assert msg.state_set
-    assert msg.to_delete
     assert msg.terminal_failure_reason == "retry_terminal"
 
 
@@ -1631,7 +1630,7 @@ async def test_outbox_message_reject_calls_raw_then_super() -> None:
         correlation_id="1",
     )
     await msg.reject()
-    assert inner.to_delete  # raw_message.reject ran
+    assert inner.terminal_failure_reason == "rejected"  # raw_message.reject ran
     assert msg.committed is not None  # super().reject ran
 
 
@@ -2171,7 +2170,7 @@ async def test_dispatch_one_preserves_row_when_consume_raises() -> None:
 
     delete_spy.assert_not_awaited()
     assert not msg.state_set
-    assert not msg.to_delete
+    assert msg.terminal_failure_reason is None  # untouched row, no terminal intent
     assert not any(e == "acked" for e, _ in events)
     assert not any(e.startswith("nacked") for e, _ in events)
 
@@ -3664,7 +3663,6 @@ async def test_terminal_failure_reason_set_on_max_deliveries() -> None:
 async def test_terminal_failure_reason_set_on_retry_terminal_without_strategy() -> None:
     msg = _make_msg()
     await msg.nack()
-    assert msg.to_delete
     assert msg.terminal_failure_reason == "retry_terminal"
 
 
@@ -3684,14 +3682,13 @@ async def test_terminal_failure_reason_unset_when_retry_scheduled() -> None:
 async def test_terminal_failure_reason_set_on_reject() -> None:
     msg = _make_msg()
     await msg.reject()
-    assert msg.to_delete
     assert msg.terminal_failure_reason == "rejected"
 
 
 async def test_terminal_failure_reason_unset_on_ack() -> None:
     msg = _make_msg()
     await msg.ack()
-    assert msg.to_delete
+    assert msg.pending_delay_seconds is None  # ack path: plain delete, no retry
     assert msg.terminal_failure_reason is None
 
 
@@ -3736,7 +3733,7 @@ async def test_flush_terminal_builds_dlq_payload_when_failure_reason_set() -> No
 
 
 async def test_flush_terminal_no_dlq_payload_on_ack_path() -> None:
-    """Success-by-ack reaches _flush_terminal too (via to_delete) but reason stays None → no DLQ."""
+    """Success-by-ack reaches _flush_terminal too (as a plain terminal delete) but reason stays None → no DLQ."""
     broker, test_broker = _make_broker_with_dlq()
     fake = FakeOutboxClient()
     test_broker.fake_client = fake

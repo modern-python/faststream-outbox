@@ -857,7 +857,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             return False
         # Build the DLQ payload only when this row is terminal-by-failure AND the
         # broker is configured with a DLQ table. Success-by-ack rows reach this
-        # method too (terminal=True via to_delete) but carry
+        # method too (routed here as a plain terminal delete) but carry
         # ``terminal_failure_reason is None`` and must not land in the DLQ.
         dlq_payload: dict[str, typing.Any] | None = None
         if row.terminal_failure_reason is not None and self._outer_config.dlq_table is not None:
