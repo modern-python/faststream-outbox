@@ -35,6 +35,7 @@ from sqlalchemy import (
     tuple_,
     update,
 )
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from faststream_outbox import schema_validation
 from faststream_outbox.message import OutboxInnerMessage
@@ -119,6 +120,18 @@ class AbstractOutboxClient(abc.ABC):
         first_attempt_at: _dt.datetime,
         last_attempt_at: _dt.datetime,
     ) -> bool: ...
+
+    @abc.abstractmethod
+    async def cancel_timer(self, *, queue: str, timer_id: str, session: "AsyncSession") -> bool: ...
+
+    @abc.abstractmethod
+    async def fetch_unprocessed(
+        self,
+        *,
+        session: "AsyncSession",
+        queue: str | None = None,
+        limit: int = 1000,
+    ) -> list[OutboxInnerMessage]: ...
 
     @abc.abstractmethod
     async def validate_schema(self, *, check_autovacuum: bool = False) -> None: ...
@@ -418,6 +431,44 @@ class OutboxClient(AbstractOutboxClient):
         )
         result = await conn.execute(stmt, {"delay": max(0.0, delay_seconds)})
         return (result.rowcount or 0) > 0
+
+    async def cancel_timer(self, *, queue: str, timer_id: str, session: "AsyncSession") -> bool:
+        """Delete a not-yet-leased ``(queue, timer_id)`` row on the caller's session."""
+        if not isinstance(session, AsyncSession):
+            msg = "OutboxClient.cancel_timer requires an sqlalchemy.ext.asyncio.AsyncSession"
+            raise TypeError(msg)
+        t = self._table
+        stmt = delete(t).where(
+            t.c.queue == queue,
+            t.c.timer_id == timer_id,
+            t.c.acquired_token.is_(None),
+        )
+        result = await session.execute(stmt)
+        return (result.rowcount or 0) > 0  # ty: ignore[unresolved-attribute]
+
+    async def fetch_unprocessed(
+        self,
+        *,
+        session: "AsyncSession",
+        queue: str | None = None,
+        limit: int = 1000,
+    ) -> list[OutboxInnerMessage]:
+        """Read up to *limit* rows (optionally filtered by *queue*) on the caller's session."""
+        if not isinstance(session, AsyncSession):
+            msg = "OutboxClient.fetch_unprocessed requires an sqlalchemy.ext.asyncio.AsyncSession"
+            raise TypeError(msg)
+        if limit < 1:
+            # F4-04: a non-positive limit otherwise hits SQL (LIMIT -1 → DB error) or
+            # silently returns nothing (LIMIT 0); reject it up front, consistently with
+            # the fake.
+            msg = f"limit must be >= 1, got {limit}"
+            raise ValueError(msg)
+        t = self._table
+        stmt = select(*t.c).order_by(t.c.id).limit(limit)
+        if queue is not None:
+            stmt = stmt.where(t.c.queue == queue)
+        result = await session.execute(stmt)
+        return [_row_to_message(dict(row)) for row in result.mappings().all()]
 
     async def validate_schema(self, *, check_autovacuum: bool = False) -> None:
         """Validate that the database table(s) match the package's expected columns.

@@ -1073,13 +1073,13 @@ async def test_broker_publish_batch_does_not_accept_timer_id() -> None:
 
 
 async def test_broker_cancel_timer_rejects_non_async_session() -> None:
-    broker = _make_broker()
+    broker = _make_broker(engine=MagicMock())
     with pytest.raises(TypeError, match="AsyncSession"):
         await broker.cancel_timer(queue="orders", timer_id="x", session=object())  # ty: ignore[invalid-argument-type]
 
 
 async def test_broker_cancel_timer_emits_delete_with_lease_guard() -> None:
-    broker = _make_broker()
+    broker = _make_broker(engine=MagicMock())
     session = AsyncMock(spec=AsyncSession)
     session.execute.return_value.rowcount = 1
     deleted = await broker.cancel_timer(queue="orders", timer_id="email-1", session=session)
@@ -1094,7 +1094,7 @@ async def test_broker_cancel_timer_emits_delete_with_lease_guard() -> None:
 
 
 async def test_broker_fetch_unprocessed_rejects_non_async_session() -> None:
-    broker = _make_broker()
+    broker = _make_broker(engine=MagicMock())
     with pytest.raises(TypeError, match="AsyncSession"):
         await broker.fetch_unprocessed(session=object())  # ty: ignore[invalid-argument-type]
 
@@ -1109,7 +1109,7 @@ def _fetch_unprocessed_session_mock() -> AsyncMock:
 
 
 async def test_broker_fetch_unprocessed_builds_select_all_columns() -> None:
-    broker = _make_broker()
+    broker = _make_broker(engine=MagicMock())
     session = _fetch_unprocessed_session_mock()
     rows = await broker.fetch_unprocessed(session=session)
     assert rows == []
@@ -1123,7 +1123,7 @@ async def test_broker_fetch_unprocessed_builds_select_all_columns() -> None:
 
 
 async def test_broker_fetch_unprocessed_filters_by_queue() -> None:
-    broker = _make_broker()
+    broker = _make_broker(engine=MagicMock())
     session = _fetch_unprocessed_session_mock()
     await broker.fetch_unprocessed(session=session, queue="orders")
     stmt = session.execute.await_args_list[0].args[0]
@@ -1135,7 +1135,7 @@ async def test_broker_fetch_unprocessed_filters_by_queue() -> None:
 
 async def test_broker_fetch_unprocessed_applies_default_limit() -> None:
     # Guardrail against accidental SELECT * with no LIMIT against a backlogged table.
-    broker = _make_broker()
+    broker = _make_broker(engine=MagicMock())
     session = _fetch_unprocessed_session_mock()
     await broker.fetch_unprocessed(session=session)
     stmt = session.execute.await_args_list[0].args[0]
@@ -1143,7 +1143,7 @@ async def test_broker_fetch_unprocessed_applies_default_limit() -> None:
 
 
 async def test_broker_fetch_unprocessed_respects_explicit_limit() -> None:
-    broker = _make_broker()
+    broker = _make_broker(engine=MagicMock())
     session = _fetch_unprocessed_session_mock()
     await broker.fetch_unprocessed(session=session, limit=5)
     stmt = session.execute.await_args_list[0].args[0]
@@ -1151,7 +1151,7 @@ async def test_broker_fetch_unprocessed_respects_explicit_limit() -> None:
 
 
 async def test_broker_cancel_timer_returns_false_when_nothing_deleted() -> None:
-    broker = _make_broker()
+    broker = _make_broker(engine=MagicMock())
     session = AsyncMock(spec=AsyncSession)
     session.execute.return_value.rowcount = 0
     deleted = await broker.cancel_timer(queue="orders", timer_id="x", session=session)
@@ -4044,7 +4044,7 @@ async def test_broker_publish_batch_empty_rejects_empty_queue() -> None:
 
 async def test_fetch_unprocessed_rejects_non_positive_limit() -> None:
     """F4-04: a non-positive limit raises rather than hitting SQL (limit=-1) or silently returning none (limit=0)."""
-    broker = _make_broker()
+    broker = _make_broker(engine=MagicMock())
     for bad in (0, -1):
         with pytest.raises(ValueError, match="limit"):
             await broker.fetch_unprocessed(session=_make_session_mock(), limit=bad)

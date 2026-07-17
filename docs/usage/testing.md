@@ -144,8 +144,9 @@ return`).
   immediately. The intended firing time is preserved on the harness's
   `fake_client.rows[i].next_attempt_at` for assertions. Use
   `run_loops=True` if you need scheduled delivery to actually wait.
-- **`cancel_timer` and `fetch_unprocessed` are patched** to operate on the
-  fake client. The `session` argument is ignored in tests.
+- **`cancel_timer` and `fetch_unprocessed` run against the fake client**
+  (the test broker swaps its client in, so `broker.<method>` reaches it).
+  The `session` argument is still required but is ignored in tests.
 - **The fake producer uses the same envelope format as the real one**, so
   all serialization paths are exercised.
 - **`lease_ttl_seconds` and re-delivery are not simulated** in sync mode —

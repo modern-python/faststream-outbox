@@ -34,6 +34,8 @@ from faststream_outbox.schema import _DLQ_INJECTED_COLUMNS, _DLQ_PROJECTION
 if typing.TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from faststream_outbox.subscriber.usecase import OutboxSubscriber
 
 
@@ -227,13 +229,36 @@ class FakeOutboxClient(AbstractOutboxClient):
                 return True
         return False
 
-    async def cancel_timer(self, *, queue: str, timer_id: str) -> bool:
+    async def cancel_timer(self, *, queue: str, timer_id: str, session: "AsyncSession") -> bool:
         """Mirror :meth:`OutboxBroker.cancel_timer` — drop a not-yet-leased timer row."""
+        del session  # ignored (no real DB), matching the fake publish contract
         for i, row in enumerate(self._rows):
             if row.queue == queue and row.timer_id == timer_id and row.acquired_token is None:
                 del self._rows[i]
                 return True
         return False
+
+    async def fetch_unprocessed(
+        self,
+        *,
+        session: "AsyncSession",
+        queue: str | None = None,
+        limit: int = 1000,
+    ) -> list[OutboxInnerMessage]:
+        """Mirror :meth:`OutboxBroker.fetch_unprocessed` — read rows from the in-memory store."""
+        del session  # ignored (no real DB), matching the fake publish contract
+        if limit < 1:
+            # Mirror the real client's validation so a non-positive limit can't
+            # silently mis-slice (rows[:-1]) under the test broker (F4-04).
+            msg = f"limit must be >= 1, got {limit}"
+            raise ValueError(msg)
+        rows = sorted(self.rows, key=lambda r: r.id)
+        if queue is not None:
+            rows = [r for r in rows if r.queue == queue]
+        # Mirror production's ``limit`` (default 1000) so a valid
+        # ``broker.fetch_unprocessed(..., limit=N)`` call doesn't TypeError under
+        # the test broker (B16).
+        return [_to_inner(r) for r in rows[:limit]]
 
     async def validate_schema(self, *, check_autovacuum: bool = False) -> None:
         # Silently passing here would give tests false confidence — a user calling
@@ -532,47 +557,6 @@ def _build_fake_publish_batch(
     return fake_publish_batch
 
 
-def _build_fake_cancel_timer(
-    fake_client: FakeOutboxClient,
-) -> typing.Callable[..., typing.Awaitable[bool]]:
-    async def fake_cancel_timer(
-        *,
-        queue: str,
-        timer_id: str,
-        session: typing.Any = None,
-    ) -> bool:
-        del session
-        return await fake_client.cancel_timer(queue=queue, timer_id=timer_id)
-
-    return fake_cancel_timer
-
-
-def _build_fake_fetch_unprocessed(
-    fake_client: FakeOutboxClient,
-) -> typing.Callable[..., typing.Awaitable[list[OutboxInnerMessage]]]:
-    async def fake_fetch_unprocessed(
-        *,
-        session: typing.Any = None,
-        queue: str | None = None,
-        limit: int = 1000,
-    ) -> list[OutboxInnerMessage]:
-        del session
-        if limit < 1:
-            # Mirror the real broker's validation so a non-positive limit can't
-            # silently mis-slice (rows[:-1]) under the test broker (F4-04).
-            msg = f"limit must be >= 1, got {limit}"
-            raise ValueError(msg)
-        rows = sorted(fake_client.rows, key=lambda r: r.id)
-        if queue is not None:
-            rows = [r for r in rows if r.queue == queue]
-        # Mirror production's ``limit`` (default 1000) so a valid
-        # ``broker.fetch_unprocessed(..., limit=N)`` call doesn't TypeError under
-        # the test broker (B16).
-        return [_to_inner(r) for r in rows[:limit]]
-
-    return fake_fetch_unprocessed
-
-
 class TestOutboxBroker(TestBroker[OutboxBroker, OutboxBroker]):  # ty: ignore[invalid-type-arguments]
     """Test harness for ``OutboxBroker``. Two dispatch modes.
 
@@ -657,14 +641,10 @@ class TestOutboxBroker(TestBroker[OutboxBroker, OutboxBroker]):  # ty: ignore[in
         serializer = broker.config.broker_config.fd_config._serializer  # noqa: SLF001
         fake_publish = _build_fake_publish(self.fake_client, broker, serializer, run_loops=self.run_loops)
         fake_publish_batch = _build_fake_publish_batch(self.fake_client, broker, serializer, run_loops=self.run_loops)
-        fake_cancel_timer = _build_fake_cancel_timer(self.fake_client)
-        fake_fetch_unprocessed = _build_fake_fetch_unprocessed(self.fake_client)
         try:
             with (
                 mock.patch.object(broker, "publish", new=fake_publish),
                 mock.patch.object(broker, "publish_batch", new=fake_publish_batch),
-                mock.patch.object(broker, "cancel_timer", new=fake_cancel_timer),
-                mock.patch.object(broker, "fetch_unprocessed", new=fake_fetch_unprocessed),
                 super()._patch_broker(broker),
             ):
                 yield
