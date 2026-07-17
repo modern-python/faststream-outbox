@@ -407,7 +407,7 @@ async def test_fake_broker_cancel_timer_removes_row() -> None:
     async with test_broker:
         await broker.publish("x", queue="timers", timer_id="email-1")  # ty: ignore[missing-argument]
         assert len(test_broker.fake_client.rows) == 1
-        cancelled = await broker.cancel_timer(queue="timers", timer_id="email-1")  # ty: ignore[missing-argument]
+        cancelled = await broker.cancel_timer(queue="timers", timer_id="email-1", session=object())  # ty: ignore[invalid-argument-type]
         assert cancelled is True
         assert test_broker.fake_client.rows == []
 
@@ -421,10 +421,10 @@ async def test_fake_broker_fetch_unprocessed_reads_fake_client() -> None:
         await broker.publish("a", queue="q1")  # ty: ignore[missing-argument]
         await broker.publish("b", queue="q2")  # ty: ignore[missing-argument]
 
-        all_rows = await broker.fetch_unprocessed()  # ty: ignore[missing-argument]
+        all_rows = await broker.fetch_unprocessed(session=object())  # ty: ignore[invalid-argument-type]
         assert [r.queue for r in all_rows] == ["q1", "q2"]
 
-        q1_only = await broker.fetch_unprocessed(queue="q1")  # ty: ignore[missing-argument]
+        q1_only = await broker.fetch_unprocessed(queue="q1", session=object())  # ty: ignore[invalid-argument-type]
         assert [r.queue for r in q1_only] == ["q1"]
 
 
@@ -435,9 +435,9 @@ async def test_fake_broker_fetch_unprocessed_respects_limit() -> None:
     async with test_broker:
         for i in range(5):
             await broker.publish(str(i), queue="q1")  # ty: ignore[missing-argument]
-        limited = await broker.fetch_unprocessed(limit=2)  # ty: ignore[missing-argument]
+        limited = await broker.fetch_unprocessed(limit=2, session=object())  # ty: ignore[invalid-argument-type]
         assert len(limited) == 2
-        all_rows = await broker.fetch_unprocessed()  # ty: ignore[missing-argument]
+        all_rows = await broker.fetch_unprocessed(session=object())  # ty: ignore[invalid-argument-type]
         assert len(all_rows) == 5
 
 
@@ -448,7 +448,7 @@ async def test_fake_broker_fetch_unprocessed_rejects_non_positive_limit() -> Non
     async with test_broker:
         for bad in (0, -1):
             with pytest.raises(ValueError, match="limit"):
-                await broker.fetch_unprocessed(limit=bad)  # ty: ignore[missing-argument]
+                await broker.fetch_unprocessed(limit=bad, session=object())  # ty: ignore[invalid-argument-type]
 
 
 async def test_fake_broker_router_subscriber_receives_publish() -> None:
@@ -1201,7 +1201,7 @@ async def test_fake_client_feed_timer_id_different_queues_allowed() -> None:
 async def test_fake_client_cancel_timer_removes_unleased_row() -> None:
     fake = FakeOutboxClient()
     fake.feed(queue="q", payload=b"x", timer_id="email-1")
-    assert await fake.cancel_timer(queue="q", timer_id="email-1") is True
+    assert await fake.cancel_timer(queue="q", timer_id="email-1", session=object()) is True  # ty: ignore[invalid-argument-type]
     assert fake.rows == []
 
 
@@ -1228,7 +1228,7 @@ async def test_fake_headers_not_shared_by_reference() -> None:
 
 async def test_fake_client_cancel_timer_unknown_returns_false() -> None:
     fake = FakeOutboxClient()
-    assert await fake.cancel_timer(queue="q", timer_id="never-existed") is False
+    assert await fake.cancel_timer(queue="q", timer_id="never-existed", session=object()) is False  # ty: ignore[invalid-argument-type]
 
 
 async def test_fake_client_cancel_timer_skips_leased_row() -> None:
@@ -1236,7 +1236,7 @@ async def test_fake_client_cancel_timer_skips_leased_row() -> None:
     fake.feed(queue="q", payload=b"x", timer_id="email-1")
     fake.rows[0].acquired_token = uuid.uuid4()
     fake.rows[0].acquired_at = _dt.datetime.now(tz=_dt.UTC)
-    assert await fake.cancel_timer(queue="q", timer_id="email-1") is False
+    assert await fake.cancel_timer(queue="q", timer_id="email-1", session=object()) is False  # ty: ignore[invalid-argument-type]
     assert len(fake.rows) == 1
 
 

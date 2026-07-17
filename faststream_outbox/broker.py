@@ -26,11 +26,10 @@ from faststream._internal.types import BrokerMiddleware, CustomCallable
 from faststream.exceptions import IncorrectState
 from faststream.specification.schema import BrokerSpec
 from faststream.specification.schema.extra import Tag, TagDict
-from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing_extensions import override
 
-from faststream_outbox.client import AbstractOutboxClient, OutboxClient, _row_to_message
+from faststream_outbox.client import AbstractOutboxClient, OutboxClient
 from faststream_outbox.configs import LastExceptionRenderer, OutboxBrokerConfig
 from faststream_outbox.message import OutboxInnerMessage
 from faststream_outbox.metrics import MetricsRecorder, _noop_recorder
@@ -484,17 +483,7 @@ class OutboxBroker(
         ``True`` only becomes durable when your transaction commits. If you branch on it and
         then roll back, the cancellation rolls back with you.
         """
-        if not isinstance(session, AsyncSession):
-            msg = "broker.cancel_timer requires an sqlalchemy.ext.asyncio.AsyncSession"
-            raise TypeError(msg)
-        t = self._outbox_table
-        stmt = delete(t).where(
-            t.c.queue == queue,
-            t.c.timer_id == timer_id,
-            t.c.acquired_token.is_(None),
-        )
-        result = await session.execute(stmt)
-        return (result.rowcount or 0) > 0  # ty: ignore[unresolved-attribute]
+        return await self.client.cancel_timer(queue=queue, timer_id=timer_id, session=session)
 
     async def fetch_unprocessed(
         self,
@@ -514,21 +503,7 @@ class OutboxBroker(
         contract as :meth:`publish`); does not acquire a lease and does not mutate
         row state, so it is safe to call alongside running subscribers.
         """
-        if not isinstance(session, AsyncSession):
-            msg = "broker.fetch_unprocessed requires an sqlalchemy.ext.asyncio.AsyncSession"
-            raise TypeError(msg)
-        if limit < 1:
-            # F4-04: a non-positive limit otherwise hits SQL (LIMIT -1 → DB error) or
-            # silently returns nothing (LIMIT 0); reject it up front, consistently with
-            # the fake.
-            msg = f"limit must be >= 1, got {limit}"
-            raise ValueError(msg)
-        t = self._outbox_table
-        stmt = select(*t.c).order_by(t.c.id).limit(limit)
-        if queue is not None:
-            stmt = stmt.where(t.c.queue == queue)
-        result = await session.execute(stmt)
-        return [_row_to_message(dict(row)) for row in result.mappings().all()]
+        return await self.client.fetch_unprocessed(session=session, queue=queue, limit=limit)
 
     async def request(
         self,
