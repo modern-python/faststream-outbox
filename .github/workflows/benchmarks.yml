@@ -1,0 +1,40 @@
+name: benchmarks
+
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: extractions/setup-just@v4
+      - uses: astral-sh/setup-uv@v8.2.0
+      # uv.lock is git-ignored (repo convention), so a clean checkout lacks it.
+      # `just bench-report` builds the compose `application` image, whose Dockerfile
+      # does `COPY uv.lock` + `uv sync --frozen`; regenerate the lock first.
+      - run: uv lock
+      - name: Run the gate and capture the markdown report
+        # `shell: bash` gives -eo pipefail so the `| tee` cannot mask the gate's
+        # non-zero exit -- without pipefail the step would report tee's success.
+        shell: bash
+        run: just bench-report | tee "$GITHUB_STEP_SUMMARY"
+      - name: Comment the report on the PR
+        # always(): comment even when the gate failed -- that is when it matters most.
+        # continue-on-error: fork PRs get a read-only token and cannot comment; the
+        # gate above already decided the build, and the run Summary still has the table.
+        if: always() && github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment "${{ github.event.pull_request.number }}" \
+            --edit-last --create-if-none \
+            --body-file "$GITHUB_STEP_SUMMARY"
