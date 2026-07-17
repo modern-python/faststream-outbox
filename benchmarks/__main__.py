@@ -102,16 +102,30 @@ def _run(dsn: str, messages: int, repeats: int, *, write_baseline: bool) -> int:
     return 0
 
 
-def main() -> int:
+def _build_parser() -> argparse.ArgumentParser:
+    """Two subcommands with their own flags, so a misplaced flag errors at parse.
+
+    A flat parser accepted every flag with either command (`run --markdown` parsed
+    and silently no-oped); subparsers scope each flag to the command that reads it.
+    """
     parser = argparse.ArgumentParser(prog="benchmarks")
-    parser.add_argument("command", choices=("run", "check"))
-    parser.add_argument("--messages", type=int, default=5_000)
-    # Wall-clock is IO-noisy, so `run` repeats each point and reports the median. `check`
-    # uses 1: the gated counters are deterministic, so repeating them only burns CI time.
-    parser.add_argument("--repeats", type=int, default=3)
-    parser.add_argument("--write-baseline", action="store_true")
-    parser.add_argument("--markdown", action="store_true")
-    args = parser.parse_args()
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    run = subparsers.add_parser("run", help="run the sweep and print the table")
+    run.add_argument("--messages", type=int, default=5_000)
+    # Wall-clock is IO-noisy, so `run` repeats each point and reports the median.
+    run.add_argument("--repeats", type=int, default=3)
+    run.add_argument("--write-baseline", action="store_true")
+
+    # `check` uses repeats=1: the gated counters are deterministic, so repeating them
+    # only burns CI time -- it takes no --repeats/--messages (pinned to the baseline).
+    check = subparsers.add_parser("check", help="gate the counters against baseline.json")
+    check.add_argument("--markdown", action="store_true")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
 
     dsn = os.environ.get("POSTGRES_DSN", DEFAULT_DSN)
 
