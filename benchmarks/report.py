@@ -106,6 +106,7 @@ def to_baseline(results: list[RunResult]) -> dict[str, typing.Any]:
 
 def format_table(results: list[RunResult]) -> str:
     """Render the runs as a human table with a gated-vs-informational footer."""
+    # Columns/precision/footer facts are mirrored in format_markdown -- keep in sync.
     header = (
         f"{'scenario':<22} {'msg/s':>9} {'delete/msg':>11} {'WALrec/msg':>11} "
         f"{'WALB/msg':>9} {'fpi':>5} {'upd':>7} {'del':>7} {'dead_tup':>9}"
@@ -135,6 +136,7 @@ def format_markdown(results: list[RunResult], failures: list[str]) -> str:
     function only formats -- the exit code is the caller's, so the comment can be
     posted on both pass and fail.
     """
+    # Columns/precision/footer facts are mirrored in format_table -- keep in sync.
     verdict = "✅ gate passed" if not failures else "❌ gate FAILED"
     lines = ["## Benchmark gate", "", verdict, ""]
     if failures:
