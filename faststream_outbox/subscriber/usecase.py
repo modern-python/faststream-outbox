@@ -39,7 +39,7 @@ from faststream.specification.asyncapi.utils import resolve_payloads
 from faststream.specification.schema import Message, Operation, SubscriberSpec
 from typing_extensions import override
 
-from faststream_outbox.message import OutboxInnerMessage
+from faststream_outbox.message import ENVELOPE_MANAGED_HEADERS, OutboxInnerMessage
 from faststream_outbox.parser.parser import OutboxParser
 from faststream_outbox.publisher.fake import OutboxFakePublisher
 from faststream_outbox.response import OutboxResponse
@@ -1089,7 +1089,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             return
         propagated = dict(message.headers)
         if isinstance(result_msg, OutboxResponse):
-            for managed in ("content-type", "correlation_id"):
+            for managed in ENVELOPE_MANAGED_HEADERS:
                 propagated.pop(managed, None)
         result_msg.headers = propagated
 
