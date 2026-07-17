@@ -12,15 +12,15 @@ User-facing: `docs/usage/dlq.md`. Invariant summary: `CLAUDE.md` § Opt-in DLQ.
 
 The CTE's `RETURNING` / `INSERT` / `SELECT` column lists are not hand-written — they derive from `_DLQ_PROJECTION` (the `(outbox_col, dlq_col)` pairs copied verbatim) plus `_DLQ_INJECTED_COLUMNS` (`failure_reason`, `last_exception`, supplied by the caller) in `schema.py`. The fake (`FakeOutboxClient.delete_with_lease`) builds its audit dict from the same constants, so the two substrates can't drift on which columns the archive carries — a DLQ column change is one edit in `schema.py`, verified across both adapters by `tests/test_client_contract.py`. `failed_at` is not in the projection; it rides the DLQ column's `server_default`.
 
-## `terminal_failure_reason` routing
+## Terminal-outcome routing
 
-`OutboxInnerMessage.terminal_failure_reason` is set on the three failure paths:
+`OutboxInnerMessage.outcome` records a single canonical `Outcome` (`message.py`): `Ack` (success), `Retry(delay_seconds)`, or `Terminal(reason)`. The three failure paths record a `Terminal`:
 
-- `allow_delivery` False → `"max_deliveries"`
-- `_nack` strategy-exhausted → `"retry_terminal"`
-- `_reject` → `"rejected"`
+- `allow_delivery` False → `Terminal("max_deliveries")`
+- `_nack` strategy-exhausted → `Terminal("retry_terminal")`
+- `_reject` → `Terminal("rejected")`
 
-`_flush_terminal` reads it to decide whether to build a DLQ payload; `dispatch_one` also reads it to pick the `nacked_terminal(reason=…)` tag value. **Branch on `terminal_failure_reason` BEFORE `last_exception`**, so manual `await msg.reject()` (no exception raised) routes correctly to `nacked_terminal(reason="rejected")` instead of the previously-incorrect `acked`. Success (`_ack`) leaves the field None; success rows never touch the DLQ.
+`terminal_failure_reason` is now a **read-only view** of `outcome` (`Terminal.reason`, else `None`), so existing readers are unchanged: `_flush_terminal` reads it to decide whether to build a DLQ payload; the `nacked_terminal(reason=…)` tag value comes from the same reason. `dispatch_one` **matches on the disjoint `Outcome` variant** — `Terminal → nacked_terminal`, `Retry → reschedule`, `Ack → delete`. Because the variants are mutually exclusive there is no ordering dependence between the arms: a manual `await msg.reject()` (no exception raised) records `Terminal("rejected")` directly, independent of `last_exception`. Success (`_ack` → `Ack`) leaves `terminal_failure_reason` None; success rows never touch the DLQ.
 
 **The `DLQFailureReason` `Literal` type (`message.py`) is the public contract** for this string — operator queries and dashboard labels key off these values, so changing them is API-breaking.
 

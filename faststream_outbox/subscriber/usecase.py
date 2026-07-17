@@ -39,7 +39,7 @@ from faststream.specification.asyncapi.utils import resolve_payloads
 from faststream.specification.schema import Message, Operation, SubscriberSpec
 from typing_extensions import override
 
-from faststream_outbox.message import ENVELOPE_MANAGED_HEADERS, OutboxInnerMessage
+from faststream_outbox.message import ENVELOPE_MANAGED_HEADERS, OutboxInnerMessage, Retry, Terminal
 from faststream_outbox.parser.parser import OutboxParser
 from faststream_outbox.publisher.fake import OutboxFakePublisher
 from faststream_outbox.response import OutboxResponse
@@ -701,23 +701,23 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         await row.assert_state_set(logger)
         duration_seconds = time.perf_counter() - start_perf
         common = {**base, "deliveries_count": row.deliveries_count, "duration_seconds": duration_seconds}
-        # Branch on ``terminal_failure_reason`` (set by ``_nack``/``_reject``) before
-        # ``last_exception`` so manual ``msg.reject()`` (no exception raised) still
-        # surfaces as ``nacked_terminal(reason="rejected")``, and ack-policy-driven
-        # rejects (REJECT_ON_ERROR) carry ``reason="rejected"`` rather than the
-        # incorrect ``"retry_terminal"`` they got under the old ``last_exception``-first
-        # ordering. Successful handlers leave ``terminal_failure_reason=None``.
-        if row.terminal_failure_reason is not None:
-            terminal_tags = self._with_exception_type({**common, "reason": row.terminal_failure_reason}, row)
-            event, tags = "nacked_terminal", terminal_tags
-        elif row.pending_delay_seconds is not None:
-            retry_tags = self._with_exception_type({**common, "next_delay_seconds": row.pending_delay_seconds}, row)
-            # Retry is a per-row UPDATE -- never batched. Flush inline, unchanged.
+        # Match on the disjoint ``Outcome`` variant recorded by ack/nack/reject:
+        # Terminal -> nacked_terminal (delete + DLQ), Retry -> reschedule, Ack -> delete.
+        # The variants are mutually exclusive, so there is no ordering dependence between
+        # the arms (e.g. a manual ``msg.reject()`` records ``Terminal("rejected")``
+        # directly, independent of ``last_exception``).
+        outcome = row.outcome
+        if isinstance(outcome, Terminal):
+            tags = self._with_exception_type({**common, "reason": outcome.reason}, row)
+            event = "nacked_terminal"
+        elif isinstance(outcome, Retry):
+            retry_tags = self._with_exception_type({**common, "next_delay_seconds": outcome.delay_seconds}, row)
+            # Retry is a per-row UPDATE -- never batched. Flush inline.
             # P17: emit only after the flush lands; a lease-lost update emits lease_lost instead.
             if await self._safe_flush(row, terminal=False, writer_conn=writer_conn):
                 self._emit_metric("nacked_retried", retry_tags)
             return False
-        else:
+        else:  # Ack (assert_state_set guaranteed outcome is set, so this is Ack, never None)
             event, tags = "acked", common
         # Terminal delete: batch it if batchable, else flush inline. P17 holds either way —
         # the metric fires only when the delete lands (inline here, or deferred in _flush_buffer).
