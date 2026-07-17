@@ -26,10 +26,21 @@ jobs:
       # does `COPY uv.lock` + `uv sync --frozen`; regenerate the lock first.
       - run: uv lock
       - name: Run the gate and capture the markdown report
-        # `shell: bash` gives -eo pipefail so the `| tee` cannot mask the gate's
-        # non-zero exit -- without pipefail the step would report tee's success.
         shell: bash
-        run: just bench-report | tee "$GITHUB_STEP_SUMMARY" "$RUNNER_TEMP/bench-report.md"
+        run: |
+          # `docker compose run` leaks buildkit image-build output onto stdout in
+          # CI, so a naive capture mixes it into the comment. The report always
+          # begins with the `## Benchmark gate` sentinel and the container prints
+          # it last, so slice from that heading to EOF -- independent of how
+          # compose routes its own noise. Own the exit code manually: `set +e`
+          # (shell: bash runs with -e) so a failing gate still lets us post the
+          # report, then re-exit with the gate's status so the build still fails.
+          set +e
+          just bench-report > "$RUNNER_TEMP/raw.log"
+          status=$?
+          sed -n '/^## Benchmark gate/,$p' "$RUNNER_TEMP/raw.log" \
+            | tee "$GITHUB_STEP_SUMMARY" "$RUNNER_TEMP/bench-report.md"
+          exit "$status"
       - name: Comment the report on the PR
         # always(): comment even when the gate failed -- that is when it matters most.
         # continue-on-error: fork PRs get a read-only token and cannot comment; the
