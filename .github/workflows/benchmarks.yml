@@ -9,6 +9,10 @@ permissions:
   contents: read
   pull-requests: write
 
+concurrency:
+  group: benchmarks-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   bench:
     runs-on: ubuntu-latest
@@ -25,7 +29,7 @@ jobs:
         # `shell: bash` gives -eo pipefail so the `| tee` cannot mask the gate's
         # non-zero exit -- without pipefail the step would report tee's success.
         shell: bash
-        run: just bench-report | tee "$GITHUB_STEP_SUMMARY"
+        run: just bench-report | tee "$GITHUB_STEP_SUMMARY" "$RUNNER_TEMP/bench-report.md"
       - name: Comment the report on the PR
         # always(): comment even when the gate failed -- that is when it matters most.
         # continue-on-error: fork PRs get a read-only token and cannot comment; the
@@ -37,4 +41,4 @@ jobs:
         run: |
           gh pr comment "${{ github.event.pull_request.number }}" \
             --edit-last --create-if-none \
-            --body-file "$GITHUB_STEP_SUMMARY"
+            --body-file "$RUNNER_TEMP/bench-report.md"
