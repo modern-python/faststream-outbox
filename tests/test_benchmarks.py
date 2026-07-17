@@ -11,7 +11,7 @@ import pytest
 
 from benchmarks.config import RunConfig
 from benchmarks.probes import ProbeResult
-from benchmarks.report import EXACT_KEYS, compare, format_table, normalize, to_baseline
+from benchmarks.report import EXACT_KEYS, compare, format_markdown, format_table, normalize, to_baseline
 from benchmarks.workload import RunResult
 
 
@@ -193,3 +193,22 @@ def test_format_table_labels_gated_vs_informational() -> None:
     assert "INFORMATIONAL" in table
     assert "wal_records" in table
     assert "delete_calls" in table
+
+
+def test_format_markdown_renders_passing_verdict_and_table() -> None:
+    body = format_markdown([_result(), _producer()], [])
+    assert body.startswith("## Benchmark gate")
+    assert "✅ gate passed" in body
+    # Both runs render as rows.
+    assert "consumer/w1/b100" in body
+    assert "producer/w1/b100" in body
+    # GitHub table shape: a header row and a delimiter row.
+    assert "| scenario |" in body
+    assert "| --- |" in body
+
+
+def test_format_markdown_renders_failing_verdict_and_bullets() -> None:
+    failures = ["consumer/w1/b100: delete_calls changed (exact-gated): baseline 500 -> current 501"]
+    body = format_markdown([_result()], failures)
+    assert "❌ gate FAILED" in body
+    assert "- consumer/w1/b100: delete_calls changed" in body

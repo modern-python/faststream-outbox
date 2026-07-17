@@ -12,7 +12,7 @@ import pathlib
 import sys
 
 from benchmarks.config import DEFAULT_DSN, RunConfig
-from benchmarks.report import compare, format_table, to_baseline
+from benchmarks.report import compare, format_markdown, format_table, to_baseline
 from benchmarks.workload import RunResult, make_engine, run_consumer, run_producer
 
 
@@ -66,7 +66,7 @@ async def _run_sweep(dsn: str, messages: int, repeats: int) -> list[RunResult]:
     return results
 
 
-def _check(dsn: str) -> int:
+def _check(dsn: str, *, markdown: bool = False) -> int:
     """Run the sweep at the baseline's message count and gate the counters."""
     if not BASELINE_PATH.exists():
         sys.stdout.write(f"no baseline at {BASELINE_PATH}; run `just bench --write-baseline` first\n")
@@ -77,8 +77,12 @@ def _check(dsn: str) -> int:
     # so repeats=1 -- repeating them only burns CI time.
     messages = int(next(iter(baseline["runs"].values()))["messages"])
     results = asyncio.run(_run_sweep(dsn, messages, repeats=1))
-    sys.stdout.write(format_table(results) + "\n")
     failures = compare(to_baseline(results), baseline)
+    if markdown:
+        # Python owns the whole PR-comment body; the workflow just posts stdout.
+        sys.stdout.write(format_markdown(results, failures) + "\n")
+        return 1 if failures else 0
+    sys.stdout.write(format_table(results) + "\n")
     if failures:
         sys.stdout.write("\nBENCHMARK GATE FAILED:\n")
         for failure in failures:
@@ -106,12 +110,13 @@ def main() -> int:
     # uses 1: the gated counters are deterministic, so repeating them only burns CI time.
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--write-baseline", action="store_true")
+    parser.add_argument("--markdown", action="store_true")
     args = parser.parse_args()
 
     dsn = os.environ.get("POSTGRES_DSN", DEFAULT_DSN)
 
     if args.command == "check":
-        return _check(dsn)
+        return _check(dsn, markdown=args.markdown)
     return _run(dsn, args.messages, args.repeats, write_baseline=args.write_baseline)
 
 

@@ -127,6 +127,37 @@ def format_table(results: list[RunResult]) -> str:
     return "\n".join(lines)
 
 
+def format_markdown(results: list[RunResult], failures: list[str]) -> str:
+    """Render the sweep as a GitHub-flavored Markdown comment body.
+
+    Heading + verdict + table + a condensed gated-vs-informational footnote.
+    ``failures`` is ``compare()``'s output: empty means the gate passed. This
+    function only formats -- the exit code is the caller's, so the comment can be
+    posted on both pass and fail.
+    """
+    verdict = "✅ gate passed" if not failures else "❌ gate FAILED"
+    lines = ["## Benchmark gate", "", verdict, ""]
+    if failures:
+        lines.extend(f"- {failure}" for failure in failures)
+        lines.append("")
+    lines.append("| scenario | msg/s | delete/msg | WALrec/msg | WALB/msg | fpi | upd | del | dead_tup |")
+    lines.append("| --- | --: | --: | --: | --: | --: | --: | --: | --: |")
+    for r in results:
+        m = normalize(r)
+        lines.append(
+            f"| {_key(r)} | {m['msgs_per_second']:.0f} | {m['delete_calls_per_msg']:.3f} "
+            f"| {m['wal_records_per_msg']:.2f} | {m['wal_bytes_per_msg']:.0f} | {m['wal_fpi']:.0f} "
+            f"| {m['tup_upd']:.0f} | {m['tup_del']:.0f} | {m['dead_tup']:.0f} |",
+        )
+    lines.append("")
+    lines.append(
+        "_Gated (fails the build): `delete_calls` + tuple counters (upd/del/ins) + the "
+        "producer's `insert_calls`/`select_calls`, exact; `wal_records` within a 10% band. "
+        "msg/s, WAL bytes and total calls are informational (timing/FPI noise)._",
+    )
+    return "\n".join(lines)
+
+
 def compare(current: dict[str, typing.Any], baseline: dict[str, typing.Any]) -> list[str]:
     """Diff current raw totals against the baseline. Empty list means pass.
 
