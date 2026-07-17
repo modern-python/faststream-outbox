@@ -69,6 +69,19 @@ def _claim_fake_row(row: _FakeRow, *, now: _dt.datetime, token: uuid.UUID) -> No
     row.deliveries_count += 1
 
 
+def _lease_token_matches(row_token: "uuid.UUID | None", claim_token: "uuid.UUID | None") -> bool:
+    """Mirror SQL's ``WHERE acquired_token = :token`` guard, ``NULL = NULL`` included.
+
+    ``NULL = NULL`` is NULL (no match) in SQL, so a ``None`` claim token must never match —
+    not even a row whose own token is ``None``. A ``None`` claim short-circuits to ``False``;
+    otherwise the row token must equal it (``None == uuid`` is ``False``). Names the rule the
+    real client's terminal writes encode in SQL; parity with that SQL is pinned by
+    ``tests/test_client_contract.py`` (delete / mark_pending token-match scenarios), not by
+    these comments.
+    """
+    return claim_token is not None and row_token == claim_token
+
+
 class FakeOutboxClient(AbstractOutboxClient):
     """In-memory ``OutboxClient`` substitute. Same surface, list-of-rows storage."""
 
@@ -170,11 +183,7 @@ class FakeOutboxClient(AbstractOutboxClient):
         dlq_payload: "typing.Mapping[str, typing.Any] | None" = None,
     ) -> bool:
         for i, row in enumerate(self._rows):
-            # ``acquired_token is not None`` mirrors SQL's ``WHERE acquired_token = :token``:
-            # ``NULL = NULL`` is NULL (no match), so a None token must never match — even a
-            # row whose own token is None. Without this, the fake's ``None == None`` would
-            # delete where the real client no-ops.
-            if row.id == message_id and acquired_token is not None and row.acquired_token == acquired_token:
+            if row.id == message_id and _lease_token_matches(row.acquired_token, acquired_token):
                 if dlq_payload is not None:
                     # Mirror the real CTE side-effect: DLQ row materializes in the same
                     # call as the DELETE, before the row is removed. Built from the shared
@@ -196,6 +205,9 @@ class FakeOutboxClient(AbstractOutboxClient):
         conn: typing.Any,  # noqa: ARG002
         pairs: "Sequence[tuple[int, uuid.UUID]]",
     ) -> set[int]:
+        # Set-based form of the same rule as `_lease_token_matches`: the `ptok is not None`
+        # filter is the claim-side NULL guard, `row.acquired_token is not None` the row-side —
+        # so a NULL token on either side never matches (SQL `NULL = NULL`).
         wanted = {(pid, ptok) for pid, ptok in pairs if ptok is not None}
         deleted: set[int] = set()
         # Iterate a copy of indices high-to-low so deletions don't shift unscanned rows.
@@ -218,8 +230,7 @@ class FakeOutboxClient(AbstractOutboxClient):
         last_attempt_at: _dt.datetime,
     ) -> bool:
         for row in self._rows:
-            # Mirror SQL ``NULL = NULL`` semantics — see ``delete_with_lease``.
-            if row.id == message_id and acquired_token is not None and row.acquired_token == acquired_token:
+            if row.id == message_id and _lease_token_matches(row.acquired_token, acquired_token):
                 row.next_attempt_at = utcnow() + _dt.timedelta(seconds=max(0.0, delay_seconds))
                 row.attempts_count = attempts_count
                 row.first_attempt_at = first_attempt_at
