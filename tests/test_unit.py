@@ -45,7 +45,7 @@ from faststream_outbox.broker import OutboxParamsStorage
 from faststream_outbox.client import OutboxClient
 from faststream_outbox.configs import OutboxBrokerConfig
 from faststream_outbox.envelope import _encode_payload
-from faststream_outbox.message import OutboxInnerMessage, OutboxMessage
+from faststream_outbox.message import OutboxInnerMessage, OutboxMessage, Retry, Terminal
 from faststream_outbox.parser.parser import OutboxParser
 from faststream_outbox.publisher.config import OutboxPublisherSpecificationConfig
 from faststream_outbox.publisher.fake import OutboxFakePublisher
@@ -2065,7 +2065,7 @@ async def test_flush_retry_threads_writer_conn_into_mark_pending(writer_conn: ob
     fake = FakeOutboxClient()
     broker, test_broker = _make_broker_for_dispatch(fake)
     msg = _make_msg()
-    msg.pending_delay_seconds = 1.0  # set post-construction; field is init=False
+    msg.outcome = Retry(1.0)  # set post-construction; field is init=False
     conn_arg = MagicMock() if writer_conn == "sentinel" else None
 
     with patch.object(fake, "mark_pending_with_lease", new=AsyncMock(return_value=True)) as spy:
@@ -2301,7 +2301,7 @@ async def test_flush_retry_logs_lease_lost_at_warning_with_structured_fields() -
 
     broker, test_broker = _make_broker_for_dispatch(LeaseLostFake())
     msg = _make_msg(id=99, queue="orders", deliveries_count=2)
-    msg.pending_delay_seconds = 1.0
+    msg.outcome = Retry(1.0)
 
     async with test_broker:
         sub = next(iter(broker._subscribers))  # noqa: SLF001
@@ -2329,7 +2329,7 @@ async def test_flush_retry_propagates_error_with_writer_conn() -> None:
 
     broker, test_broker = _make_broker_for_dispatch(RaisingFake())
     msg = _make_msg()
-    msg.pending_delay_seconds = 1.0
+    msg.outcome = Retry(1.0)
 
     async with test_broker:
         sub = next(iter(broker._subscribers))  # noqa: SLF001
@@ -3258,7 +3258,7 @@ async def test_metrics_lease_lost_retry_emits_recorder_event() -> None:
     test_broker = TestOutboxBroker(broker)
     test_broker.fake_client = LeaseLostFake()
     msg = _make_msg(id=99, queue="orders", deliveries_count=2)
-    msg.pending_delay_seconds = 1.0
+    msg.outcome = Retry(1.0)
 
     async with test_broker:
         sub = next(iter(broker._subscribers))  # noqa: SLF001
@@ -3717,7 +3717,7 @@ async def test_flush_terminal_builds_dlq_payload_when_failure_reason_set() -> No
     fake = FakeOutboxClient()
     test_broker.fake_client = fake
     msg = _make_msg(id=7, queue="orders", deliveries_count=3)
-    msg.terminal_failure_reason = "max_deliveries"
+    msg.outcome = Terminal("max_deliveries")
     msg.last_exception = RuntimeError("boom")
 
     with patch.object(fake, "delete_with_lease", new=AsyncMock(return_value=True)) as spy:
@@ -3755,7 +3755,7 @@ async def test_flush_terminal_no_dlq_payload_when_dlq_unconfigured() -> None:
     fake = FakeOutboxClient()
     broker, test_broker = _make_broker_for_dispatch(fake)
     msg = _make_msg(id=9, queue="orders", deliveries_count=3)
-    msg.terminal_failure_reason = "max_deliveries"
+    msg.outcome = Terminal("max_deliveries")
 
     with patch.object(fake, "delete_with_lease", new=AsyncMock(return_value=True)) as spy:
         async with test_broker:
@@ -3773,7 +3773,7 @@ async def test_flush_terminal_emits_dlq_written_metric_after_successful_delete()
     fake = FakeOutboxClient()
     test_broker.fake_client = fake
     msg = _make_msg(id=10, queue="orders", deliveries_count=3)
-    msg.terminal_failure_reason = "retry_terminal"
+    msg.outcome = Terminal("retry_terminal")
     msg.last_exception = RuntimeError("boom")
 
     with patch.object(fake, "delete_with_lease", new=AsyncMock(return_value=True)):
@@ -3795,7 +3795,7 @@ async def test_flush_terminal_does_not_emit_dlq_written_on_lease_lost() -> None:
     fake = FakeOutboxClient()
     test_broker.fake_client = fake
     msg = _make_msg(id=11, queue="orders", deliveries_count=3)
-    msg.terminal_failure_reason = "max_deliveries"
+    msg.outcome = Terminal("max_deliveries")
 
     with patch.object(fake, "delete_with_lease", new=AsyncMock(return_value=False)):
         async with test_broker:
@@ -3812,7 +3812,7 @@ async def test_flush_terminal_dlq_payload_includes_repr_of_exception() -> None:
     fake = FakeOutboxClient()
     test_broker.fake_client = fake
     msg = _make_msg(id=12, queue="orders")
-    msg.terminal_failure_reason = "rejected"
+    msg.outcome = Terminal("rejected")
     msg.last_exception = ValueError("invalid payload")
 
     with patch.object(fake, "delete_with_lease", new=AsyncMock(return_value=True)) as spy:
@@ -3831,7 +3831,7 @@ async def test_flush_terminal_dlq_payload_last_exception_none_when_no_exc() -> N
     fake = FakeOutboxClient()
     test_broker.fake_client = fake
     msg = _make_msg(id=13, queue="orders")
-    msg.terminal_failure_reason = "rejected"
+    msg.outcome = Terminal("rejected")
     # last_exception is None — operator chose to drop, no exception context.
 
     with patch.object(fake, "delete_with_lease", new=AsyncMock(return_value=True)) as spy:
@@ -3854,7 +3854,7 @@ async def test_flush_terminal_dlq_payload_truncates_long_exception_repr() -> Non
     fake = FakeOutboxClient()
     test_broker.fake_client = fake
     msg = _make_msg(id=14, queue="orders")
-    msg.terminal_failure_reason = "retry_terminal"
+    msg.outcome = Terminal("retry_terminal")
     # Build an exception whose ``repr`` is much larger than the cap.
     huge_payload = "x" * (_LAST_EXCEPTION_MAX_CHARS * 3)
     msg.last_exception = RuntimeError(huge_payload)
@@ -3877,7 +3877,7 @@ async def test_flush_terminal_dlq_payload_short_exception_not_truncated() -> Non
     fake = FakeOutboxClient()
     test_broker.fake_client = fake
     msg = _make_msg(id=15, queue="orders")
-    msg.terminal_failure_reason = "retry_terminal"
+    msg.outcome = Terminal("retry_terminal")
     msg.last_exception = ValueError("short message")
 
     with patch.object(fake, "delete_with_lease", new=AsyncMock(return_value=True)) as spy:

@@ -36,6 +36,32 @@ _logger = logging.getLogger("faststream_outbox.message")
 DLQFailureReason = Literal["max_deliveries", "retry_terminal", "rejected"]
 
 
+# Canonical delivery outcome. ``ack``/``nack``/``reject`` record exactly one of these
+# on ``OutboxInnerMessage.outcome``; the worker loop matches on the variant to pick the
+# DB write. The legacy ``state_set``/``terminal_failure_reason``/``pending_delay_seconds``
+# attributes are read-only views derived from it.
+@dataclass(frozen=True, slots=True)
+class Ack:
+    """Handler succeeded; the row is deleted (no DLQ)."""
+
+
+@dataclass(frozen=True, slots=True)
+class Retry:
+    """Handler failed; the strategy scheduled another attempt after ``delay_seconds``."""
+
+    delay_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class Terminal:
+    """Delivery failed terminally; the row is deleted (and DLQ'd when configured)."""
+
+    reason: DLQFailureReason
+
+
+Outcome = Ack | Retry | Terminal
+
+
 # Header keys the outbox envelope owns on a row's ``headers`` dict. ``_encode_payload``
 # (``envelope.py``) writes them, ``OutboxParser.parse_message`` (``parser.py``) reads
 # them back, and the relay header-propagation (``_maybe_propagate_inbound_headers``)
@@ -50,9 +76,11 @@ ENVELOPE_MANAGED_HEADERS = frozenset({CONTENT_TYPE_HEADER, CORRELATION_ID_HEADER
 class OutboxInnerMessage:
     """In-memory copy of a claimed outbox row, plus ack/nack/reject intent helpers.
 
-    The ack/nack/reject methods set in-memory intent flags (``terminal_failure_reason``,
-    ``pending_delay_seconds``). The worker loop reads those flags and issues the
-    actual DB write, scoped by ``acquired_token``.
+    The ack/nack/reject methods record a single canonical ``Outcome``
+    (``Ack``/``Retry``/``Terminal``) on ``outcome``. The worker loop matches on the
+    variant and issues the actual DB write, scoped by ``acquired_token``.
+    ``state_set``/``terminal_failure_reason``/``pending_delay_seconds`` are read-only
+    views of ``outcome`` kept for existing readers.
     """
 
     id: int
@@ -75,16 +103,32 @@ class OutboxInnerMessage:
     retry_strategy: "RetryStrategyProto | None" = None
     last_exception: BaseException | None = None
 
-    state_set: bool = field(default=False, init=False)
-    # Set by ``_nack`` when the strategy schedules a retry; consumed by the
-    # subscriber's ``_flush_retry`` to drive ``mark_pending_with_lease``.
-    pending_delay_seconds: float | None = field(default=None, init=False)
-    # Set on terminal-failure paths (``allow_delivery`` False, ``_nack`` exhausted,
-    # ``_reject``). ``_flush_terminal`` reads it to decide whether to build a DLQ
-    # payload; ``dispatch_one`` reads it to pick the ``nacked_terminal`` reason
-    # tag. Stays ``None`` on the success (``_ack``) path so handler-success
-    # never touches the DLQ.
-    terminal_failure_reason: "DLQFailureReason | None" = field(default=None, init=False)
+    # Canonical delivery outcome, set exactly once by ``_ack``/``_nack``/``_reject``/
+    # ``allow_delivery``. ``None`` until intent is recorded. The three properties below
+    # derive the legacy views the worker loop and metrics read.
+    outcome: "Outcome | None" = field(default=None, init=False)
+
+    @property
+    def state_set(self) -> bool:
+        return self.outcome is not None
+
+    @property
+    def terminal_failure_reason(self) -> "DLQFailureReason | None":
+        """Terminal reason (``allow_delivery`` False, ``_nack`` exhausted, ``_reject``), else ``None``.
+
+        ``_flush_terminal`` reads it to decide whether to build a DLQ payload;
+        ``dispatch_one`` reads it to pick the ``nacked_terminal`` reason tag. ``None``
+        on the ``Ack``/``Retry`` paths so handler-success never touches the DLQ.
+        """
+        return self.outcome.reason if isinstance(self.outcome, Terminal) else None
+
+    @property
+    def pending_delay_seconds(self) -> float | None:
+        """Retry delay set by ``_nack`` when the strategy schedules a retry, else ``None``.
+
+        Consumed by ``_flush_retry`` to drive ``mark_pending_with_lease``.
+        """
+        return self.outcome.delay_seconds if isinstance(self.outcome, Retry) else None
 
     # ``**_options`` are accepted-and-ignored: FastStream's AcknowledgementMiddleware
     # forwards ``message.nack(**extra_options)`` for native idioms like
@@ -103,13 +147,13 @@ class OutboxInnerMessage:
         await self._update_state_if_not_set(self._reject)
 
     async def _update_state_if_not_set(self, fn: Callable[[], Awaitable[None]]) -> None:
-        if self.state_set:
+        if self.outcome is not None:
             return
         await fn()
-        self.state_set = True
 
     async def _ack(self) -> None:
         self._record_attempt()
+        self.outcome = Ack()
 
     async def _nack(self) -> None:
         self._record_attempt()
@@ -135,16 +179,16 @@ class OutboxInnerMessage:
                     self.retry_strategy,
                     self,
                 )
-                self.terminal_failure_reason = "retry_terminal"
+                self.outcome = Terminal("retry_terminal")
                 return
         if delay is None:
-            self.terminal_failure_reason = "retry_terminal"
+            self.outcome = Terminal("retry_terminal")
         else:
-            self.pending_delay_seconds = delay
+            self.outcome = Retry(delay)
 
     async def _reject(self) -> None:
         self._record_attempt()
-        self.terminal_failure_reason = "rejected"
+        self.outcome = Terminal("rejected")
 
     def _record_attempt(self) -> None:
         self.attempts_count += 1
@@ -156,8 +200,7 @@ class OutboxInnerMessage:
     def allow_delivery(self, *, max_deliveries: int | None, logger: "LoggerProto | None") -> bool:
         """If ``max_deliveries`` is set and exceeded, mark for deletion without invoking the handler."""
         if max_deliveries is not None and self.deliveries_count > max_deliveries:
-            self.state_set = True
-            self.terminal_failure_reason = "max_deliveries"
+            self.outcome = Terminal("max_deliveries")
             if logger is not None:
                 logger.log(
                     logging.ERROR,
