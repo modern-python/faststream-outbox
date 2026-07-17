@@ -9,6 +9,7 @@ fetch loop's wall-clock polling.
 
 import pytest
 
+from benchmarks.__main__ import _build_parser
 from benchmarks.config import RunConfig
 from benchmarks.probes import ProbeResult
 from benchmarks.report import EXACT_KEYS, compare, format_markdown, format_table, normalize, to_baseline
@@ -212,3 +213,34 @@ def test_format_markdown_renders_failing_verdict_and_bullets() -> None:
     body = format_markdown([_result()], failures)
     assert "❌ gate FAILED" in body
     assert "- consumer/w1/b100: delete_calls changed" in body
+
+
+def test_run_rejects_the_markdown_flag() -> None:
+    # --markdown belongs to `check`; subparsers make it a hard error under `run`
+    # instead of the old silent no-op.
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(["run", "--markdown"])
+
+
+def test_check_rejects_run_only_flags() -> None:
+    # Symmetrically, run-only flags are not accepted by `check`.
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(["check", "--write-baseline"])
+
+
+def test_check_accepts_markdown() -> None:
+    args = _build_parser().parse_args(["check", "--markdown"])
+    assert args.command == "check"
+    assert args.markdown is True
+
+
+def test_run_accepts_its_flags() -> None:
+    args = _build_parser().parse_args(["run", "--messages", "200", "--write-baseline"])
+    assert args.command == "run"
+    assert args.messages == 200
+    assert args.write_baseline is True
+
+
+def test_a_subcommand_is_required() -> None:
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args([])
