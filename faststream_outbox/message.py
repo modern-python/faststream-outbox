@@ -40,7 +40,7 @@ DLQFailureReason = Literal["max_deliveries", "retry_terminal", "rejected"]
 class OutboxInnerMessage:
     """In-memory copy of a claimed outbox row, plus ack/nack/reject intent helpers.
 
-    The ack/nack/reject methods set in-memory intent flags (``to_delete``,
+    The ack/nack/reject methods set in-memory intent flags (``terminal_failure_reason``,
     ``pending_delay_seconds``). The worker loop reads those flags and issues the
     actual DB write, scoped by ``acquired_token``.
     """
@@ -66,7 +66,6 @@ class OutboxInnerMessage:
     last_exception: BaseException | None = None
 
     state_set: bool = field(default=False, init=False)
-    to_delete: bool = field(default=False, init=False)
     # Set by ``_nack`` when the strategy schedules a retry; consumed by the
     # subscriber's ``_flush_retry`` to drive ``mark_pending_with_lease``.
     pending_delay_seconds: float | None = field(default=None, init=False)
@@ -101,7 +100,6 @@ class OutboxInnerMessage:
 
     async def _ack(self) -> None:
         self._record_attempt()
-        self.to_delete = True
 
     async def _nack(self) -> None:
         self._record_attempt()
@@ -127,18 +125,15 @@ class OutboxInnerMessage:
                     self.retry_strategy,
                     self,
                 )
-                self.to_delete = True
                 self.terminal_failure_reason = "retry_terminal"
                 return
         if delay is None:
-            self.to_delete = True
             self.terminal_failure_reason = "retry_terminal"
         else:
             self.pending_delay_seconds = delay
 
     async def _reject(self) -> None:
         self._record_attempt()
-        self.to_delete = True
         self.terminal_failure_reason = "rejected"
 
     def _record_attempt(self) -> None:
@@ -151,7 +146,6 @@ class OutboxInnerMessage:
     def allow_delivery(self, *, max_deliveries: int | None, logger: "LoggerProto | None") -> bool:
         """If ``max_deliveries`` is set and exceeded, mark for deletion without invoking the handler."""
         if max_deliveries is not None and self.deliveries_count > max_deliveries:
-            self.to_delete = True
             self.state_set = True
             self.terminal_failure_reason = "max_deliveries"
             if logger is not None:
