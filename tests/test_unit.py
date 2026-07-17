@@ -42,14 +42,7 @@ from faststream_outbox import (
 )
 from faststream_outbox.annotations import OutboxMessage as AnnotatedOutboxMessage
 from faststream_outbox.broker import OutboxParamsStorage
-from faststream_outbox.client import (
-    _AUTOGEN_BLIND_HINT,
-    _SCHEMA_MISMATCH_PREFIX,
-    OutboxClient,
-    _compose_schema_mismatch_message,
-    _validate_check_constraints_sync,
-    _validate_schema_sync,
-)
+from faststream_outbox.client import OutboxClient
 from faststream_outbox.configs import OutboxBrokerConfig
 from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.message import OutboxInnerMessage, OutboxMessage
@@ -61,6 +54,13 @@ from faststream_outbox.publisher.specification import OutboxPublisherSpecificati
 from faststream_outbox.registrator import _default_retry_strategy
 from faststream_outbox.response import OutboxPublishCommand
 from faststream_outbox.router import OutboxRoute
+from faststream_outbox.schema_validation import (
+    _AUTOGEN_BLIND_HINT,
+    _SCHEMA_MISMATCH_PREFIX,
+    _compose_schema_mismatch_message,
+    _validate_check_constraints_sync,
+    _validate_schema_sync,
+)
 from faststream_outbox.subscriber.usecase import (
     _LAST_EXCEPTION_MAX_CHARS,
     _TRUNCATION_SUFFIX,
@@ -1362,7 +1362,7 @@ def test_validate_schema_sync_raises_when_alembic_missing() -> None:
     # Alembic is probed via ``_import_checker.is_alembic_installed`` at import time;
     # simulate "not installed" by flipping the boolean the function checks.
     with (
-        patch("faststream_outbox.client.is_alembic_installed", new=False),
+        patch("faststream_outbox.schema_validation.is_alembic_installed", new=False),
         pytest.raises(ImportError, match=r"pip install faststream-outbox\[validate\]"),
     ):
         _validate_schema_sync(MagicMock(), t)

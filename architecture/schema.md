@@ -69,7 +69,7 @@ appends a pointer to
 `docs/operations/alembic.md#fixing-drift-autogenerate-cant-see` (the
 hand-written-migration recipe) — but only when one of those two probes fired.
 Autogenerate-fixable drift (columns, plain indexes, DLQ) gets no pointer. Message
-composition lives in `_compose_schema_mismatch_message` (`client.py`), gated on
+composition lives in `_compose_schema_mismatch_message` (`schema_validation.py`), gated on
 `has_blind_drift`.
 
 The alembic diff runs with `include_schemas=True` so a table in a non-default
