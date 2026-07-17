@@ -323,6 +323,13 @@ async def test_fetch_filters_by_queue(contract: _Harness) -> None:
     assert {m.queue for m in msgs} == {"orders"}
 
 
+async def test_fetch_empty_queues_returns_empty(contract: _Harness) -> None:
+    # Both adapters short-circuit an empty queue list before touching storage.
+    await contract.seed(queue="orders")
+    msgs = await contract.fetch([], limit=10, lease_ttl_seconds=60.0)
+    assert msgs == []
+
+
 # --- delete_with_lease -----------------------------------------------------
 
 
@@ -439,3 +446,23 @@ async def test_mark_pending_noop_on_token_mismatch(contract: _Harness) -> None:
     row = await contract.get_row(rid)
     assert row is not None
     assert row["acquired_token"] == token
+
+
+async def test_mark_pending_noop_on_unleased_row(contract: _Harness) -> None:
+    # The NULL = NULL token guard on the retry path: an unleased row (acquired_token
+    # None) is never reschedulable by any claim token. Parallels the delete twin.
+    now = utcnow()
+    rid = await contract.seed()  # never leased -> acquired_token is None
+    ok = await contract.mark_pending(
+        rid,
+        uuid.uuid4(),
+        delay_seconds=60.0,
+        attempts_count=1,
+        first_attempt_at=now,
+        last_attempt_at=now,
+    )
+    assert ok is False
+    row = await contract.get_row(rid)
+    assert row is not None
+    assert row["acquired_token"] is None
+    assert row["attempts_count"] == 0
