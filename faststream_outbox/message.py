@@ -36,6 +36,16 @@ _logger = logging.getLogger("faststream_outbox.message")
 DLQFailureReason = Literal["max_deliveries", "retry_terminal", "rejected"]
 
 
+# Header keys the outbox envelope owns on a row's ``headers`` dict. ``_encode_payload``
+# (``envelope.py``) writes them, ``OutboxParser.parse_message`` (``parser.py``) reads
+# them back, and the relay header-propagation (``_maybe_propagate_inbound_headers``)
+# strips them before re-encode. Named here so those sites share one definition instead
+# of repeating the string literals.
+CONTENT_TYPE_HEADER = "content-type"
+CORRELATION_ID_HEADER = "correlation_id"
+ENVELOPE_MANAGED_HEADERS = frozenset({CONTENT_TYPE_HEADER, CORRELATION_ID_HEADER})
+
+
 @dataclass(kw_only=True)
 class OutboxInnerMessage:
     """In-memory copy of a claimed outbox row, plus ack/nack/reject intent helpers.

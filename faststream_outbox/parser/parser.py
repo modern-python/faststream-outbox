@@ -2,7 +2,12 @@ from typing import Any
 
 from faststream.message import decode_message
 
-from faststream_outbox.message import OutboxInnerMessage, OutboxMessage
+from faststream_outbox.message import (
+    CONTENT_TYPE_HEADER,
+    CORRELATION_ID_HEADER,
+    OutboxInnerMessage,
+    OutboxMessage,
+)
 
 
 class OutboxParser:
@@ -12,9 +17,9 @@ class OutboxParser:
             raw_message=msg,
             body=msg.payload,
             headers=headers,
-            content_type=headers.get("content-type"),
+            content_type=headers.get(CONTENT_TYPE_HEADER),
             message_id=str(msg.id),
-            correlation_id=headers.get("correlation_id", str(msg.id)),
+            correlation_id=headers.get(CORRELATION_ID_HEADER, str(msg.id)),
             # Set so ``SubscriberUsecase.__get_response_publisher`` (gated on a
             # truthy ``reply_to``) wires up the response publisher when a handler
             # returns ``OutboxResponse``. The inbound queue is the semantically

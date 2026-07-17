@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING, Any
 from faststream.message import gen_cor_id
 from faststream.message.utils import encode_message
 
+from faststream_outbox.message import CONTENT_TYPE_HEADER, CORRELATION_ID_HEADER
+
 
 if TYPE_CHECKING:
     from fast_depends.library.serializer import SerializerProto
@@ -28,25 +30,25 @@ def _encode_payload(
     """
     payload, content_type = encode_message(body, serializer=serializer)
     out_headers: dict[str, str] = dict(headers or {})
-    if "content-type" in out_headers and content_type and out_headers["content-type"] != content_type:
+    if CONTENT_TYPE_HEADER in out_headers and content_type and out_headers[CONTENT_TYPE_HEADER] != content_type:
         msg = (
-            f"headers['content-type']={out_headers['content-type']!r} conflicts with the "
+            f"headers['content-type']={out_headers[CONTENT_TYPE_HEADER]!r} conflicts with the "
             f"encoder's output ({content_type!r}). Drop content-type from headers, or pass "
             "body as bytes if you need to label the payload yourself."
         )
         raise ValueError(msg)
     if content_type:
-        out_headers["content-type"] = content_type
+        out_headers[CONTENT_TYPE_HEADER] = content_type
     # An explicit ``correlation_id`` kwarg used to lose silently to a
     # ``headers["correlation_id"]`` of a different value (the kwarg was dropped).
     # Treat a genuine mismatch as a conflict (like content-type above); otherwise the
     # kwarg wins when set, falling back to the header, then a fresh id (P2).
-    header_cid = out_headers.get("correlation_id")
+    header_cid = out_headers.get(CORRELATION_ID_HEADER)
     if correlation_id is not None and header_cid is not None and correlation_id != header_cid:
         msg = (
             f"correlation_id={correlation_id!r} conflicts with headers['correlation_id']="
             f"{header_cid!r}. Pass correlation_id one way, not both."
         )
         raise ValueError(msg)
-    out_headers["correlation_id"] = correlation_id or header_cid or gen_cor_id()
+    out_headers[CORRELATION_ID_HEADER] = correlation_id or header_cid or gen_cor_id()
     return payload, out_headers
