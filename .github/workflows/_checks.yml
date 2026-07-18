@@ -64,3 +64,40 @@ jobs:
           PYTHONDONTWRITEBYTECODE: 1
           PYTHONUNBUFFERED: 1
           POSTGRES_DSN: postgresql+asyncpg://outbox:outbox@127.0.0.1:5432/outbox
+
+  freethreaded:
+    runs-on: ubuntu-latest
+    env:
+      # SQLAlchemy's cyext ships cp314t wheels but doesn't declare free-thread
+      # safety, so importing it re-enables the GIL; use its pure-Python fallback.
+      DISABLE_SQLALCHEMY_CEXT_RUNTIME: 1
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: outbox
+          POSTGRES_PASSWORD: outbox
+          POSTGRES_DB: outbox
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U outbox"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/pyproject.toml"
+      - run: uv python install 3.14t
+      - run: uv python pin 3.14t
+      - run: uv sync --all-extras --no-install-project
+      - name: Assert the GIL is actually disabled
+        run: uv run --no-sync python -c "import sys, asyncpg, sqlalchemy, pydantic_core, faststream, faststream_outbox; assert not sys._is_gil_enabled(), 'GIL re-enabled - a dependency lacks free-threaded support'"
+      - run: uv run --no-sync pytest . --no-cov
+        env:
+          PYTHONDONTWRITEBYTECODE: 1
+          PYTHONUNBUFFERED: 1
+          POSTGRES_DSN: postgresql+asyncpg://outbox:outbox@127.0.0.1:5432/outbox
