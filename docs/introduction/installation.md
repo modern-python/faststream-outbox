@@ -29,6 +29,40 @@
   you're starting fresh.
 - A running Postgres instance accessible via SQLAlchemy `AsyncEngine`
 
+## Free-threaded Python
+
+`faststream-outbox` supports free-threaded (no-GIL) CPython. CI runs the full
+test suite on the **3.14t** interpreter, and a separate CI step asserts that
+importing the outbox and its runtime dependencies keeps the GIL disabled. The
+package is pure-Python
+asyncio, so nothing in it depends on the GIL; installing on a `python3.14t`
+interpreter resolves the free-threaded wheels of the compiled dependencies
+(`asyncpg`, `sqlalchemy`, `pydantic-core`) automatically.
+
+!!! note "Keep the GIL disabled: `DISABLE_SQLALCHEMY_CEXT_RUNTIME=1`"
+
+    SQLAlchemy's Cython extensions ship free-threaded wheels but do not yet
+    declare themselves free-thread-safe, so importing SQLAlchemy re-enables the
+    GIL process-wide. Your outbox code still runs correctly either way, but if
+    you want the GIL to stay disabled — for example because other parts of your
+    process use threads for parallelism — set `DISABLE_SQLALCHEMY_CEXT_RUNTIME=1`
+    (SQLAlchemy's own switch; it falls back to pure-Python implementations). This
+    is what CI runs, and it is what lets the GIL stay off.
+
+    The same caveat applies to any foreign-broker client you install for the
+    [relay feature](../usage/relay.md): if it hasn't declared free-thread safety
+    (for example `aiokafka`), importing it re-enables the GIL. That is the
+    client library's limitation, not the outbox's — your outbox code still runs
+    correctly.
+
+What this does **not** change: the subscriber runs a single event loop by
+design, so free-threading does not add cross-core parallelism within one
+process. To use more cores, run more subscriber processes — the same scaling
+lever as on a GIL build.
+
+Free-threaded wheels for the compiled dependencies currently exist for 3.14t
+only (there are no `cp313t` wheels), so 3.13t is not a supported target.
+
 ## Postgres
 
 If you don't have a Postgres instance, you can start one with Docker:
