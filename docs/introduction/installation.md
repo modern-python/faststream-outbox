@@ -31,8 +31,10 @@
 
 ## Free-threaded Python
 
-`faststream-outbox` supports free-threaded (no-GIL) CPython and is tested on
-**3.14t** in CI, with the GIL asserted disabled. The package is pure-Python
+`faststream-outbox` supports free-threaded (no-GIL) CPython. CI runs the full
+test suite on the **3.14t** interpreter, and a separate CI step asserts that
+importing the outbox and its runtime dependencies keeps the GIL disabled. The
+package is pure-Python
 asyncio, so nothing in it depends on the GIL; installing on a `python3.14t`
 interpreter resolves the free-threaded wheels of the compiled dependencies
 (`asyncpg`, `sqlalchemy`, `pydantic-core`) automatically.
