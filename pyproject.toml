@@ -29,7 +29,11 @@ dependencies = [
 [project.optional-dependencies]
 asyncpg = ["asyncpg>=0.29"]
 validate = ["alembic>=1.13"]
-fastapi = ["fastapi>=0.95"]
+# Upper cap: fastapi 0.140 made Dependant a slotted dataclass, which breaks
+# faststream's FastAPI integration (ag2ai/faststream#2959). faststream declares
+# no fastapi dependency of its own, so this extra is the only place the pairing
+# can be constrained. Lift the cap and raise the faststream floor once fixed.
+fastapi = ["fastapi>=0.95,<0.140"]
 prometheus = ["prometheus-client>=0.19"]
 opentelemetry = ["opentelemetry-api>=1.20", "opentelemetry-sdk>=1.20"]
 all = ["faststream-outbox[asyncpg,validate,fastapi,prometheus,opentelemetry]"]
@@ -41,7 +45,7 @@ dev = [
     "pytest-cov",
     "asyncpg>=0.29",
     "alembic>=1.13",
-    "fastapi>=0.95",
+    "fastapi>=0.95,<0.140", # see the cap note on the fastapi extra
     "faststream[kafka]>=0.7.1,<0.8",
     "httpx2>=2.2",
     "prometheus-client>=0.19",
@@ -81,6 +85,7 @@ ignore = [
     "ISC001", # flake8-implicit-str-concat
     "G004", # Logging statement uses f-string
     "ANN",
+    "CPY001", # no per-file copyright header
 ]
 isort.lines-after-imports = 2
 isort.no-lines-before = ["standard-library", "local-folder"]

@@ -22,7 +22,7 @@ raises `NotImplementedError`.
 
 ```python
 async with session_factory() as session, session.begin():
-    session.add(order)                                    # domain write
+    session.add(order)  # domain write
     await broker.publish(
         {"order_id": order.id},
         queue="orders",
@@ -97,9 +97,9 @@ orders_pub = broker.publisher("orders", headers={"source": "checkout"})
 
 
 async def checkout(order: Order, session: AsyncSession) -> None:
-    session.add(order)                                  # domain write
+    session.add(order)  # domain write
     await orders_pub.publish({"order_id": order.id}, session=session)
-    await session.commit()                              # row + domain commit together
+    await session.commit()  # row + domain commit together
 ```
 
 Per-call `headers` are merged with the publisher's static headers

@@ -124,7 +124,7 @@ tb = TestOutboxBroker(broker, run_loops=True)
 async with tb:
     tb.feed("orders", json.dumps({"order_id": 1}).encode())
     # the real fetch + worker loops pick the row up asynchronously
-    async with asyncio.timeout(1.0):          # fail fast instead of hanging forever
+    async with asyncio.timeout(1.0):  # fail fast instead of hanging forever
         while not received:
             await asyncio.sleep(0.01)
 

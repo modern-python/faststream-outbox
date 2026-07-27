@@ -63,8 +63,7 @@ router = OutboxRouter(engine, outbox_table=outbox_table)
 async def handle(
     body: dict,
     session: AsyncSession = Depends(get_session),
-) -> None:
-    ...  # domain writes on `session` commit with any chained outbox publishes
+) -> None: ...  # domain writes on `session` commit with any chained outbox publishes
 
 
 @router.post("/orders")
@@ -116,8 +115,7 @@ async def handle(
     msg: OutboxMessage,
     broker: OutboxBroker,
     session: AsyncSession = Depends(get_session),
-) -> None:
-    ...
+) -> None: ...
 ```
 
 They resolve via FastStream's `Context()` paths but go through FastAPI's

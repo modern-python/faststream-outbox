@@ -131,6 +131,7 @@ are **not** forwarded to the foreign publish. Two ways to override:
 from faststream.response import Response
 from faststream_outbox.annotations import OutboxMessage
 
+
 @publisher_kafka
 @broker_outbox.subscriber("outbox_queue")
 async def relay(body: dict, msg: OutboxMessage) -> Response:

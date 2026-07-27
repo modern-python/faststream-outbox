@@ -82,9 +82,11 @@ engine = create_async_engine("postgresql+asyncpg://localhost/app")
 broker = OutboxBroker(engine, outbox_table=outbox_table)
 app = FastStream(broker)
 
+
 @broker.subscriber("orders", max_workers=4)
 async def handle(order_id: int) -> None:
     print(f"order {order_id}")
+
 
 # Producer side — share the caller's open transaction:
 session_factory = async_sessionmaker(engine, expire_on_commit=False)

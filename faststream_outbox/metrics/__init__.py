@@ -79,7 +79,7 @@ def _safe_emit(recorder: MetricsRecorder, event: str, tags: Mapping[str, typing.
     """
     try:
         recorder(event, tags)
-    except Exception:  # noqa: BLE001
+    except Exception:
         _logger.log(logging.DEBUG, "metrics recorder raised", exc_info=True)
 
 

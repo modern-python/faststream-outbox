@@ -23,7 +23,9 @@ await broker.publish(
 
 # Fire at a specific UTC instant:
 await broker.publish(
-    {"x": 1}, queue="orders", session=session,
+    {"x": 1},
+    queue="orders",
+    session=session,
     activate_at=dt.datetime(2027, 6, 1, 9, tzinfo=dt.UTC),
 )
 ```
@@ -63,7 +65,9 @@ id is a silent no-op (returns `None`):
 
 ```python
 first = await broker.publish(
-    {"order_id": 1}, queue="orders", session=session,
+    {"order_id": 1},
+    queue="orders",
+    session=session,
     activate_in=dt.timedelta(seconds=30),
     timer_id="order-confirm-1",
 )
@@ -71,7 +75,9 @@ assert first is not None
 
 # Re-publish — no row inserted, no NOTIFY emitted, returns None.
 second = await broker.publish(
-    {"order_id": 1}, queue="orders", session=session,
+    {"order_id": 1},
+    queue="orders",
+    session=session,
     activate_in=dt.timedelta(seconds=30),
     timer_id="order-confirm-1",
 )
