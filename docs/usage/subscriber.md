@@ -124,7 +124,7 @@ reclaim of *actually* stuck rows everywhere. Instead, segregate slow work
 onto its own subscriber with a longer TTL:
 
 ```python
-@broker.subscriber("slow_q", lease_ttl_seconds=600)   # 10 minutes
+@broker.subscriber("slow_q", lease_ttl_seconds=600)  # 10 minutes
 async def heavy_job(msg): ...
 
 
@@ -235,7 +235,7 @@ async def handle(msg: OutboxMessage, body: dict) -> None:
         await write_audit(body)
         await msg.ack()
     except TransientError:
-        await msg.nack()    # retry
+        await msg.nack()  # retry
     except PermanentError:
         await msg.reject()  # terminal delete
 ```

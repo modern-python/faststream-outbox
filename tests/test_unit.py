@@ -1432,8 +1432,10 @@ def test_validate_check_constraints_missing_describes_predicate() -> None:
     connection = _mock_check_constraint_connection([])  # constraint absent from the live DB
     errors = _validate_check_constraints_sync(connection, table)
     assert errors == [
-        f"missing CHECK constraint enforcing '{_LEASE_CK_PREDICATE}' "
-        f"(the lease invariant; name it e.g. outbox_faststream_lease_ck)",
+        (
+            f"missing CHECK constraint enforcing '{_LEASE_CK_PREDICATE}' "
+            f"(the lease invariant; name it e.g. outbox_faststream_lease_ck)"
+        ),
     ]
 
 
@@ -1446,8 +1448,10 @@ def test_validate_check_constraints_drifted_predicate_reported_as_missing() -> N
     )
     errors = _validate_check_constraints_sync(connection, table)
     assert errors == [
-        f"missing CHECK constraint enforcing '{_LEASE_CK_PREDICATE}' "
-        f"(the lease invariant; name it e.g. outbox_faststream_lease_ck)",
+        (
+            f"missing CHECK constraint enforcing '{_LEASE_CK_PREDICATE}' "
+            f"(the lease invariant; name it e.g. outbox_faststream_lease_ck)"
+        ),
     ]
 
 

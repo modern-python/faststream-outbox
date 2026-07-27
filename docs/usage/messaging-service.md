@@ -101,7 +101,9 @@ class OutboxEventProducer:
 
     async def send_chat_event(self, event: ChatEvent) -> None:
         await self.outbox_broker.publish(
-            event, queue="chat-events", session=self.session,
+            event,
+            queue="chat-events",
+            session=self.session,
         )
 ```
 
@@ -250,7 +252,11 @@ from faststream_outbox import TestOutboxBroker
 
 
 async def test_create_message_relays_event_to_kafka(
-    outbox_broker, kafka_broker, create_message_use_case, command, kafka_publisher,
+    outbox_broker,
+    kafka_broker,
+    create_message_use_case,
+    command,
+    kafka_publisher,
 ) -> None:
     async with TestOutboxBroker(outbox_broker), TestKafkaBroker(kafka_broker):
         await create_message_use_case(command)

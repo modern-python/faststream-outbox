@@ -36,7 +36,7 @@ transaction — the row must commit with the caller's domain writes:
 
 ```python
 async with session_factory() as session, session.begin():
-    session.add(order)                                    # domain write
+    session.add(order)  # domain write
     await broker.publish(order.id, queue="orders", session=session)
     # session.begin() commits both atomically on exit
 ```
@@ -127,8 +127,7 @@ immune to worker / DB clock skew.
 When the invariant fires, the broker emits a WARNING with structured fields:
 
 ```python
-extra={"event": "lease_lost", "phase": "terminal" | "retry",
-       "row_id": ..., "queue": ..., "deliveries_count": ...}
+extra = {"event": "lease_lost", "phase": "terminal" | "retry", "row_id": ..., "queue": ..., "deliveries_count": ...}
 ```
 
 Recurring `event=lease_lost` records mean `lease_ttl_seconds < handler P99`
