@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
-`just` (task runner) + `uv` (package manager); the [`Justfile`](Justfile) is the source of truth for recipes — run `just --list` or read it. The non-obvious bits:
+`just` (task runner) + `uv` (package manager); the [`justfile`](justfile) is the source of truth for recipes — run `just --list` or read it. The non-obvious bits:
 
 - `just test [args]` — full suite in docker compose (Postgres 17). Args forward **unquoted**, so a spaced `-k` expression (`-k "a or b"`) word-splits and fails (`file or directory not found: or`) — run one keyword per invocation, or a single substring matching all targets. `tests/test_unit.py` + `tests/test_fake.py` need no Postgres (`uv run pytest tests/test_unit.py` works directly); `tests/test_integration.py` needs Postgres at `POSTGRES_DSN` (default `postgresql+asyncpg://outbox:outbox@localhost:5432/outbox`; `pg_engine` skips if unreachable). Coverage is on with `--cov-fail-under=100` — partial runs fail that gate; pass `--no-cov` or `--cov-fail-under=0` when iterating.
 - `just lint` / `just lint-ci` — autofix vs non-mutating; `lint-ci` also runs the planning-change validator.

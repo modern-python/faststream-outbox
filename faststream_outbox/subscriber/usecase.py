@@ -49,7 +49,7 @@ from faststream_outbox.subscriber.config import OutboxSubscriberConfig, OutboxSu
 try:
     import asyncpg as _asyncpg
 except ImportError:  # pragma: no cover
-    _asyncpg = None  # ty: ignore[invalid-assignment]
+    _asyncpg = None
 
 
 _BACKOFF_EXP_CAP = 30
@@ -145,6 +145,9 @@ def _render_last_exception(
 
 
 if typing.TYPE_CHECKING:
+    # Type-only handle on the module: `_asyncpg` above is `module | None`, so annotations
+    # must not hang off it (attribute access on the `None` arm is unresolved).
+    import asyncpg
     from faststream._internal.endpoint.publisher import PublisherProto
     from faststream._internal.endpoint.subscriber.call_item import CallsCollection
     from faststream.message import StreamMessage
@@ -356,7 +359,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         self,
         *,
         fetch_conn: "AsyncConnection | None",
-        listen_conn: "_asyncpg.Connection | None",
+        listen_conn: "asyncpg.Connection | None",
     ) -> None:
         """Fetch + adaptive backoff, with NOTIFY-driven wakeup.
 
@@ -415,7 +418,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             await asyncio.wait_for(self._notify_event.wait(), timeout=timeout)
         self._notify_event.clear()
 
-    async def _open_listen_connection(self, engine: "AsyncEngine") -> "_asyncpg.Connection | None":
+    async def _open_listen_connection(self, engine: "AsyncEngine") -> "asyncpg.Connection | None":
         """Open a dedicated raw asyncpg connection and register LISTEN on it.
 
         Returns the connection on success, ``None`` on any failure (asyncpg not installed,
@@ -437,7 +440,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         _, opts = engine.dialect.create_connect_args(engine.url)
         for sa_only_key in ("prepared_statement_cache_size", "async_fallback", "async_creator_fn"):
             opts.pop(sa_only_key, None)
-        conn: _asyncpg.Connection | None = None
+        conn: asyncpg.Connection | None = None
         listening = False
         try:
             conn = await _asyncpg.connect(**opts)
@@ -459,7 +462,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                     await conn.close()
         return conn if listening else None
 
-    async def _close_listen_connection(self, listen_conn: "_asyncpg.Connection") -> None:
+    async def _close_listen_connection(self, listen_conn: "asyncpg.Connection") -> None:
         """Close the raw LISTEN connection without letting teardown wedge the fetch loop (S1).
 
         A graceful ``close()`` on a half-dead socket can block on the kernel keepalive
