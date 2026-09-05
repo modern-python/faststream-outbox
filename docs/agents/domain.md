@@ -59,5 +59,5 @@ overriding:
 
 > _Contradicts ADR-NNNN (its title), but worth reopening because…_
 
-Every ADR carries a **Revisit trigger** for exactly this. Check whether the trigger has actually
-fired before arguing the case again.
+The record holds the reasoning that settled it. Make the case against that reasoning, not against
+the decision.

@@ -15,7 +15,3 @@ back exactly where they are now.
   event, forget one adapter") — which is parity, not duplication. Declined for now: the vocabulary
   is stable and additive, both adapters are independently tested, and a new event is emitted from a
   call site the author is already editing.
-
-**Revisit trigger:** ≥3 new events within a release cycle, at which point an `EVENTS` registry plus
-the parity test earns its keep; or a third adapter, where three hand-written switches may justify a
-shared dispatch skeleton with per-backend emit hooks.

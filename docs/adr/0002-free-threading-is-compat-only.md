@@ -25,9 +25,3 @@ import.
   open-ended, and withholding the classifier leaves 3.14t adopters with no signal.
 - **Targeting 3.13t** is not available: the compiled dependencies ship `cp314t` wheels but no
   `cp313t` ones, so the full graph will not install.
-
-**Revisit trigger:** a profiled workload shows the subscriber is in-process CPU-bound rather than
-Postgres/lease-bound *and* more processes are not an acceptable scale lever. Separately, drop
-`DISABLE_SQLALCHEMY_CEXT_RUNTIME=1` from CI and the docs once SQLAlchemy's extensions declare
-`Py_MOD_GIL_NOT_USED` and the GIL stays disabled with C acceleration on — re-run the assertion
-without it to confirm. Reopen 3.13t if `cp313t` wheels appear while 3.13t is still supported.

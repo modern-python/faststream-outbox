@@ -42,7 +42,7 @@ with the numbers if the change claims a performance effect. State the numbers, n
       `docs/`; otherwise it does not get written.
 - [ ] **Rejected an alternative** with reasoning that would otherwise be
       re-litigated? File it as an ADR in [`docs/adr/`](../docs/adr/), numbered
-      `NNNN-slug.md`, with a revisit trigger — not here.
+      `NNNN-slug.md` — not here.
 - [ ] **Found real work you are not doing now?** Open a GitHub issue,
       self-contained enough to pick up cold — not here.
 - [ ] `just lint-ci` and `just test` pass.

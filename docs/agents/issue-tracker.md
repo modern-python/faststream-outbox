@@ -37,7 +37,7 @@ Run `gh issue view <number> --comments`.
 ## Rejected work: read and write `docs/adr/`, not `.out-of-scope/`
 
 Where a skill says `.out-of-scope/`, this repo means `docs/adr/`. A rejected enhancement is recorded
-there as a decision record (`NNNN-slug.md`, sequential, with a **Revisit trigger**), and the
+there as a decision record (`NNNN-slug.md`, sequential), and the
 prior-rejection check during triage reads that directory. Do not create `.out-of-scope/`: this repo
 keeps one home for a rejected alternative, and a second one would split the corpus that the check
 depends on.
