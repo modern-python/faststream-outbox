@@ -45,3 +45,11 @@ The package wires a FastStream `Broker`/`Registrator`/`Subscriber` trio whose tr
 - `ruff` runs `select = ["ALL"]` with documented ignores in `pyproject.toml`; many `# noqa` are intentional.
 - Type checker is `ty`. Use `# ty: ignore[<rule>]` for intentional escapes.
 - Suppressions audit (PLR0913, ARG002, `invalid-method-override`, `BrokerUsecase` invariance, etc.) → `planning/lint-suppressions.md`. Consult before removing one.
+
+## Agent skills
+
+- **Issues and specs** — GitHub Issues on `modern-python/faststream-outbox`, via `gh`:
+  [`docs/agents/issue-tracker.md`](docs/agents/issue-tracker.md)
+- **Triage labels** — the five canonical roles: [`docs/agents/triage-labels.md`](docs/agents/triage-labels.md)
+- **Domain docs** — single-context; `architecture/` and `planning/decisions/` are the truth homes:
+  [`docs/agents/domain.md`](docs/agents/domain.md)
