@@ -3,6 +3,12 @@ site_url: https://faststream-outbox.modern-python.org/
 repo_url: https://github.com/modern-python/faststream-outbox
 docs_dir: docs
 edit_uri: edit/main/docs/
+
+# Agent-facing docs are read from the repo, never published. Keeps `mkdocs --strict` from
+# failing them as orphaned pages.
+exclude_docs: |
+  /agents/
+
 nav:
   - Overview: index.md
   - Getting started:
