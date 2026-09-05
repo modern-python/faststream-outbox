@@ -25,3 +25,9 @@ import.
   open-ended, and withholding the classifier leaves 3.14t adopters with no signal.
 - **Targeting 3.13t** is not available: the compiled dependencies ship `cp314t` wheels but no
   `cp313t` ones, so the full graph will not install.
+
+**Revisit trigger:** drop `DISABLE_SQLALCHEMY_CEXT_RUNTIME=1` from the `freethreaded` CI job and the
+docs caveat once SQLAlchemy's Cython extensions declare `Py_MOD_GIL_NOT_USED`. This is the one part
+of the decision that is scheduled work rather than a judgement call — the workaround is upstream's
+to remove, and until it does, the env var is load-bearing. Re-run the job's GIL assertion without it
+to confirm before removing. Tracked as #160.
