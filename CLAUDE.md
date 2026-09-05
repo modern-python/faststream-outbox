@@ -102,7 +102,7 @@ costs every turn and rots in two places at once.
 An invariant is a test whose name is the claim, with a docstring opening `INVARIANT:` and a second
 paragraph naming **what breaks it** — design rationale, not a report of what this one test catches;
 a sibling test may be the one that trips. `tests/test_invariant_census.py` owns and enforces that
-shape, and that a `path::test_name` citation resolves. Both ADRs and `INVARIANT:` docstrings
+shape. Both ADRs and `INVARIANT:` docstrings
 ratchet: nothing prunes a record once its call is settled. Keeping them lean is a standing habit.
 
 ## Code Style
@@ -113,9 +113,8 @@ ratchet: nothing prunes a record once its call is settled. Keeping them lean is 
   most 1–2 lines for a genuinely non-obvious constraint. Never narrate implementation or justify
   code to a reviewer — cross-file rationale lives in an `INVARIANT:` test docstring or an ADR.
 - `ruff` (`select = ["ALL"]`) and `ty` are configured in `pyproject.toml` and run by `just lint`.
-  Many suppressions are intentional. The recurring cluster — everything downstream of
-  `BrokerUsecase`'s invariance on its config type — is settled in
-  [ADR-0006](docs/adr/0006-broker-config-invariance-suppressions.md); check it before removing one.
+  Many suppressions are intentional; the recurring cluster is everything downstream of
+  `BrokerUsecase`'s invariance on its config type, noted at each site.
 
 ## Agent skills
 

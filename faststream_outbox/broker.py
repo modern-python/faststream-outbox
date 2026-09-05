@@ -365,6 +365,7 @@ class OutboxBroker(
         """
         await self.client.validate_schema(check_autovacuum=check_autovacuum)
 
+    # Deliberate signature divergence: the outbox contract adds session/activate_*/timer_id.
     async def publish(  # ty: ignore[invalid-method-override]
         self,
         body: typing.Any,
@@ -405,6 +406,7 @@ class OutboxBroker(
         result = await self._basic_publish(cmd, producer=self.config.producer)
         return typing.cast("int | None", result)
 
+    # Deliberate signature divergence: the outbox contract adds session/activate_*.
     async def publish_batch(  # ty: ignore[invalid-method-override]
         self,
         *bodies: typing.Any,
