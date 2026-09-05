@@ -64,13 +64,13 @@ def _result(
     )
 
 
-def _producer(**probe_kwargs: float) -> RunResult:
+def _producer(*, select_calls: int = 500, **probe_kwargs: float) -> RunResult:
     """Build a producer run: inserts + pg_notify selects, no deletes or updates."""
     return _result(
         "producer",
         delete_calls=0,
         insert_calls=500,
-        select_calls=500,
+        select_calls=select_calls,
         tup_ins=500,
         tup_upd=0,
         tup_del=0,
@@ -177,8 +177,47 @@ def test_exact_keys_cover_the_structural_totals() -> None:
         "tup_del",
         "tup_ins",
         "insert_calls",
-        "select_calls",
     }
+
+
+def test_compare_absorbs_one_stray_select_on_a_consumer_run() -> None:
+    """INVARIANT: a stray SELECT inside the measured window does not fail the gate.
+
+    ``pg_stat_statements`` is database-wide and the probe excludes only its own queries
+    (``NOT ILIKE '%pg_stat%'``), so driver and dialect introspection -- which is SELECT-shaped
+    and fires whenever a physical connection is established inside the window -- is counted as
+    workload work. SELECT is the one operation the environment also emits, so exact-gating it
+    against a baseline of 0 fails the build on a timing accident rather than a regression.
+    """
+    baseline = to_baseline([_result()])
+    assert compare(to_baseline([_result(select_calls=1)]), baseline) == []
+
+
+def test_compare_still_fails_when_the_consume_path_starts_selecting_per_message() -> None:
+    """INVARIANT: the slack absorbs infrastructure noise without hiding a per-message SELECT.
+
+    The regression this metric exists to catch is a SELECT added to the consume or publish
+    path, which scales with message count. A slack wide enough to hide that would make the
+    metric decorative -- it has to stay far below one statement per message.
+    """
+    baseline = to_baseline([_result()])
+    failures = compare(to_baseline([_result(select_calls=500)]), baseline)
+    assert len(failures) == 1
+    assert "select_calls" in failures[0]
+
+
+def test_compare_fails_on_a_producer_losing_pg_notify_dedup() -> None:
+    """INVARIANT: the producer's ``select_calls`` still pins per-transaction NOTIFY dedup.
+
+    ``_notify`` emits at most one ``pg_notify`` per ``(transaction, queue)``, so a real
+    producer run selects once regardless of message count. Losing the dedup memo turns that
+    into one SELECT per publish, which is the regression this number is here for; the slack
+    must not reach far enough to let it through.
+    """
+    baseline = to_baseline([_producer(select_calls=1)])
+    failures = compare(to_baseline([_producer(select_calls=500)]), baseline)
+    assert len(failures) == 1
+    assert "select_calls" in failures[0]
 
 
 def test_format_table_labels_gated_vs_informational() -> None:

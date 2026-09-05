@@ -10,7 +10,14 @@ was verified exact both idle and under load:
 * ``delete_calls`` -- the terminal DELETE execution count (corroborating). The fetch
   CTE compiles to ``WITH ready AS (...) UPDATE`` and classifies under the ``with`` key,
   so ``calls_by_op['update']`` is ~0 on the happy path -- gate ``delete``, never that.
-* ``insert_calls`` / ``select_calls`` -- the producer's INSERT and pg_notify SELECT.
+* ``insert_calls`` -- the producer's INSERT count.
+
+``select_calls`` is the producer's pg_notify SELECT, gated with a small ABSOLUTE slack rather
+than exactly. ``pg_stat_statements`` is database-wide and the probe excludes only its own
+queries (``NOT ILIKE '%pg_stat%'``), so driver and dialect introspection -- SELECT-shaped, and
+emitted whenever a physical connection is established inside the measured window -- counts as
+workload work. SELECT is the only operation the environment also emits, so it is the only one
+that cannot be gated exactly.
 
 ``wal_records`` is near-structural but carries ~5% server-wide spread, so it is gated
 with a 10% upper-bound band, never exact. The total ``calls``, ``wal_bytes`` (full-page
@@ -41,10 +48,17 @@ from benchmarks.workload import RunResult
 # messages not a multiple of tfbs (a partial final flush, e.g. messages=5050/tfbs=100 -> 51
 # delete_calls), or a bench handler that does real I/O (queue empties mid-buffer -> partial
 # idle flush) -- revisit this to a loose upper bound; today all three hold and it is deterministic.
-EXACT_KEYS: tuple[str, ...] = ("delete_calls", "tup_upd", "tup_del", "tup_ins", "insert_calls", "select_calls")
+EXACT_KEYS: tuple[str, ...] = ("delete_calls", "tup_upd", "tup_del", "tup_ins", "insert_calls")
 
 # Near-deterministic: ~5% observed spread, so a 10% upper-bound band leaves headroom.
 TOLERANT_KEYS: dict[str, float] = {"wal_records": 0.10}
+
+# Upper bound as baseline + N, for counters whose baseline is small enough that a ratio band
+# collapses (a 10% band on 0 is still 0). The slack absorbs infrastructure statements the probe
+# filter cannot exclude, and must stay far below one statement per message so the regressions
+# these numbers exist to catch -- a SELECT added to the consume path, or the producer losing
+# per-transaction pg_notify dedup -- still fail by three orders of magnitude.
+SLACK_KEYS: dict[str, int] = {"select_calls": 2}
 
 
 def normalize(result: RunResult) -> dict[str, float]:
@@ -121,7 +135,7 @@ def format_table(results: list[RunResult]) -> str:
         )
     lines.append("")
     lines.append("GATED (fail the build): delete_calls + tuple counters (upd/del/ins) + the")
-    lines.append("producer's insert_calls/select_calls, all exact; wal_records within a 10%")
+    lines.append("producer's insert_calls, all exact; select_calls +2; wal_records within a 10%")
     lines.append("band. Columns upd/del are those gated raw counters.")
     lines.append("INFORMATIONAL (never gated): total calls, WAL bytes, msg/s -- FPI/timing noise.")
     lines.append("delete/msg, WALrec/msg and WALB/msg are per-message views, not the gated totals.")
@@ -154,7 +168,7 @@ def format_markdown(results: list[RunResult], failures: list[str]) -> str:
     lines.append("")
     lines.append(
         "_Gated (fails the build): `delete_calls` + tuple counters (upd/del/ins) + the "
-        "producer's `insert_calls`/`select_calls`, exact; `wal_records` within a 10% band. "
+        "producer's `insert_calls`, exact; `select_calls` within +2; `wal_records` within a 10% band. "
         "msg/s, WAL bytes and total calls are informational (timing/FPI noise)._",
     )
     return "\n".join(lines)
@@ -163,9 +177,9 @@ def format_markdown(results: list[RunResult], failures: list[str]) -> str:
 def compare(current: dict[str, typing.Any], baseline: dict[str, typing.Any]) -> list[str]:
     """Diff current raw totals against the baseline. Empty list means pass.
 
-    EXACT_KEYS must match exactly; TOLERANT_KEYS may only exceed an upper bound (a
-    regression is MORE work, so a lower value never fails). A baseline run key absent
-    from ``current`` is itself a failure.
+    EXACT_KEYS must match exactly; TOLERANT_KEYS and SLACK_KEYS may only exceed an upper
+    bound, ratio-based and absolute respectively (a regression is MORE work, so a lower
+    value never fails). A baseline run key absent from ``current`` is itself a failure.
     """
     failures: list[str] = []
     for key, want in baseline["runs"].items():
@@ -178,6 +192,13 @@ def compare(current: dict[str, typing.Any], baseline: dict[str, typing.Any]) -> 
             for metric in EXACT_KEYS
             if got[metric] != want[metric]
         )
+        for metric, slack in SLACK_KEYS.items():
+            limit = want[metric] + slack
+            if got[metric] > limit:
+                failures.append(
+                    f"{key}: {metric} exceeded its slack of +{slack}: "
+                    f"baseline {want[metric]:.0f} -> current {got[metric]:.0f} (limit {limit:.0f})",
+                )
         for metric, tolerance in TOLERANT_KEYS.items():
             limit = want[metric] * (1 + tolerance)
             if got[metric] > limit:
