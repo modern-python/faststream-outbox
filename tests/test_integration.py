@@ -425,7 +425,13 @@ async def test_validate_schema_ignores_user_added_extras(pg_engine, outbox_table
 
 
 async def test_publish_inserts_in_caller_transaction(pg_engine, outbox_table) -> None:
-    """``broker.publish`` must commit with the caller's transaction, not before."""
+    """INVARIANT: the outbox row is invisible until the caller's transaction commits, then atomic with it.
+
+    This is the transactional-outbox guarantee itself, asserted against real Postgres rather than a
+    mock's call log: a separate connection must see nothing mid-transaction and exactly the row
+    after commit. Any publish path that opens its own connection or session satisfies the unit-level
+    "did not commit" assertions and fails here.
+    """
     broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
     session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
 
@@ -441,16 +447,13 @@ async def test_publish_inserts_in_caller_transaction(pg_engine, outbox_table) ->
 
 
 async def test_outbox_response_followon_row_commits_with_handler_transaction(pg_engine, outbox_table) -> None:
-    """F7-02: a returned OutboxResponse's follow-on row commits with the handler's transaction.
+    """INVARIANT: a returned ``OutboxResponse``'s follow-on row commits with the handler's transaction.
 
-    The worker loop publishes a returned OutboxResponse through ``OutboxFakePublisher``
-    (``result_msg.as_publish_command()`` → ``producer.publish`` on the response's own
-    session). This drives that exact path on real Postgres and pins that the resulting
-    INSERT participates in the caller's open transaction: invisible to a separate
-    connection until commit, then committed atomically with the handler's writes —
-    mirroring ``test_publish_inserts_in_caller_transaction`` for the direct path. A
-    regression that published the follow-on row on a fresh connection would make the
-    mid-transaction count non-zero.
+    The worker publishes it through ``OutboxFakePublisher`` on the response's own session, so the
+    chained row inherits the same guarantee as a direct publish. A regression that published the
+    follow-on row on a fresh connection -- the natural shape if the publisher reached for the
+    broker's engine -- would commit the downstream message even when the handler's own writes roll
+    back.
     """
     broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
     response_publisher = OutboxFakePublisher(broker.config.producer)
@@ -2051,12 +2054,12 @@ async def test_graceful_timeout_none_still_bounds_drain(
     pg_engine: AsyncEngine,
     outbox_table: Table,
 ) -> None:
-    """``graceful_timeout=None`` must not hang ``stop()`` on a wedged handler.
+    """INVARIANT: ``graceful_timeout=None`` still bounds the drain wait.
 
-    None stays "unbounded" for ``ping()``, but the drain clamps it to a finite fallback so
-    a single stuck handler can't make ``stop()`` (hence pod shutdown) hang forever. Without
-    the clamp ``anyio.move_on_after(None)`` has deadline=inf and this test would hang. The
-    module fallback is patched down so the test stays fast.
+    ``None`` stays unbounded where FastStream uses it that way, but ``anyio.move_on_after(None)`` has
+    an infinite deadline, so passing it straight through means one wedged handler makes
+    ``_inflight.join()`` -- and therefore ``stop()`` -- never return. The clamp to a finite fallback
+    is what keeps a permissive config from turning into a hung shutdown.
     """
     broker = OutboxBroker(pg_engine, outbox_table=outbox_table, graceful_timeout=None)
     started = asyncio.Event()
@@ -2086,7 +2089,14 @@ async def test_validate_schema_fails_when_lease_check_constraint_missing(
     pg_engine: AsyncEngine,
     outbox_table: Table,
 ) -> None:
-    """A dropped ``<table>_lease_ck`` CHECK must be caught — alembic's diff can't see it (audit 2026-06-14)."""
+    """INVARIANT: ``validate_schema()`` detects a missing lease CHECK, which Alembic's diff cannot see.
+
+    Alembic has no check-constraint comparator, so ``(acquired_token IS NULL) = (acquired_at IS
+    NULL)`` is invisible to autogenerate and a half-set lease becomes representable without any
+    migration flagging it. The probe matches by predicate rather than name because the live name
+    varies with how the migration was authored -- a naming convention re-templates it, a hand-written
+    ``op.create_check_constraint`` does not.
+    """
     drop_sql = f'ALTER TABLE "{outbox_table.name}" DROP CONSTRAINT "{outbox_table.name}_lease_ck"'
     async with pg_engine.begin() as conn:
         await conn.exec_driver_sql(drop_sql)

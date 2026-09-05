@@ -16,9 +16,12 @@ pytestmark = pytest.mark.asyncio
 
 
 async def test_naked_decorator_chain_relays_plain_return_to_kafka() -> None:
-    """A handler decorated `@kafka_pub @outbox.subscriber(...)` returning plain value.
+    """INVARIANT: the native FastStream publisher chain relays a plain handler return, unmodified.
 
-    This publishes the value through the Kafka publisher chain.
+    The relay is upstream's ``process_message`` walking ``handler._publishers`` -- no override of the
+    dispatch path. It stays safe only because ``OutboxFakePublisher`` self-gates on
+    ``OutboxPublishCommand``, so a plain return no-ops there and reaches the foreign publisher
+    instead. Widening that gate would make every ``None`` return attempt an outbox insert.
     """
     metadata = MetaData()
     outbox_table = make_outbox_table(metadata)
@@ -201,10 +204,12 @@ async def test_propagate_inbound_headers_true_does_not_override_explicit_respons
 
 
 async def test_outbox_response_with_foreign_publisher_raises() -> None:
-    """A handler that returns OutboxResponse and is decorated by a foreign publisher raises.
+    """INVARIANT: returning an ``OutboxResponse`` from a handler decorated by a foreign publisher raises.
 
-    The guard fires at dispatch time so the user does not silently
-    dual-fire (row in outbox + Kafka publish).
+    The two compose into a silent dual-fire: the row lands in the outbox *and* the same body is
+    published to the foreign broker, so downstream sees it twice with no error anywhere. The guard
+    turns an undetectable delivery bug into a loud ``_OutboxConfigError`` at dispatch, which the
+    worker loop then swallows without nacking so the row simply waits for the wiring to be fixed.
     """
     metadata = MetaData()
     outbox_table = make_outbox_table(metadata)

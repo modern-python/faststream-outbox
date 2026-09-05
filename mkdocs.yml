@@ -9,6 +9,10 @@ edit_uri: edit/main/docs/
 exclude_docs: |
   /agents/
 
+# ADRs are built (so their outgoing links are validated) but stay out of the site menu.
+not_in_nav: |
+  /adr/
+
 nav:
   - Overview: index.md
   - Getting started:

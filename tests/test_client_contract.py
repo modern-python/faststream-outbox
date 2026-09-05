@@ -283,6 +283,13 @@ async def test_fetch_skips_future_dated(contract: _Harness) -> None:
 
 
 async def test_fetch_reclaims_expired_lease(contract: _Harness) -> None:
+    """INVARIANT: an expired lease is reclaimed by the ordinary fetch, in both adapters.
+
+    There is no reaper: the fetch CTE's WHERE is the only thing that recovers an abandoned row, so
+    expiry-based redelivery is what makes every "leave it to lease expiry" path in the subscriber
+    safe. A fake that skipped leased rows unconditionally would make retry, drain, and shutdown
+    tests pass while production quietly stalled on rows nothing ever returns to.
+    """
     old_token = uuid.uuid4()
     rid = await contract.seed(queue="orders", leased_token=old_token, acquired_age=120.0, deliveries_count=1)
     msgs = await contract.fetch(["orders"], limit=10, lease_ttl_seconds=60.0)
@@ -341,6 +348,14 @@ async def test_delete_deletes_on_token_match(contract: _Harness) -> None:
 
 
 async def test_delete_noop_on_token_mismatch(contract: _Harness) -> None:
+    """INVARIANT: a terminal delete whose token no longer matches is a no-op, in both adapters.
+
+    This is the lease-token invariant itself: a slow handler whose lease expired and was reclaimed
+    must not clobber the new holder's row. It is asserted against both substrates because the rule
+    exists twice -- as SQL in ``OutboxClient`` and as Python in ``FakeOutboxClient`` -- and a fake
+    that quietly deleted regardless would make every test built on the test broker agree with a
+    production path that does not.
+    """
     rid = await contract.seed(leased_token=uuid.uuid4(), acquired_age=1.0)
     assert await contract.delete(rid, uuid.uuid4()) is False
     assert await contract.get_row(rid) is not None
@@ -353,6 +368,14 @@ async def test_delete_noop_on_unleased_row(contract: _Harness) -> None:
 
 
 async def test_delete_with_dlq_materializes_audit_row(contract: _Harness) -> None:
+    """INVARIANT: the DLQ archive is written atomically with the delete, in both adapters.
+
+    The real client does this as one CTE so an INSERT failure rolls the DELETE back and the row is
+    reclaimed on lease expiry -- misconfiguration surfaces as outbox growth and ``lease_lost``
+    spikes, never as silent audit loss. Splitting it into two statements, or letting the fake build
+    its audit dict from a hand-written column list rather than the shared projection, breaks that
+    guarantee on one substrate while the other still passes.
+    """
     token = uuid.uuid4()
     rid = await contract.seed(queue="orders", payload=b"body", timer_id="t-1", leased_token=token, acquired_age=1.0)
     deleted = await contract.delete(

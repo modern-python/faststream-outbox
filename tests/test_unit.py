@@ -596,6 +596,13 @@ def test_broker_with_engine_has_client() -> None:
 
 
 async def test_broker_publish_rejects_non_async_session() -> None:
+    """INVARIANT: a non-``AsyncSession`` session argument is refused at the publish boundary.
+
+    The transactional contract is only enforceable through a real session; anything else silently
+    degrades it. Accepting a duck-typed object (a sync ``Session``, a connection, a mock in
+    production code) would let the insert run outside the caller's transaction and fail as lost
+    messages rather than as a ``TypeError`` at the call site.
+    """
     broker = _make_broker()
     with pytest.raises(TypeError, match="AsyncSession"):
         await broker.publish(b"x", queue="orders", session=object())  # ty: ignore[invalid-argument-type]
@@ -644,6 +651,13 @@ async def test_broker_publish_batch_encodes_pydantic_models() -> None:
 
 
 async def test_broker_publish_does_not_commit() -> None:
+    """INVARIANT: publish neither flushes nor commits the caller's session.
+
+    The outbox row must land in the same transaction as the caller's domain writes, so the only
+    thing that may commit it is the caller. A flush or commit added here for convenience -- to
+    obtain the row id sooner, say -- publishes the row before the business fact it describes is
+    durable, and a later rollback leaves a message about something that never happened.
+    """
     broker = _make_broker()
     session = _make_session_mock()
     await broker.publish(b"x", queue="orders", session=session)
@@ -652,6 +666,13 @@ async def test_broker_publish_does_not_commit() -> None:
 
 
 async def test_broker_request_raises() -> None:
+    """INVARIANT: ``broker.request`` is unimplemented -- the outbox is fire-and-forget.
+
+    Request/reply needs a response path back to the caller, and the transport has none: the row
+    commits with the caller's transaction and is delivered later by a different process. A
+    best-effort implementation that polled for a reply row would look like RPC while silently
+    having no delivery guarantee on the reply leg.
+    """
     broker = _make_broker()
     with pytest.raises(NotImplementedError):
         await broker.request(b"x")
@@ -698,7 +719,13 @@ def test_outbox_client_rejects_over_long_table_identifier() -> None:
 
 
 async def test_broker_stop_sets_running_false_before_stopping_subscribers() -> None:
-    """F1-03: running flips False before the subscriber-stop gather, so a cancelled stop can't lie via ping()."""
+    """INVARIANT: ``running`` flips False before the subscriber-stop gather, not after.
+
+    Shutdown is irreversible once the gather starts, so the flag must already describe reality. Set
+    it afterwards and an external cancellation mid-gather leaves the broker advertising
+    ``running=True`` over already-stopped subscribers -- which ``ping()`` reads, so a health check
+    reports a broker that no longer dispatches anything.
+    """
     broker = _make_broker()
 
     async def handle(body: dict) -> None: ...
@@ -716,6 +743,26 @@ async def test_broker_stop_sets_running_false_before_stopping_subscribers() -> N
 
     assert observed["running_during_stop"] is False  # set before the gather, not after
     assert broker.running is False
+
+
+async def test_broker_stop_does_not_dispose_the_caller_engine() -> None:
+    """INVARIANT: the broker never disposes the ``AsyncEngine`` -- the caller owns it.
+
+    The same engine typically backs the application's HTTP handlers and its outbox publishes, so
+    a broker that disposed it on stop would close the pool out from under everything else in the
+    process. Disposing what you were handed is the reflexive symmetry to reach for on shutdown,
+    and nothing else in the suite would notice: every other test constructs a dedicated engine.
+    """
+    engine = MagicMock()
+    engine.dispose = AsyncMock()
+    broker = _make_broker(engine=engine)
+
+    async def noop(body: dict) -> None: ...
+
+    broker.subscriber("orders")(noop)
+    await broker.stop()
+
+    engine.dispose.assert_not_awaited()
 
 
 async def test_broker_stop_logs_subscriber_failure_and_completes() -> None:
@@ -990,6 +1037,13 @@ async def test_broker_publish_with_timer_id_uses_on_conflict() -> None:
 
 
 async def test_broker_publish_returns_none_on_timer_id_conflict() -> None:
+    """INVARIANT: a ``timer_id`` collision is a silent no-op returning ``None``, and skips NOTIFY.
+
+    The partial unique index constrains only rows still in the outbox, so ``timer_id`` means "at
+    most one *live* row per ``(queue, timer_id)``" -- not a global once-ever idempotency key.
+    Raising on conflict would make the caller handle a race it did not cause; emitting NOTIFY for
+    an insert that did not happen wakes every listener to find nothing.
+    """
     broker = _make_broker()
     # Simulate ON CONFLICT DO NOTHING returning no rows: scalar() → None
     session = _make_session_mock(scalar_return=None)
@@ -1079,6 +1133,14 @@ async def test_broker_cancel_timer_rejects_non_async_session() -> None:
 
 
 async def test_broker_cancel_timer_emits_delete_with_lease_guard() -> None:
+    """INVARIANT: ``cancel_timer`` deletes only unleased rows -- the ``acquired_token IS NULL`` guard.
+
+    Cancelling a row whose handler is already in flight would delete it out from under the worker,
+    and the worker's terminal write would then find nothing: the delivery has happened but no
+    record of it survives. The guard makes an in-flight cancel a no-op returning ``False``, letting
+    the delivery complete normally. Dropping it turns a race that is currently invisible into
+    silent double-processing.
+    """
     broker = _make_broker(engine=MagicMock())
     session = AsyncMock(spec=AsyncSession)
     session.execute.return_value.rowcount = 1
@@ -2104,13 +2166,13 @@ async def test_dispatch_one_outer_except_swallows_consume_failure() -> None:
 
 
 async def test_dispatch_one_preserves_row_when_consume_early_exits_on_shutdown() -> None:
-    """Shutdown race in dispatch_one.
+    """INVARIANT: a row whose ``consume()`` early-exits on shutdown is preserved, not deleted.
 
-    ``SubscriberUsecase.consume()`` returns ``None`` without invoking
-    ``process_message`` when ``running`` is False. Previously ``dispatch_one`` fell
-    into ``assert_state_set → reject() → _safe_flush`` and silently DELETEd the row.
-    The early-return guard preserves the row so its lease expires and another
-    replica reclaims it.
+    ``SubscriberUsecase.consume()`` returns ``None`` without invoking ``process_message`` when
+    ``running`` is False. Without the guard, ``dispatch_one`` falls through to ``assert_state_set ->
+    reject() -> _safe_flush`` and silently DELETEs a row whose handler never ran -- so every rolling
+    deploy leaks rows from busy subscribers. The guard leaves the lease to expire so another replica
+    reclaims it, which is why no metric fires here.
     """
     events, recorder = _events_recorder()
     metadata = MetaData()
@@ -2180,10 +2242,12 @@ async def test_dispatch_one_preserves_row_when_consume_raises() -> None:
 
 
 async def test_dispatch_one_lease_lost_emits_only_lease_lost_not_acked() -> None:
-    """P17: a lease-lost terminal flush emits ``lease_lost`` only — not a false ``acked`` that double-counts.
+    """INVARIANT: a lease-lost terminal flush emits ``lease_lost`` only, never a false ``acked``.
 
-    Before P17 the acked/nacked metric fired before the flush, so a row whose lease was
-    reclaimed (flush rowcount 0 → redelivered) was counted once here and again on redelivery.
+    The metric must follow the write's outcome, not precede it. Emitting the ack before the flush
+    counts a row whose lease was reclaimed (rowcount 0, so it redelivers) once here and again on
+    redelivery, which makes the acked rate silently exceed the delivered rate exactly when lease
+    churn is the thing an operator is trying to see.
     """
     events, recorder = _events_recorder()
     metadata = MetaData()
@@ -2210,10 +2274,12 @@ async def test_dispatch_one_lease_lost_emits_only_lease_lost_not_acked() -> None
 
 
 async def test_worker_inner_swallows_config_error_without_reconnect() -> None:
-    """P18: an _OutboxConfigError in the worker loop is logged and swallowed, not propagated.
+    """INVARIANT: an ``_OutboxConfigError`` in the worker loop is logged and swallowed, never propagated.
 
-    Letting it reach _run_with_reconnect would tear down the writer connection and back
-    off (throttling unrelated rows). The worker must continue; the row's lease expires.
+    It is a static misconfiguration of the publisher chain, not a transport fault. Letting it reach
+    ``_run_with_reconnect`` would tear down the writer connection and back off the whole loop --
+    throttling every unrelated row on the subscriber because one handler is wired wrong. The row it
+    came from is left to lease expiry, so no nack is ever flushed against the retry strategy.
     """
     fake = FakeOutboxClient()
     broker, test_broker = _make_broker_for_dispatch(fake)
@@ -2384,11 +2450,12 @@ async def test_flush_buffer_db_error_task_dones_each_row_and_reraises() -> None:
 
 
 async def test_flush_buffer_emits_lease_lost_for_ids_absent_from_returning_set() -> None:
-    """The batched delete's RETURNING set is the per-row lease check: id present -> acked, absent -> lease_lost.
+    """INVARIANT: the batched delete's RETURNING set is the per-row lease check -- present acks, absent is lease_lost.
 
-    A row reclaimed mid-handler is absent from ``delete_batch_with_lease``'s returned set, so it
-    must emit ``lease_lost(phase=terminal)`` -- not a false ``acked`` -- while the rows that
-    landed emit their intended metric. This is the lease-token invariant at batch granularity.
+    This is the lease-token invariant at batch granularity. A row reclaimed mid-handler is absent
+    from ``delete_batch_with_lease``'s returned set; treating the batch as all-or-nothing, or
+    assuming every buffered row deleted, would emit a false ``acked`` for a row that is about to be
+    redelivered by its new holder.
     """
     events, recorder = _events_recorder()
 
@@ -2599,7 +2666,13 @@ async def test_worker_loop_opens_writer_conn_once_when_engine_available() -> Non
 
 
 async def test_open_worker_resources_sets_autocommit() -> None:
-    """``_open_worker_resources`` configures the writer conn as AUTOCOMMIT before yielding."""
+    """INVARIANT: the per-worker writer connection is AUTOCOMMIT.
+
+    Terminal writes are single statements whose correctness comes from the ``WHERE acquired_token =
+    ...`` filter, not from transaction wrapping. Restoring an explicit BEGIN/COMMIT around them --
+    the reflexive fix when a write path looks unguarded -- adds two round-trips per row to the
+    hottest path in the subscriber and buys nothing the lease token does not already provide.
+    """
     fake = FakeOutboxClient()
     broker, test_broker = _make_broker_for_dispatch(fake)
     fake_engine = MagicMock()
@@ -3099,6 +3172,13 @@ def test_subscriber_rejects_non_positive_lease_ttl() -> None:
 def test_subscriber_rejects_ack_first() -> None:
     # ACK_FIRST has no legitimate outbox use — deletes before the handler runs, so a
     # handler crash silently drops the row. Better to refuse than warn-and-ship.
+    """INVARIANT: ``AckPolicy.ACK_FIRST`` is refused at registration, not warned about.
+
+    ACK_FIRST deletes the row before the handler runs, so a handler crash drops the message
+    silently -- the exact failure the outbox pattern exists to prevent. It has no legitimate outbox
+    use, and a warning would let a misconfigured deployment ship and lose messages under load
+    rather than fail at startup.
+    """
     broker = _make_broker()
     with pytest.raises(ValueError, match="ACK_FIRST is not supported"):
         _register_subscriber(broker, ack_policy=AckPolicy.ACK_FIRST)
@@ -3573,13 +3653,13 @@ async def test_delete_with_lease_raises_when_dlq_payload_but_no_dlq_table() -> N
 
 
 async def test_fetch_cte_carries_partial_index_predicates_as_conjuncts() -> None:
-    """T6: each OR arm of the fetch WHERE must carry its partial-index predicate as a conjunct.
+    """INVARIANT: each OR arm of the fetch WHERE carries its partial-index predicate as a conjunct.
 
-    Branch A is ``acquired_token IS NULL``; Branch B is ``acquired_token IS NOT NULL AND
-    acquired_at < cutoff``. The naive single-OR form (``acquired_at < cutoff`` without the
-    ``IS NOT NULL`` conjunct) returns the same rows — the fake/real parity test can't tell
-    them apart — but defeats Postgres' partial-index inference. This compiles the real
-    statement and pins the shape.
+    Branch A is ``acquired_token IS NULL``; Branch B is ``acquired_token IS NOT NULL AND acquired_at
+    < cutoff``. The naive single-OR form (``acquired_at < cutoff`` without the ``IS NOT NULL``
+    conjunct) returns the same rows -- the fake/real parity suite cannot tell them apart -- but
+    Postgres only uses a partial index when the query implies the index's own WHERE clause, so the
+    naive form silently seq-scans. This compiles the real statement and pins the shape.
     """
     engine = create_async_engine("postgresql+asyncpg://u:p@localhost/db")
     try:
@@ -3684,6 +3764,14 @@ async def test_terminal_failure_reason_unset_when_retry_scheduled() -> None:
 
 
 async def test_terminal_failure_reason_set_on_reject() -> None:
+    """INVARIANT: a manual ``reject()`` records ``Terminal("rejected")`` with no exception involved.
+
+    ``Outcome`` variants are disjoint and ``dispatch_one`` matches on the variant, so the terminal
+    arms carry no ordering dependence on ``last_exception``. Deriving the reason from the exception
+    instead -- the obvious simplification, since two of the three terminal paths have one -- would
+    misclassify a deliberate reject as a handler failure, and ``rejected`` is part of the public
+    ``DLQFailureReason`` contract operators query on.
+    """
     msg = _make_msg()
     await msg.reject()
     assert msg.terminal_failure_reason == "rejected"
@@ -3755,7 +3843,13 @@ async def test_flush_terminal_no_dlq_payload_on_ack_path() -> None:
 
 
 async def test_flush_terminal_no_dlq_payload_when_dlq_unconfigured() -> None:
-    """Broker without ``dlq_table`` never builds dlq_payload, even on terminal failure."""
+    """INVARIANT: with no ``dlq_table``, no terminal path ever builds a DLQ payload.
+
+    The DLQ is opt-in, and "opt-in" here means every existing code path stays identical when it is
+    off -- not that the archive write is skipped at the last moment. A payload assembled
+    unconditionally and discarded downstream would put the exception ``repr`` (payloads, PII,
+    credentials) on the terminal path of every deployment that never asked for a DLQ.
+    """
     fake = FakeOutboxClient()
     broker, test_broker = _make_broker_for_dispatch(fake)
     msg = _make_msg(id=9, queue="orders", deliveries_count=3)
@@ -3953,7 +4047,13 @@ async def test_metrics_reject_on_error_terminal_emits_reason_rejected() -> None:
 
 
 def test_default_retry_strategy_pins_documented_parameters() -> None:
-    """The opt-out default must stay exactly as documented (CLAUDE.md / operations/checklist.md)."""
+    """INVARIANT: the default retry strategy is ``ExponentialRetry``, exactly as documented.
+
+    "Delete on first error" is the wrong default for an outbox -- it converts a transient broker
+    blip into permanent message loss -- so opting out is explicit (``NoRetry()``). These five
+    parameters are published in ``docs/operations/checklist.md`` and operators size alerts against
+    them, so drifting any of them silently changes every deployment that never set one.
+    """
     strategy = _default_retry_strategy()
     assert isinstance(strategy, ExponentialRetry)
     assert strategy.initial_delay_seconds == 1.0
@@ -3964,15 +4064,13 @@ def test_default_retry_strategy_pins_documented_parameters() -> None:
 
 
 async def test_dlq_cte_insert_columns_match_make_dlq_table() -> None:
-    """Guard the hardcoded DLQ INSERT column list against drift from ``make_dlq_table``.
+    """INVARIANT: the DLQ CTE's INSERT column list matches ``make_dlq_table`` minus ``id`` and ``failed_at``.
 
-    ``_build_dlq_cte_stmt`` hardcodes the DLQ column list as an f-string with nothing
-    linking it to the table definition (audit 2026-06-14). A future NOT-NULL-without-
-    default column added to ``make_dlq_table`` would make every terminal DLQ write fail
-    (poison rows that retry forever); a nullable one would silently drop audit data. Pin
-    the two together: the CTE's INSERT columns must equal the DLQ table's columns minus
-    the autoincrement ``id`` and the server-default ``failed_at`` (the two the CTE omits
-    on purpose).
+    ``_build_dlq_cte_stmt`` renders the column list as an f-string with nothing linking it to the
+    table definition. A NOT-NULL-without-default column added to ``make_dlq_table`` would make every
+    terminal DLQ write fail -- poison rows that retry forever -- and a nullable one would silently
+    drop audit data. The two omitted columns are deliberate: ``id`` autoincrements and ``failed_at``
+    rides its server default.
     """
     metadata = MetaData()
     outbox = make_outbox_table(metadata, table_name="outbox")
