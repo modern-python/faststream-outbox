@@ -53,6 +53,7 @@ try:
         type[BrokerUsecase[typing.Any, typing.Any]],
         type[TestBroker[typing.Any, typing.Any]],
     ]:
+        # BrokerUsecase is invariant on its config type, so OutboxBrokerConfig won't unify with BrokerConfig.
         return {**original_get_broker_registry(), OutboxBroker: TestOutboxBroker}  # ty: ignore[invalid-return-type]
 
     faststream.asgi.factories.asyncapi.try_it_out._get_broker_registry = get_broker_registry  # noqa: SLF001

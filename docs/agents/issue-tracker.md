@@ -34,27 +34,13 @@ Create a GitHub issue.
 
 Run `gh issue view <number> --comments`.
 
-## Rejected work: read and write `planning/decisions/`, not `.out-of-scope/`
+## Rejected work: read and write `docs/adr/`, not `.out-of-scope/`
 
-Where a skill says `.out-of-scope/`, this repo means [`planning/decisions/`](../../planning/decisions).
-A design call taken without a code change — especially a **rejected** option with a load-bearing
-reason — is recorded there, and the prior-rejection check during triage reads that directory. Do not
-create `.out-of-scope/`: this repo keeps one home for a rejected alternative, and a second one would
-split the corpus that the check depends on.
-
-The shape is fixed and validated, so write it from
-[`planning/_templates/decision.md`](../../planning/_templates/decision.md) rather than freehand:
-
-- Filename `YYYY-MM-DD-<slug>.md`.
-- Frontmatter: `status` (`accepted` | `superseded`), a one-line `summary` (this is what `just index`
-  prints), `supersedes`, `superseded_by`.
-- Body: `**Decision:**` one-liner, `## Context`, `## Decision & rationale`, and a
-  **`## Revisit trigger`** — the concrete signal that should reopen the call. The trigger is the
-  point of the record; without it a future review re-litigates the decision.
-
-`just check-planning` gates frontmatter and structure; CI runs it. Run it before opening the PR.
-
-Work that is real but **not scheduled** stays a GitHub issue, not a decision record.
+Where a skill says `.out-of-scope/`, this repo means `docs/adr/`. A rejected enhancement is recorded
+there as a decision record (`NNNN-slug.md`, sequential), and the
+prior-rejection check during triage reads that directory. Do not create `.out-of-scope/`: this repo
+keeps one home for a rejected alternative, and a second one would split the corpus that the check
+depends on.
 
 ## Wayfinding operations
 

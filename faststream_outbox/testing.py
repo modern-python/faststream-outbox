@@ -568,6 +568,7 @@ def _build_fake_publish_batch(
     return fake_publish_batch
 
 
+# BrokerUsecase is invariant on its config type, so OutboxBrokerConfig won't unify with BrokerConfig.
 class TestOutboxBroker(TestBroker[OutboxBroker, OutboxBroker]):  # ty: ignore[invalid-type-arguments]
     """Test harness for ``OutboxBroker``. Two dispatch modes.
 
@@ -681,6 +682,7 @@ class TestOutboxBroker(TestBroker[OutboxBroker, OutboxBroker]):  # ty: ignore[in
         # Skip the parent's publisher iteration — see ``create_publisher_fake_subscriber``
         # for why. We still need to fan out ``_post_start`` on subscribers so their
         # call models build (matches what TestBroker._fake_start does last).
+        # BrokerUsecase is invariant on its config type; this only iterates broker.subscribers.
         patch_broker_calls(broker)  # ty: ignore[invalid-argument-type]
         for subscriber in broker.subscribers:
             subscriber._post_start()  # noqa: SLF001

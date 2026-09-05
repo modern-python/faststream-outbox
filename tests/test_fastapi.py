@@ -92,7 +92,13 @@ def test_subscriber_misconfig_warning_attributed_to_user_via_fastapi_router() ->
 
 
 async def test_subscriber_receives_fastapi_depends_session() -> None:
-    """B-load-bearing: ``Depends(get_session)`` resolves inside an outbox subscriber handler."""
+    """INVARIANT: a ``Depends`` inside an outbox handler resolves the same session an HTTP route would.
+
+    The bridge is what makes ``OutboxResponse(session=...)`` commit the follow-on row together with
+    the handler's domain writes; without it the handler would get a session from a different scope
+    and the chained row would commit independently. This is the whole reason ``OutboxRouter``
+    subclasses ``StreamRouter`` rather than wiring the broker into the lifespan by hand.
+    """
     t = _make_outbox_table()
     router = OutboxRouter(outbox_table=t)
 

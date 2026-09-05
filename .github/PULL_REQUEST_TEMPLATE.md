@@ -1,0 +1,48 @@
+<!--
+This body IS the spec for the change. It is reviewed alongside the diff and is
+the permanent record of why — there is no change file to write.
+
+Trivial PR (typo, dep bump, formatter, CI tweak, mechanical rename)? Delete this
+whole template and ship a conventional-commit title.
+-->
+
+## Why
+
+The problem or need. What is wrong, missing, or costly today — not what you did
+about it.
+
+## Design
+
+The approach, and the trade-off it takes. Show a sketch if the design needs code;
+never the full diff-to-be. Most PRs fit well under ~700 words — length must buy
+information.
+
+## Non-goals
+
+What this deliberately does **not** do, and why. This is the scope boundary that
+stops "why didn't you also fix X" in review and six months from now.
+
+## Verification
+
+How you know it works: the tests added, `just test` (the dockerized suite against
+Postgres 17, 100% line coverage — the gate), `just lint-ci`, and `just bench-check`
+with the numbers if the change claims a performance effect. State the numbers, not
+"benchmarked".
+
+---
+
+### Before merging
+
+- [ ] **Behaviour changed?** If a wrong change here could pass silently, pin it with
+      a test whose name is the claim and whose docstring opens `INVARIANT:` and says
+      what breaks it. Do **not** write prose about mechanism — there is no page for
+      it. See the "Where a fact goes" section of [`CLAUDE.md`](../CLAUDE.md).
+- [ ] **Adding a fact anywhere?** Run the admission check: derivable from
+      `faststream_outbox/` → don't write it; enforceable → a test; a user needs it →
+      `docs/`; otherwise it does not get written.
+- [ ] **Rejected an alternative** with reasoning that would otherwise be
+      re-litigated? File it as an ADR in [`docs/adr/`](../docs/adr/), numbered
+      `NNNN-slug.md` — not here.
+- [ ] **Found real work you are not doing now?** Open a GitHub issue,
+      self-contained enough to pick up cold — not here.
+- [ ] `just lint-ci` and `just test` pass.

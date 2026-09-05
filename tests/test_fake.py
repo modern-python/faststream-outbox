@@ -89,7 +89,13 @@ def test_fake_outbox_producer_satisfies_producer_proto() -> None:
 
 
 async def test_fake_broker_publish_triggers_handler() -> None:
-    """``broker.publish`` synchronously dispatches the handler, FastStream-test-broker style."""
+    """INVARIANT: in sync mode the handler runs before ``publish`` returns.
+
+    This is what makes the test broker usable without background tasks, matching the
+    ``TestKafkaBroker`` / ``TestRabbitBroker`` idiom. Routing sync mode through its own simplified
+    path rather than the real ``dispatch_one`` would let handler-side behaviour -- ack policy,
+    retry, terminal routing -- diverge from production while every test still passed.
+    """
     broker = _make_broker()
     received: list[dict] = []
 
@@ -1027,7 +1033,13 @@ async def test_loop_mode_cancels_loop_tasks_on_context_exit() -> None:
 
 
 async def test_drain_finishes_inflight_rows_before_returning_in_fake_mode() -> None:
-    """T8: sub.stop() drains in-flight rows to completion (the two-flag drain) without Postgres."""
+    """INVARIANT: ``stop()`` waits for in-flight rows to reach a terminal write before returning.
+
+    ``running`` therefore stays True for the whole drain -- flipping it first would make
+    ``consume()`` early-exit on every queued row and the drain would do nothing while appearing to
+    succeed. ``_inflight.join()`` is the barrier, which is also why a buffered terminal delete
+    defers its ``task_done()`` to the flush rather than to dispatch.
+    """
     fetched_total = 0
 
     def recorder(event: str, fields: Mapping[str, typing.Any]) -> None:
@@ -1059,7 +1071,13 @@ async def test_drain_finishes_inflight_rows_before_returning_in_fake_mode() -> N
 
 
 async def test_broker_stop_cancels_wedged_handler_within_graceful_timeout_in_fake_mode() -> None:
-    """T8: a wedged handler is cancelled within graceful_timeout (no 2x wait), row preserved — off-Postgres."""
+    """INVARIANT: a wedged handler cannot extend ``stop()`` beyond ``graceful_timeout``.
+
+    The subscriber skips ``super().stop()`` for this reason: its ``MultiLock.wait_release`` would
+    re-wait the same stuck handlers for a second full budget, doubling shutdown on exactly the path
+    where the budget matters. Restoring the ``super()`` call looks like correct cleanup and
+    regresses rolling deploys past the pod's termination grace period.
+    """
     metadata = MetaData()
     t = make_outbox_table(metadata)
     graceful_timeout = 1.0  # larger TTL -> load jitter is small relative to the 1x/2x gap
@@ -1090,7 +1108,12 @@ async def test_broker_stop_cancels_wedged_handler_within_graceful_timeout_in_fak
 
 
 async def test_drain_timeout_emits_warning_and_metric_in_fake_mode() -> None:
-    """F1-04: a drain that times out on a wedged handler surfaces a WARNING + drain_timeout metric."""
+    """INVARIANT: a timed-out drain is observable -- a WARNING plus a ``drain_timeout`` metric.
+
+    Abandoned in-flight rows are left to lease-expiry retry, which is correct but indistinguishable
+    from a clean shutdown in the logs. Without the signal an operator cannot tell a deploy that
+    drained from one that gave up, and the redelivery spike that follows has no attributable cause.
+    """
     events: list[str] = []
 
     def recorder(event: str, fields: Mapping[str, typing.Any]) -> None:
@@ -1526,12 +1549,13 @@ async def test_handler_returning_outbox_response_publishes_followup_row() -> Non
 
 
 async def test_propagate_inbound_headers_does_not_poison_cross_content_type_outbox_relay() -> None:
-    """propagate_inbound_headers must not copy content-type onto a chained OutboxResponse.
+    """INVARIANT: envelope-managed headers are stripped when propagating into a chained ``OutboxResponse``.
 
-    Regression for audit F5-01: a ``str`` inbound body (content-type ``text/plain``)
-    had its content-type copied onto an OutboxResponse carrying a ``dict``
-    (``application/json``); the two collided in ``_encode_payload`` and the
-    successful inbound row was nacked to retry-exhaustion instead of delivering.
+    That response re-encodes through ``_encode_payload``, which re-derives ``content-type`` from the
+    new body and reads ``correlation_id`` from its own field. Forwarding the inbound row's values
+    makes the encode raise on any cross-content-type relay -- nacking a **successful** inbound row
+    to retry exhaustion. Foreign-broker relays do not re-encode, so they must keep forwarding these
+    headers verbatim; the strip is specific to the outbox-to-outbox case.
     """
     broker = _make_broker()
     next_received: list[dict] = []
