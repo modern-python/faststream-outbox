@@ -7,7 +7,7 @@
 
 </div>
 
-`faststream-outbox` is a [FastStream](https://faststream.airt.ai) broker
+`faststream-outbox` is a [FastStream](https://faststream.ag2.ai) broker
 integration for the **transactional outbox pattern** — a Postgres table is
 the message queue. A producer writes a domain entity and an outbox row in
 the *same* SQLAlchemy transaction; a subscriber polls the table with

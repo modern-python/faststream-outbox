@@ -51,7 +51,7 @@ OUTBOX_TABLE = make_outbox_table(Base.metadata, table_name="outbox")
 ```
 
 The broker and routers are wired with a real DI container
-([modern-di](https://modern-di.readthedocs.io/) here, but any container works):
+([modern-di](https://modern-di.modern-python.org/) here, but any container works):
 
 ```python title="ioc.py"
 from modern_di import Group, Scope, providers
