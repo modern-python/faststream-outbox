@@ -4,13 +4,10 @@ repo_url: https://github.com/modern-python/faststream-outbox
 docs_dir: docs
 edit_uri: edit/main/docs/
 
-# Agent-facing docs are read from the repo, never published. Keeps `mkdocs --strict` from
-# failing them as orphaned pages.
+# Agent-facing docs and the ADRs are read from the repo, never published. Keeps
+# `mkdocs --strict` from failing them as orphaned pages.
 exclude_docs: |
   /agents/
-
-# ADRs are built (so their outgoing links are validated) but stay out of the site menu.
-not_in_nav: |
   /adr/
 
 nav:
