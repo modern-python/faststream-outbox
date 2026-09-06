@@ -22,7 +22,7 @@ from a shared helper, so neither adapter can pass trivially against itself.
 
 The one drift this cannot catch: an in-process test can't manufacture cross-host
 DB-vs-worker clock skew, so the real client's server-side ``make_interval`` clock
-authority stays a documented invariant (CLAUDE.md), not an assertion here.
+authority stays a documented invariant (AGENTS.md), not an assertion here.
 """
 
 import datetime as _dt
