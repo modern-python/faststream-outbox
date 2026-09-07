@@ -58,7 +58,7 @@ a sibling test may be the one that trips. `tests/test_invariant_census.py` enfor
   catches them; if `# noqa: PLC0415` looks like the fix, hoist the import instead.
 - Docstrings: public API documents the contract; internal helpers get a one-line contract, plus at
   most 1–2 lines for a genuinely non-obvious constraint. Never narrate implementation or justify
-  code to a reviewer — cross-file rationale lives in an `INVARIANT:` test docstring or an ADR.
+  code to a reviewer — cross-file rationale lives in an `INVARIANT:` test docstring.
 - Lint suppressions are intentional and carry their reason at the site. The recurring cluster is
   everything downstream of `BrokerUsecase`'s invariance on its config type.
 
