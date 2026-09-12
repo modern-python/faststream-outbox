@@ -103,7 +103,7 @@ max-args = 15
 "faststream_outbox/message.py" = ["G004"]
 
 [tool.pytest.ini_options]
-addopts = "--cov=. --cov-report term-missing --cov-fail-under=100"
+addopts = ""
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
@@ -118,4 +118,5 @@ Changelog = "https://github.com/modern-python/faststream-outbox/releases"
 omit = ["benchmarks/*"]
 
 [tool.coverage.report]
+fail_under = 100
 exclude_also = ["if typing.TYPE_CHECKING:"]
