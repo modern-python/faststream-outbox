@@ -69,6 +69,7 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v6
+      - uses: extractions/setup-just@v4
       - uses: astral-sh/setup-uv@v8.2.0
         with:
           enable-cache: true
