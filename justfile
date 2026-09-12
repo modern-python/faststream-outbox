@@ -9,6 +9,12 @@ sh:
 test *args: down && down
     docker compose run application uv run pytest {{ args }}
 
+test-ci:
+    uv run --no-sync pytest --cov=. --cov-report term-missing --cov-report xml
+
+test-branch:
+    @just test --cov=. --cov-branch
+
 build:
     docker compose build application
 
