@@ -11,7 +11,7 @@ the vocabulary — read it before naming a concept in code, a test name, or an i
 ## Commands
 
 `just` (task runner) and `uv` (package manager). The [`justfile`](justfile) is the source of truth —
-`just --list`, or read it; every recipe carries its intent as a comment. The things it does not say:
+`just --list`, or read it. Every recipe carries its intent as a comment. The things it does not say:
 
 - `just test [args]` forwards args **unquoted**, so a spaced `-k` expression word-splits and fails.
   Run one keyword per invocation, or a substring matching all targets.
@@ -46,15 +46,12 @@ real fetch and worker loops against the fake, which retry, lease-expiry, and sch
 
 ## Workflow
 
-Real work **not scheduled** becomes a GitHub issue.
-
 Every link in `README.md` must be absolute: `https://github.com/modern-python/<repo>/blob/main/<path>`,
 or `.../tree/main/<path>` for a directory. Never a relative path: `README.md` is also the PyPI long
 description, and PyPI does not rewrite relative links, so a relative one 404s on the package page.
 
-An invariant is a test whose name is the claim, with a docstring opening `INVARIANT:` and a second
-paragraph naming **what breaks it** — design rationale, not a report of what this one test catches;
-a sibling test may be the one that trips. `tests/test_invariant_census.py` enforces that shape.
+`tests/test_invariant_census.py` checks every invariant test's docstring for a second paragraph naming
+what breaks it.
 
 ## Code Style
 
@@ -62,7 +59,7 @@ a sibling test may be the one that trips. `tests/test_invariant_census.py` enfor
   catches them; if `# noqa: PLC0415` looks like the fix, hoist the import instead.
 - Docstrings: public API documents the contract; internal helpers get a one-line contract, plus at
   most 1–2 lines for a genuinely non-obvious constraint. Never narrate implementation or justify
-  code to a reviewer — cross-file rationale lives in an `INVARIANT:` test docstring.
+  code to a reviewer — cross-file rationale lives in an invariant test's docstring.
 - Lint suppressions are intentional and carry their reason at the site. The recurring cluster is
   everything downstream of `BrokerUsecase`'s invariance on its config type.
 
