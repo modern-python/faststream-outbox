@@ -187,7 +187,7 @@ class OutboxBroker(
             tags=tags,
             security=None,
         )
-        super().__init__(config=broker_config, specification=specification, routers=routers)  # ty: ignore[unknown-argument]
+        super().__init__(config=broker_config, specification=specification, routers=routers)
         # Track which foreign-broker config ids we've already warned about so
         # repeated start() calls (e.g. the test harness calls start() twice) each
         # only emit the warning once.

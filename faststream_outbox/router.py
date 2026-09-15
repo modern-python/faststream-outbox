@@ -96,6 +96,6 @@ class OutboxRouter(OutboxRegistrator, BrokerRouter[OutboxInnerMessage, OutboxBro
                 broker_decoder=decoder,
                 include_in_schema=include_in_schema,
             ),
-            handlers=handlers,  # ty: ignore[unknown-argument]
+            handlers=handlers,
             routers=routers,
         )
