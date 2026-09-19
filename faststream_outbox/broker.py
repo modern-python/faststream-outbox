@@ -94,6 +94,13 @@ class _CaptureExceptionMiddleware(BaseMiddleware):
 
 
 class OutboxParamsStorage(DefaultLoggerStorage):
+    def __init__(self) -> None:
+        super().__init__()
+        self._max_queue_len = 7
+
+    def register_subscriber(self, params: dict[str, typing.Any]) -> None:
+        self._max_queue_len = max(self._max_queue_len, len(params.get("queue", "")))
+
     def get_logger(self, *, context: "ContextRepo") -> LoggerProto:
         if logger := self._get_logger_ref():
             return logger
@@ -101,7 +108,7 @@ class OutboxParamsStorage(DefaultLoggerStorage):
             name="outbox",
             default_context={"queue": "", "message_id": ""},
             message_id_ln=-1,
-            fmt="%(asctime)s %(levelname)-8s - %(queue)-7s | %(message_id)s - %(message)s",
+            fmt=f"%(asctime)s %(levelname)-8s - %(queue)-{self._max_queue_len}s | %(message_id)s - %(message)s",
             context=context,
             log_level=self.logger_log_level,
         )
