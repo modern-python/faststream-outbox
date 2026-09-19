@@ -1,42 +1,38 @@
 # Domain Docs
 
-How the engineering skills should consume this repo's domain documentation when exploring the
-codebase. This repo is **single-context**: one package, one domain.
+How the engineering skills should consume this repo's domain documentation when exploring the codebase.
 
 ## Before exploring, read these
 
-- **`CONTEXT.md`** at the repo root: the domain glossary.
-- **`docs/adr/`**: read the decision records that touch the area you're about to work in.
+- **`CONTEXT.md`** at the repo root.
+- **`docs/adr/`**: read ADRs that touch the area you're about to work in.
 
-If any of these files don't exist, **proceed silently**. Don't flag their absence; don't suggest
-creating them upfront. The `/domain-modeling` skill creates them lazily when terms or decisions
-actually get resolved.
+If any of these files don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. The `/domain-modeling` skill (reached via `/grill-with-docs` and `/improve-codebase-architecture`) creates them lazily when terms or decisions actually get resolved.
 
 ## File structure
+
+Single-context repo:
 
 ```
 /
 ├── CONTEXT.md
 ├── docs/adr/
-│   ├── 0001-….md
-│   └── 0002-….md
-├── faststream_outbox/
-└── tests/
+│   ├── 0001-metrics-recorders-not-unified.md
+│   └── 0002-free-threading-is-compat-only.md
+└── faststream_outbox/
 ```
-
-There is no `CONTEXT-MAP.md` and no per-package `CONTEXT.md`: one package, one context. There is no
-`architecture/` and no `planning/` — mechanism lives in the code and its `INVARIANT:`-marked tests,
-and the spec for a change is its PR body.
 
 ## Use the glossary's vocabulary
 
-When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a
-test name), use the term as defined in `CONTEXT.md`. Don't drift to synonyms the glossary explicitly
-avoids: a row is *leased*, not locked; a handler produces an *outcome*, not a status; `queue` is a
-column value, not a topic.
+When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as defined in `CONTEXT.md`. Don't drift to synonyms the glossary explicitly avoids.
 
-If the concept you need isn't in the glossary yet, that's a signal: either you're inventing language
-the project doesn't use (reconsider) or there's a real gap (note it for `/domain-modeling`).
+If the concept you need isn't in the glossary yet, that's a signal: either you're inventing language the project doesn't use (reconsider) or there's a real gap (note it for `/domain-modeling`).
+
+## Flag ADR conflicts
+
+If your output contradicts an existing ADR, surface it explicitly rather than silently overriding:
+
+> _Contradicts ADR-0001 (metrics recorders not unified), but worth reopening because…_
 
 ## Link style inside `docs/`
 
@@ -51,13 +47,3 @@ the same files are read on GitHub. Two rules keep a link working in both renderi
 - **Never link from a built page inside `docs/` to a path outside it.** It cannot resolve in both
   renderings: MkDocs emits `links.not_found` and ships the link verbatim, so it 404s on the site.
   Cite `faststream_outbox/…`, `tests/…`, and root files as inline code, never as links.
-
-## Flag ADR conflicts
-
-If your output contradicts an existing decision record, surface it explicitly rather than silently
-overriding:
-
-> _Contradicts ADR-NNNN (its title), but worth reopening because…_
-
-The record holds the reasoning that settled it. Make the case against that reasoning, not against
-the decision.
