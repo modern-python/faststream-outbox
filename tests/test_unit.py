@@ -1615,7 +1615,7 @@ def test_outbox_params_storage_widens_the_queue_column_for_registered_subscriber
     storage.get_logger(context=MagicMock())
     formatter = logging.getLogger("faststream.access.outbox").handlers[0].formatter
     assert formatter is not None
-    assert "%(queue)-15s" in formatter._fmt  # noqa: SLF001
+    assert "%(queue)-15s" in (formatter._fmt or "")  # noqa: SLF001
 
 
 # --- configs ---
