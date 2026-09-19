@@ -1608,6 +1608,16 @@ def test_outbox_params_storage_caches_logger() -> None:
     assert a is b
 
 
+def test_outbox_params_storage_widens_the_queue_column_for_registered_subscribers() -> None:
+    logging.getLogger("faststream.access.outbox").handlers.clear()
+    storage = OutboxParamsStorage()
+    storage.register_subscriber({"queue": "orders-priority"})
+    storage.get_logger(context=MagicMock())
+    formatter = logging.getLogger("faststream.access.outbox").handlers[0].formatter
+    assert formatter is not None
+    assert "%(queue)-15s" in (formatter._fmt or "")  # noqa: SLF001
+
+
 # --- configs ---
 
 
