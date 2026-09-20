@@ -18,7 +18,9 @@ _Avoid_: job, task, event
 **Queue**:
 The `queue` column value a subscriber filters on. Not a separate object; there is nothing to declare
 or create.
-_Avoid_: topic, channel (reserve *channel* for the `outbox_<table>` LISTEN/NOTIFY channel)
+_Avoid_: topic, channel (reserve *channel* for the `outbox_<table>` LISTEN/NOTIFY channel).
+One exception, upstream's and not ours: `channel_labels` and the AsyncAPI document it feeds
+call a queue a channel. Say *AsyncAPI channel* there.
 
 **Lease**:
 A time-bounded claim on a row, held as the `(acquired_token, acquired_at)` pair. It expires on its

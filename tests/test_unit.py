@@ -1731,7 +1731,14 @@ def test_outbox_route_constructs() -> None:
     assert route is not None
 
 
-def test_subscriber_specification_name_lists_queues() -> None:
+async def test_subscriber_specification_emits_one_channel_per_queue() -> None:
+    """INVARIANT: a multi-queue subscriber emits one channel per queue, each addressed by that queue.
+
+    Folding them back into a single channel keyed by the joined queue list forces a synthetic
+    address: ``"orders,shipments"`` names nothing a consumer can subscribe to, and AsyncAPI offers
+    no way to read one address as several. The joined form predates ``SubscriberSpec.address``,
+    when the channel key was the only queue information the document carried.
+    """
     metadata = MetaData()
     t = make_outbox_table(metadata)
     broker = OutboxBroker(outbox_table=t)
@@ -1739,10 +1746,30 @@ def test_subscriber_specification_name_lists_queues() -> None:
     @broker.subscriber(["orders", "shipments"])
     async def handle(body: str) -> None: ...
 
-    sub = next(iter(broker._subscribers))  # noqa: SLF001
-    name = sub.specification.name
-    assert "orders" in name
-    assert "shipments" in name
+    async with TestOutboxBroker(broker):
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        schema = sub.specification.get_schema()
+
+    assert {key: spec.address for key, spec in schema.items()} == {
+        "orders:Handle": "orders",
+        "shipments:Handle": "shipments",
+    }
+
+
+async def test_subscriber_title_names_the_channel_not_only_the_operation() -> None:
+    """``title_`` names the channel as well, matching the publisher and every built-in broker."""
+    metadata = MetaData()
+    t = make_outbox_table(metadata)
+    broker = OutboxBroker(outbox_table=t)
+
+    @broker.subscriber("orders", title_="OrderIngest")
+    async def handle(body: str) -> None: ...
+
+    async with TestOutboxBroker(broker):
+        spec = AsyncAPI(broker).to_specification().to_jsonable()
+
+    assert list(spec["channels"]) == ["OrderIngest"]
+    assert spec["channels"]["OrderIngest"]["address"] == "orders"
 
 
 async def test_subscriber_specification_get_schema() -> None:

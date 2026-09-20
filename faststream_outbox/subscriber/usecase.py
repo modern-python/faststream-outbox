@@ -161,28 +161,34 @@ if typing.TYPE_CHECKING:
 class OutboxSubscriberSpecification(SubscriberSpecification["OutboxBrokerConfig", OutboxSubscriberSpecificationConfig]):
     @property
     def channel_labels(self) -> list[str]:
-        """One channel, keyed by every queue this subscriber drains."""
-        return [",".join(self.config.queues)]
+        """The queues this subscriber drains, one per AsyncAPI channel.
 
-    @property
-    def name(self) -> str:
-        return f"{self.channel_labels[0]}:{self.call_name}"
+        Deduped through a dict rather than a set: set order varies per process and would
+        reach the document as the order of its channels.
+        """
+        return list(dict.fromkeys(self.config.queues))
 
     def get_schema(self) -> dict[str, SubscriberSpec]:
-        return {
-            self.name: SubscriberSpec(
-                address=self.channel_labels[0],
+        payloads = self.get_payloads()
+        labels = self.channel_labels
+        split = len(labels) > 1
+
+        schema = {}
+        for queue in labels:
+            key = self._channel_key(queue, split=split)
+            schema[key] = SubscriberSpec(
+                address=queue,
                 description=self.description,
                 operation=Operation(
                     message=Message(
-                        title=f"{self.name}:Message",
-                        payload=resolve_payloads(self.get_payloads()),
+                        title=f"{key}:Message",
+                        payload=resolve_payloads(payloads),
                     ),
                     bindings=None,
                 ),
                 bindings=None,
             )
-        }
+        return schema
 
 
 class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
