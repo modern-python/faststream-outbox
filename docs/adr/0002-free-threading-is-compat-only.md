@@ -7,8 +7,7 @@ free-threading changes none of its runtime semantics and the guarantee costs a C
 `Free Threading :: 2 - Beta` classifier, and a docs note rather than a source change. Exploiting the
 parallelism was rejected because the two-loop subscriber, the lease-token invariant, and
 drain-on-stop all assume one loop, throughput is dominated by Postgres I/O, and scaling today means
-running more subscriber processes. The guarantee is bounded by SQLAlchemy: its Cython extensions do
-not declare `Py_MOD_GIL_NOT_USED` and re-enable the GIL process-wide on import, so
-`DISABLE_SQLALCHEMY_CEXT_RUNTIME=1` is load-bearing until upstream fixes that
-([#160](https://github.com/modern-python/faststream-outbox/issues/160)). 3.13t is not a target
+running more subscriber processes. The guarantee was bounded by SQLAlchemy until 2.0.54, whose
+cyextensions declare `Py_MOD_GIL_NOT_USED`; below it, importing SQLAlchemy re-enabled the GIL
+process-wide, which is why 2.0.54 is the floor on 3.14. 3.13t is not a target
 because the compiled dependencies ship `cp314t` wheels only.

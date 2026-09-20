@@ -136,10 +136,6 @@ jobs:
 
   freethreaded:
     runs-on: ubuntu-latest
-    env:
-      # SQLAlchemy's cyext ships cp314t wheels but doesn't declare free-thread
-      # safety, so importing it re-enables the GIL; use its pure-Python fallback.
-      DISABLE_SQLALCHEMY_CEXT_RUNTIME: 1
     services:
       postgres:
         image: postgres:17

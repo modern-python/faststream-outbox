@@ -39,17 +39,15 @@ asyncio, so nothing in it depends on the GIL; installing on a `python3.14t`
 interpreter resolves the free-threaded wheels of the compiled dependencies
 (`asyncpg`, `sqlalchemy`, `pydantic-core`) automatically.
 
-!!! note "Keep the GIL disabled: `DISABLE_SQLALCHEMY_CEXT_RUNTIME=1`"
+!!! note "A dependency that has not declared free-thread safety re-enables the GIL"
 
-    SQLAlchemy's Cython extensions ship free-threaded wheels but do not yet
-    declare themselves free-thread-safe, so importing SQLAlchemy re-enables the
-    GIL process-wide. Your outbox code still runs correctly either way, but if
-    you want the GIL to stay disabled — for example because other parts of your
-    process use threads for parallelism — set `DISABLE_SQLALCHEMY_CEXT_RUNTIME=1`
-    (SQLAlchemy's own switch; it falls back to pure-Python implementations). This
-    is what CI runs, and it is what lets the GIL stay off.
+    CPython re-enables the GIL process-wide when it imports an extension module
+    that has not declared itself free-thread-safe. The outbox's own runtime
+    dependencies are clear of this: SQLAlchemy declares safety as of 2.0.54,
+    which is the floor on 3.14 for that reason, and `asyncpg` and
+    `pydantic-core` never had the problem.
 
-    The same caveat applies to any foreign-broker client you install for the
+    It still applies to any foreign-broker client you install for the
     [relay feature](../usage/relay.md): if it hasn't declared free-thread safety
     (for example `aiokafka`), importing it re-enables the GIL. That is the
     client library's limitation, not the outbox's — your outbox code still runs

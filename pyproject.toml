@@ -27,7 +27,12 @@ dependencies = [
     # because 2.0 is fine on 3.11/3.12 and there is no reason to raise the floor for older
     # interpreters.
     "sqlalchemy[asyncio]>=2.0; python_version < '3.13'",
-    "sqlalchemy[asyncio]>=2.0.31; python_version >= '3.13'",
+    "sqlalchemy[asyncio]>=2.0.31; python_version == '3.13'",
+    # 2.0.54 is the first release whose cyextensions declare Py_MOD_GIL_NOT_USED. Below it,
+    # importing SQLAlchemy re-enables the GIL process-wide on a free-threaded interpreter. There is
+    # no marker for a free-threaded build, so ordinary 3.14 carries the same floor for a reason that
+    # only affects 3.14t.
+    "sqlalchemy[asyncio]>=2.0.54; python_version >= '3.14'",
     # Not imported here: faststream pulls pydantic through fast-depends[pydantic], which allows it
     # back to 1.x. FastStream's serializer calls model_dump, so publishing a model raises
     # AttributeError on pydantic 1 — v2 is a real requirement of ours, not a preference. The two
