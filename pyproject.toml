@@ -23,7 +23,14 @@ classifiers = [
 dependencies = [
     "faststream>=0.7.6,<0.8",
     "sqlalchemy[asyncio]>=2.0",
-    "typing-extensions>=4.12.0",
+    # Not imported here: faststream pulls pydantic through fast-depends[pydantic]. Its floor has to
+    # be declared anyway, because pydantic-core ships no cp314 wheel before pydantic 2.12, so the
+    # lowest declared combination has no installable pydantic on 3.14. Marked, because 2.11 is fine
+    # everywhere else and there is no reason to raise the floor for older interpreters.
+    "pydantic>=2.12; python_version >= '3.14'",
+    # 4.12.2, not 4.12.0: pydantic requires >=4.12.2 on 3.13+, and pinning 4.12.0 drags pydantic
+    # back to a build whose pydantic-core has no cp313 wheel either.
+    "typing-extensions>=4.12.2",
 ]
 
 [project.optional-dependencies]
