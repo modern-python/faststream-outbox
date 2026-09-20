@@ -27,7 +27,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-asyncpg = ["asyncpg>=0.29"]
+asyncpg = [
+    # asyncpg declares requires-python >=3.9 throughout but ships no cp313 wheel before 0.30 and
+    # no cp314/cp314t before 0.31, so a resolver picks an sdist that cannot build rather than
+    # reporting a conflict. Marked, because 0.29 is fine on 3.11/3.12 and there is no reason to
+    # raise the floor for older interpreters.
+    "asyncpg>=0.29; python_version < '3.13'",
+    "asyncpg>=0.30; python_version == '3.13'",
+    "asyncpg>=0.31; python_version >= '3.14'",
+]
 validate = ["alembic>=1.13"]
 fastapi = ["fastapi>=0.95"]
 prometheus = ["prometheus-client>=0.19"]
@@ -39,7 +47,9 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "pytest-cov",
-    "asyncpg>=0.29",
+    "asyncpg>=0.29; python_version < '3.13'",
+    "asyncpg>=0.30; python_version == '3.13'",
+    "asyncpg>=0.31; python_version >= '3.14'",
     "alembic>=1.13",
     "fastapi>=0.95",
     "faststream[kafka]>=0.7.6,<0.8",
