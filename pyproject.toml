@@ -23,11 +23,26 @@ classifiers = [
 dependencies = [
     "faststream>=0.7.6,<0.8",
     "sqlalchemy[asyncio]>=2.0",
-    "typing-extensions>=4.12.0",
+    # Not imported here: faststream pulls pydantic through fast-depends[pydantic]. Its floor has to
+    # be declared anyway, because pydantic-core ships no cp314 wheel before pydantic 2.12, so the
+    # lowest declared combination has no installable pydantic on 3.14. Marked, because 2.11 is fine
+    # everywhere else and there is no reason to raise the floor for older interpreters.
+    "pydantic>=2.12; python_version >= '3.14'",
+    # 4.12.2, not 4.12.0: pydantic requires >=4.12.2 on 3.13+, and pinning 4.12.0 drags pydantic
+    # back to a build whose pydantic-core has no cp313 wheel either.
+    "typing-extensions>=4.12.2",
 ]
 
 [project.optional-dependencies]
-asyncpg = ["asyncpg>=0.29"]
+asyncpg = [
+    # asyncpg declares requires-python >=3.9 throughout but ships no cp313 wheel before 0.30 and
+    # no cp314/cp314t before 0.31, so a resolver picks an sdist that cannot build rather than
+    # reporting a conflict. Marked, because 0.29 is fine on 3.11/3.12 and there is no reason to
+    # raise the floor for older interpreters.
+    "asyncpg>=0.29; python_version < '3.13'",
+    "asyncpg>=0.30; python_version == '3.13'",
+    "asyncpg>=0.31; python_version >= '3.14'",
+]
 validate = ["alembic>=1.13"]
 fastapi = ["fastapi>=0.95"]
 prometheus = ["prometheus-client>=0.19"]
@@ -39,7 +54,9 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "pytest-cov",
-    "asyncpg>=0.29",
+    "asyncpg>=0.29; python_version < '3.13'",
+    "asyncpg>=0.30; python_version == '3.13'",
+    "asyncpg>=0.31; python_version >= '3.14'",
     "alembic>=1.13",
     "fastapi>=0.95",
     "faststream[kafka]>=0.7.6,<0.8",
