@@ -134,7 +134,7 @@ class OutboxBroker(
         dlq_table: "Table | None" = None,
         decoder: CustomCallable | None = None,
         parser: CustomCallable | None = None,
-        dependencies: Iterable["Dependant"] = (),
+        dependencies: Sequence["Dependant"] = (),
         middlewares: Sequence[type[BaseMiddleware] | BrokerMiddleware[OutboxInnerMessage]] = (),
         graceful_timeout: float | None = 15.0,
         routers: Sequence[Registrator[OutboxInnerMessage]] = (),

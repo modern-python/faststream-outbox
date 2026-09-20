@@ -1947,8 +1947,10 @@ async def test_relay_dual_fire_guard_through_worker_loop_leaves_row_and_logs(
                 await broker_outbox.publish({"x": 1}, queue="relay_queue", session=session)
             await _wait_until(lambda: bool(errors), timeout=10.0)
 
-    # Guard fired before the chain → the foreign Kafka publish never happened.
-    publisher_kafka.mock.assert_not_called()
+        # Guard fired before the chain → the foreign Kafka publish never happened.
+        # Asserted inside the TestKafkaBroker context: outside it, `.mock` raises SetupError.
+        publisher_kafka.mock.assert_not_called()
+
     # Row left in place (lease held, not deleted) for lease-expiry retry.
     assert await _row_count(pg_engine, outbox_table) == 1, "config-error row must be left for lease-expiry, not deleted"
     # And the _OutboxConfigError was logged at ERROR by the worker loop.

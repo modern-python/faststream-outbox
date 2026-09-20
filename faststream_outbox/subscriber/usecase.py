@@ -160,13 +160,18 @@ if typing.TYPE_CHECKING:
 
 class OutboxSubscriberSpecification(SubscriberSpecification["OutboxBrokerConfig", OutboxSubscriberSpecificationConfig]):
     @property
+    def channel_labels(self) -> list[str]:
+        """One channel, keyed by every queue this subscriber drains."""
+        return [",".join(self.config.queues)]
+
+    @property
     def name(self) -> str:
-        joined = ",".join(self.config.queues)
-        return f"{joined}:{self.call_name}"
+        return f"{self.channel_labels[0]}:{self.call_name}"
 
     def get_schema(self) -> dict[str, SubscriberSpec]:
         return {
             self.name: SubscriberSpec(
+                address=self.channel_labels[0],
                 description=self.description,
                 operation=Operation(
                     message=Message(
@@ -923,13 +928,12 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         raise NotImplementedError(_UNSUPPORTED_PEEK_MSG)
 
     @override
-    async def __aiter__(self) -> AsyncIterator["StreamMessage[OutboxInnerMessage]"]:
+    def __aiter__(self) -> AsyncIterator["StreamMessage[OutboxInnerMessage]"]:
         # Native FakeStream subscribers (e.g. redis ListSubscriber.__aiter__) implement
         # this against a blocking pop; for the outbox, a true peek would acquire a lease
         # and bump deliveries_count — surprising semantics for a "look but don't touch"
         # API. Route operators at ``broker.fetch_unprocessed`` instead, which is
-        # lease-free and doesn't mutate row state. Matches the base's no-yield shape so
-        # the override stays a coroutine returning AsyncIterator (not an async generator).
+        # lease-free and doesn't mutate row state.
         raise NotImplementedError(_UNSUPPORTED_PEEK_MSG)
 
     @override

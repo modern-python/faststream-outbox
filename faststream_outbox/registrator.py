@@ -1,5 +1,5 @@
 import warnings
-from collections.abc import Iterable
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from faststream._internal.broker.registrator import Registrator
@@ -54,7 +54,7 @@ class OutboxRegistrator(Registrator[OutboxInnerMessage, "OutboxBrokerConfig"]): 
         terminal_flush_batch_size: int = 1,
         ack_policy: AckPolicy | None = None,
         propagate_inbound_headers: bool = False,
-        dependencies: Iterable["Dependant"] = (),
+        dependencies: Sequence["Dependant"] = (),
         parser: CustomCallable | None = None,
         decoder: CustomCallable | None = None,
         title_: str | None = None,
