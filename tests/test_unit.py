@@ -11,10 +11,10 @@ import warnings
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import faststream.asgi.factories.asyncapi.try_it_out
 import pytest
 from faststream._internal.parser import DefaultCodec
 from faststream._internal.producer import ProducerProto
+from faststream._internal.testing.broker import find_test_broker
 from faststream.exceptions import IncorrectState
 from faststream.middlewares import AckPolicy
 from faststream.response.publish_type import PublishType
@@ -72,9 +72,10 @@ from faststream_outbox.subscriber.usecase import (
 from faststream_outbox.testing import FakeOutboxClient, FakeOutboxProducer
 
 
-def test_outbox_broker_registered_in_try_it_out_registry() -> None:
-    registry = faststream.asgi.factories.asyncapi.try_it_out._get_broker_registry()  # noqa: SLF001
-    assert registry[OutboxBroker] is TestOutboxBroker  # ty: ignore[invalid-argument-type]
+def test_outbox_broker_registered_in_test_broker_registry() -> None:
+    metadata = MetaData()
+    broker = OutboxBroker(outbox_table=make_outbox_table(metadata))
+    assert find_test_broker(broker) is TestOutboxBroker
 
 
 def _make_broker(engine: object | None = None, table_name: str = "outbox") -> OutboxBroker:
@@ -1831,7 +1832,7 @@ async def test_subscriber_get_one_and_aiter_raise_with_fetch_unprocessed_pointer
 
     # __aiter__ is also unsupported (was silently abstract-inherited before B6).
     with pytest.raises(NotImplementedError, match="fetch_unprocessed"):
-        await sub.__aiter__()
+        sub.__aiter__()
 
     # _make_response_publisher returns an OutboxFakePublisher wired to the producer
     # so handlers can ``return OutboxResponse(...)``.
@@ -4179,7 +4180,7 @@ def test_asyncapi_document_populates_channels_and_operations() -> None:
 
     broker.publisher("events")
 
-    spec = AsyncAPI(broker).to_specification().to_jsonable()  # ty: ignore[invalid-argument-type]  # BrokerUsecase invariance
+    spec = AsyncAPI(broker).to_specification().to_jsonable()
     assert spec["servers"], "AsyncAPI servers must not be empty (url=[] regression)"
     channel_keys = " ".join(spec["channels"])
     assert "orders" in channel_keys, f"subscriber channel missing: {list(spec['channels'])}"
@@ -4198,7 +4199,7 @@ def test_asyncapi_include_in_schema_false_excludes_publisher_channel() -> None:
 
     broker.publisher("hidden_events", include_in_schema=False)
 
-    spec = AsyncAPI(broker).to_specification().to_jsonable()  # ty: ignore[invalid-argument-type]  # BrokerUsecase invariance
+    spec = AsyncAPI(broker).to_specification().to_jsonable()
     channel_keys = " ".join(spec["channels"])
     assert "orders" in channel_keys  # the included subscriber is present…
     assert "hidden_events" not in channel_keys  # …the excluded publisher is not

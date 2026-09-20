@@ -21,6 +21,7 @@ class OutboxPublisherSpecification(
         payloads = self.get_payloads()
         return {
             self.name: PublisherSpec(
+                address=self.config.queue,
                 description=self.config.description_,
                 operation=Operation(
                     message=Message(
