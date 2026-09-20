@@ -36,10 +36,10 @@ dependencies = [
     # Not imported here: faststream pulls pydantic through fast-depends[pydantic], which allows it
     # back to 1.x. FastStream's serializer calls model_dump, so publishing a model raises
     # AttributeError on pydantic 1 — v2 is a real requirement of ours, not a preference. The two
-    # marked floors are wheel coverage: pydantic-core ships no cp313 wheel before pydantic 2.8
-    # and no cp314 wheel before 2.12.
+    # marked floors are wheel coverage: pydantic-core ships no cp313 wheel before pydantic 2.8.1
+    # (2.8.0 carries pydantic-core 2.20.0, which has none) and no cp314 wheel before 2.12.
     "pydantic>=2; python_version < '3.13'",
-    "pydantic>=2.8; python_version == '3.13'",
+    "pydantic>=2.8.1; python_version == '3.13'",
     "pydantic>=2.12; python_version >= '3.14'",
     # 4.12.2, not 4.12.0: pydantic requires >=4.12.2 on 3.13+, and pinning 4.12.0 drags pydantic
     # back to a build whose pydantic-core has no cp313 wheel either.

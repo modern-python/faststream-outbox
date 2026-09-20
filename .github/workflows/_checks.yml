@@ -88,14 +88,16 @@ jobs:
     # The declared floors are part of what we ship, and nothing else in CI installs
     # them: `pytest` and `scheduled-dep-check` both resolve highest. That is how
     # 0.13.2 shipped `faststream>=0.7.1` and stayed green until 0.7.6 broke a user.
-    # This leg resolves the lower bound instead. One interpreter per distinct floor
-    # set: 3.11 for the unmarked floors, 3.13 and 3.14 for the marked ones.
+    # This leg resolves the lower bound instead, on every supported interpreter:
+    # a floor's wheel coverage is per-interpreter, so two interpreters resolving
+    # the same versions can still disagree on whether those versions install.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python-version:
           - "3.11"
+          - "3.12"
           - "3.13"
           - "3.14"
     services:
@@ -120,7 +122,10 @@ jobs:
           cache-dependency-glob: "**/pyproject.toml"
       - run: uv python install ${{ matrix.python-version }}
       - run: uv python pin ${{ matrix.python-version }}
-      - run: uv sync --all-extras --no-install-project --resolution lowest-direct
+      # --no-build: a floor with no wheel for this interpreter must fail here rather
+      # than quietly compile its sdist. Without it the leg passes on a floor that
+      # still breaks anyone installing into an image with no build toolchain.
+      - run: uv sync --all-extras --no-install-project --resolution lowest-direct --no-build
       # fastapi's floor pulls a starlette whose TestClient predates httpx2 support.
       # Installed here rather than declared in the dev group: at the resolved-highest
       # end starlette takes the httpx2 that group already declares, and adding httpx
