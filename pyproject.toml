@@ -22,11 +22,19 @@ classifiers = [
 ]
 dependencies = [
     "faststream>=0.7.6,<0.8",
-    "sqlalchemy[asyncio]>=2.0",
-    # Not imported here: faststream pulls pydantic through fast-depends[pydantic]. Its floor has to
-    # be declared anyway, because pydantic-core ships no cp314 wheel before pydantic 2.12, so the
-    # lowest declared combination has no installable pydantic on 3.14. Marked, because 2.11 is fine
-    # everywhere else and there is no reason to raise the floor for older interpreters.
+    # 2.0.31 is the first release that tolerates the __static_attributes__ and __firstlineno__
+    # attributes Python 3.13 added; below it SQLAlchemy's TypingOnly check fails at import. Marked,
+    # because 2.0 is fine on 3.11/3.12 and there is no reason to raise the floor for older
+    # interpreters.
+    "sqlalchemy[asyncio]>=2.0; python_version < '3.13'",
+    "sqlalchemy[asyncio]>=2.0.31; python_version >= '3.13'",
+    # Not imported here: faststream pulls pydantic through fast-depends[pydantic], which allows it
+    # back to 1.x. FastStream's serializer calls model_dump, so publishing a model raises
+    # AttributeError on pydantic 1 — v2 is a real requirement of ours, not a preference. The two
+    # marked floors are wheel coverage: pydantic-core ships no cp313 wheel before pydantic 2.8
+    # and no cp314 wheel before 2.12.
+    "pydantic>=2; python_version < '3.13'",
+    "pydantic>=2.8; python_version == '3.13'",
     "pydantic>=2.12; python_version >= '3.14'",
     # 4.12.2, not 4.12.0: pydantic requires >=4.12.2 on 3.13+, and pinning 4.12.0 drags pydantic
     # back to a build whose pydantic-core has no cp313 wheel either.
