@@ -62,9 +62,11 @@ all = ["faststream-outbox[asyncpg,validate,fastapi,prometheus,opentelemetry]"]
 
 [dependency-groups]
 dev = [
-    "pytest",
-    "pytest-asyncio",
-    "pytest-cov",
+    # Floored so `uv sync --resolution lowest-direct` resolves a usable harness: an
+    # unbounded name there resolves to the project's first-ever release.
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=5",
     "asyncpg>=0.29; python_version < '3.13'",
     "asyncpg>=0.30; python_version == '3.13'",
     "asyncpg>=0.31; python_version >= '3.14'",
