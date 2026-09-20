@@ -31,6 +31,10 @@ The subscriber claims rows from any of its queues in a single fetch. Its
 [connection budget](#connection-budget) is unchanged — `max_workers + 1`
 pool connections regardless of how many queues it serves.
 
+In the AsyncAPI document it appears as one channel per queue
+(`orders:Handle`, `refunds:Handle`), each addressed by that queue, rather
+than one channel for the subscriber.
+
 Do **not** register two subscribers on the **same** queue: they compete for
 the same rows, and registration emits a warning to that effect. To run more
 than one handler over a queue, attach them to a single subscriber; to scale
@@ -114,6 +118,10 @@ construction — is checked.
 The table above lists the outbox-specific knobs. The standard FastStream
 subscriber kwargs pass through unchanged too: `dependencies`, `parser`,
 `decoder`, and the AsyncAPI `title_` / `description_` / `include_in_schema`.
+
+`title_` names both the AsyncAPI channel and its operation. On a subscriber
+spanning several queues it prefixes each channel (`Ingest:orders`,
+`Ingest:refunds`), since one title cannot name several channels on its own.
 
 ## Slow handlers — dedicated queue
 
