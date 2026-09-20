@@ -84,6 +84,56 @@ jobs:
           PYTHONUNBUFFERED: 1
           POSTGRES_DSN: postgresql+asyncpg://outbox:outbox@127.0.0.1:5432/outbox
 
+  lowest:
+    # The declared floors are part of what we ship, and nothing else in CI installs
+    # them: `pytest` and `scheduled-dep-check` both resolve highest. That is how
+    # 0.13.2 shipped `faststream>=0.7.1` and stayed green until 0.7.6 broke a user.
+    # This leg resolves the lower bound instead. One interpreter per distinct floor
+    # set: 3.11 for the unmarked floors, 3.13 and 3.14 for the marked ones.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.11"
+          - "3.13"
+          - "3.14"
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: outbox
+          POSTGRES_PASSWORD: outbox
+          POSTGRES_DB: outbox
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U outbox"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/pyproject.toml"
+      - run: uv python install ${{ matrix.python-version }}
+      - run: uv python pin ${{ matrix.python-version }}
+      - run: uv sync --all-extras --no-install-project --resolution lowest-direct
+      # fastapi's floor pulls a starlette whose TestClient predates httpx2 support.
+      # Installed here rather than declared in the dev group: at the resolved-highest
+      # end starlette takes the httpx2 that group already declares, and adding httpx
+      # there would pin a second client into every other leg to serve this one.
+      - run: uv pip install httpx
+      # --no-cov: the coverage gate rides the resolved-highest leg in `test-ci`. This
+      # one asks whether the floors work, which a coverage failure would only obscure.
+      - run: uv run --no-sync pytest . --no-cov
+        env:
+          PYTHONDONTWRITEBYTECODE: 1
+          PYTHONUNBUFFERED: 1
+          POSTGRES_DSN: postgresql+asyncpg://outbox:outbox@127.0.0.1:5432/outbox
+
   freethreaded:
     runs-on: ubuntu-latest
     env:
