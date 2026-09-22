@@ -87,7 +87,7 @@ jobs:
   lowest:
     # The declared floors are part of what we ship, and nothing else in CI installs
     # them: `pytest` and `scheduled-dep-check` both resolve highest. That is how
-    # 0.13.2 shipped `faststream>=0.7.1` and stayed green until 0.7.6 broke a user.
+    # `sqlalchemy[asyncio]>=2.0` stayed declared after 3.13 made it fail at import.
     # This leg resolves the lower bound instead, on every supported interpreter:
     # a floor's wheel coverage is per-interpreter, so two interpreters resolving
     # the same versions can still disagree on whether those versions install.
