@@ -263,7 +263,7 @@ async def test_mark_pending_with_lease_uses_db_clock(pg_engine: AsyncEngine, out
     # Use clock_timestamp(), not now(): now() returns transaction start time and
     # would freeze inside the outer connection.
     async with pg_engine.connect() as conn:
-        db_before = (await conn.execute(text("SELECT clock_timestamp()"))).scalar()
+        db_before = (await conn.execute(text("SELECT clock_timestamp()"))).scalar_one()
     # mark_pending_with_lease expects an AUTOCOMMIT-configured conn (production writer conn).
     async with pg_engine.connect() as raw_conn:
         writer_conn = await raw_conn.execution_options(isolation_level="AUTOCOMMIT")
@@ -277,7 +277,7 @@ async def test_mark_pending_with_lease_uses_db_clock(pg_engine: AsyncEngine, out
             last_attempt_at=_dt.datetime.now(tz=_dt.UTC),
         )
     async with pg_engine.connect() as conn:
-        db_after = (await conn.execute(text("SELECT clock_timestamp()"))).scalar()
+        db_after = (await conn.execute(text("SELECT clock_timestamp()"))).scalar_one()
         next_at = (await conn.execute(select(outbox_table.c.next_attempt_at))).scalar_one()
     # next_attempt_at was set by the autocommit'd UPDATE whose server-side
     # now() falls between db_before and db_after.
