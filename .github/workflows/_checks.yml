@@ -84,13 +84,14 @@ jobs:
           PYTHONUNBUFFERED: 1
           POSTGRES_DSN: postgresql+asyncpg://outbox:outbox@127.0.0.1:5432/outbox
 
-  lowest:
+  floors:
     # The declared floors are part of what we ship, and nothing else in CI installs
     # them: `pytest` and `scheduled-dep-check` both resolve highest. That is how
     # `sqlalchemy[asyncio]>=2.0` stayed declared after 3.13 made it fail at import.
     # This leg resolves the lower bound instead, on every supported interpreter:
     # a floor's wheel coverage is per-interpreter, so two interpreters resolving
     # the same versions can still disagree on whether those versions install.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
