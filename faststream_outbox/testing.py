@@ -662,7 +662,7 @@ class TestOutboxBroker(TestBroker[OutboxBroker, OutboxBroker], broker=OutboxBrok
         finally:
             broker.config.broker_config.client = original_client
 
-    def create_publisher_fake_subscriber(  # pragma: no cover
+    def create_publisher_fake_subscriber(  # pragma: no cover - TestBroker abstract method; _fake_start skips its caller
         self,
         broker: OutboxBroker,
         publisher: typing.Any,
