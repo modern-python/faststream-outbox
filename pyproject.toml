@@ -127,7 +127,7 @@ isort.no-lines-before = ["standard-library", "local-folder"]
 max-args = 15
 
 [tool.ruff.lint.extend-per-file-ignores]
-"tests/*.py" = [
+"tests/**" = [
     "S101", # allow asserts
     "PLR2004", # allow magic values
 ]
