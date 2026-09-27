@@ -34,6 +34,17 @@ lint-ci:
     uv run ruff check --no-fix
     uv run ty check
 
+adr_check_source := "https://raw.githubusercontent.com/modern-python/.github/main/tests/test_adr_citations.py"
+
+# Tracks main on purpose: the shared check is unpinned.
+adr-check:
+    #!/usr/bin/env sh
+    set -eu
+    dir="$(mktemp -d .adr-check.XXXXXX)"
+    trap 'rm -rf "$dir"' EXIT
+    curl -fsSL "{{ adr_check_source }}" -o "$dir/test_adr_citations.py"
+    uv run --no-sync pytest --rootdir=. --noconftest -o addopts= "$dir/test_adr_citations.py"
+
 # Auth via PyPI Trusted Publishing (OIDC); uv publish auto-detects the CI id-token.
 publish:
     rm -rf dist
