@@ -2897,7 +2897,7 @@ async def test_fetch_reconnect_loop_exits_on_drain_without_churning() -> None:
     @asynccontextmanager
     async def _open(_engine: object) -> typing.AsyncIterator[dict[str, object]]:
         opens["n"] += 1  # pragma: no cover - the drain guard exits before resources open
-        yield {}  # pragma: no cover
+        yield {}  # pragma: no cover - the drain guard exits before resources open
 
     async def _inner_returns_immediately() -> None:
         return  # pragma: no cover - inner is never entered during drain

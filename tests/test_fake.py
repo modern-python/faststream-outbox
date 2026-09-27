@@ -4,13 +4,15 @@ import logging
 import typing
 import uuid
 import warnings as _warnings
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
+from types import TracebackType
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from faststream import BaseMiddleware, FastStream, StreamMessage
 from faststream import Context as _Context
 from faststream._internal.producer import ProducerProto
-from faststream.exceptions import NackMessage
+from faststream.exceptions import NackMessage, StopConsume
 from faststream.middlewares import AckPolicy
 from sqlalchemy import MetaData
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -71,8 +73,8 @@ async def _wait_until(predicate: Callable[[], object], *, timeout: float = 2.0) 
         if predicate():
             return
         await asyncio.sleep(0.05)
-    msg = "timed out waiting for predicate"  # pragma: no cover
-    raise AssertionError(msg)  # pragma: no cover
+    msg = "timed out waiting for predicate"  # pragma: no cover - only when the predicate times out, failing the test
+    raise AssertionError(msg)  # pragma: no cover - only when the predicate times out, failing the test
 
 
 def test_fake_outbox_producer_satisfies_producer_proto() -> None:
@@ -1989,3 +1991,104 @@ async def test_test_broker_aenter_returns_single_outbox_broker() -> None:
     broker = _make_broker()
     async with TestOutboxBroker(broker) as br:
         assert isinstance(br, OutboxBroker)
+
+
+async def _raising_parser(msg: object, original: Callable[[object], Awaitable[StreamMessage[typing.Any]]]) -> None:
+    del original
+    msg = f"unparseable: {msg!r}"
+    raise ValueError(msg)
+
+
+async def test_parser_error_leaves_row_for_retry() -> None:
+    """A custom parser that raises never reaches the handler; the row is nacked for retry, not dropped."""
+    broker = _make_broker()
+
+    @broker.subscriber("orders", parser=_raising_parser)
+    async def handle(body: dict) -> None: ...
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish({"order_id": 1}, queue="orders")  # ty: ignore[missing-argument]
+
+    assert len(test_broker.fake_client.rows) == 1
+    assert test_broker.fake_client.rows[0].deliveries_count == 1
+
+
+async def test_no_matching_filter_leaves_row_for_retry() -> None:
+    """A row no handler's filter accepts is nacked for retry, not dropped."""
+    broker = _make_broker()
+    sub = broker.subscriber("orders")
+
+    @sub(filter=lambda _msg: False)
+    async def handle(body: dict) -> None: ...
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish({"order_id": 1}, queue="orders")  # ty: ignore[missing-argument]
+
+    assert len(test_broker.fake_client.rows) == 1
+
+
+class _SuppressingMiddleware(BaseMiddleware):
+    async def after_processed(
+        self,
+        exc_type: type[BaseException] | None = None,
+        exc_val: BaseException | None = None,
+        exc_tb: TracebackType | None = None,
+    ) -> bool:
+        del exc_type, exc_val, exc_tb
+        return True
+
+
+async def test_middleware_suppressing_no_handler_error_rejects_row() -> None:
+    """A middleware that swallows the no-handler error leaves no ack state, so the row takes the reject fallback."""
+    broker = OutboxBroker(outbox_table=make_outbox_table(MetaData()), middlewares=[_SuppressingMiddleware])
+    sub = broker.subscriber("orders")
+
+    @sub(filter=lambda _msg: False)
+    async def handle(body: dict) -> None: ...
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish({"order_id": 1}, queue="orders")  # ty: ignore[missing-argument]
+
+    assert test_broker.fake_client.rows == []
+
+
+async def test_handler_stop_consume_stops_subscriber() -> None:
+    """A handler raising ``StopConsume`` stops its subscriber and leaves the row for redelivery."""
+    broker = _make_broker()
+    sub = broker.subscriber("orders")
+
+    @sub
+    async def handle(body: dict) -> None:
+        del body
+        raise StopConsume
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish({"order_id": 1}, queue="orders")  # ty: ignore[missing-argument]
+        assert not sub.running
+
+    assert len(test_broker.fake_client.rows) == 1
+
+
+async def test_handler_system_exit_stops_subscriber_and_exits_app() -> None:
+    """A handler raising ``SystemExit`` stops its subscriber and asks the owning app to exit."""
+    broker = _make_broker()
+    app = FastStream(broker)
+    sub = broker.subscriber("orders")
+
+    @sub
+    async def handle(body: dict) -> None:
+        del body
+        raise SystemExit
+
+    test_broker = TestOutboxBroker(broker)
+    with patch.object(app, "exit") as app_exit:
+        async with test_broker:
+            await broker.publish({"order_id": 1}, queue="orders")  # ty: ignore[missing-argument]
+            assert not sub.running
+
+    app_exit.assert_called_once_with()
+    assert len(test_broker.fake_client.rows) == 1

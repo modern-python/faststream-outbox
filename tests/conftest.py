@@ -18,7 +18,7 @@ async def pg_engine() -> AsyncIterator[AsyncEngine]:
     try:
         async with engine.connect() as conn:
             await conn.exec_driver_sql("SELECT 1")
-    except Exception as exc:  # noqa: BLE001  # pragma: no cover
+    except Exception as exc:  # noqa: BLE001  # pragma: no cover - only when Postgres is unreachable; the test then skips
         await engine.dispose()
         pytest.skip(f"Postgres not available at {PG_DSN}: {exc}")
     yield engine

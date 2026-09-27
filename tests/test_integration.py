@@ -38,8 +38,8 @@ async def _wait_until(predicate, *, timeout: float = 5.0) -> None:  # noqa: ASYN
         if predicate():
             return
         await asyncio.sleep(0.05)
-    msg = "timed out waiting for predicate"  # pragma: no cover
-    raise AssertionError(msg)  # pragma: no cover
+    msg = "timed out waiting for predicate"  # pragma: no cover - only when the predicate times out, failing the test
+    raise AssertionError(msg)  # pragma: no cover - only when the predicate times out, failing the test
 
 
 async def _row_count(engine: AsyncEngine, table) -> int:
@@ -337,12 +337,9 @@ async def test_end_to_end_failing_handler_with_retry(pg_engine, outbox_table) ->
         while asyncio.get_event_loop().time() < deadline:
             if await _check_deleted():
                 return
-            # pragma: empirically unreachable — the worker DELETE lands within
-            # the first poll on current CI. The branch exists as a safety valve
-            # for slower hardware, not a tested path.
-            await asyncio.sleep(0.1)  # pragma: no cover
-        msg = "row not deleted within timeout"  # pragma: no cover
-        raise AssertionError(msg)  # pragma: no cover
+            await asyncio.sleep(0.1)  # pragma: no cover - slow-hardware valve; DELETE lands by the first poll
+        msg = "row not deleted within timeout"  # pragma: no cover - only when the row is never deleted
+        raise AssertionError(msg)  # pragma: no cover - only when the row is never deleted
 
 
 async def test_validate_schema_fails_when_columns_missing(pg_engine, outbox_table) -> None:
@@ -1086,7 +1083,7 @@ async def test_batched_flush_lease_lost_row_redelivers(pg_engine: AsyncEngine, o
         # survives, the other four are deleted), but coverage cannot trace a SQLAlchemy-async
         # await that runs concurrently with the live broker's own greenlet DB work; the source
         # invariant it exercises is covered deterministically by the _flush_buffer unit test.
-        async with pg_engine.begin() as steal_conn:  # pragma: no cover
+        async with pg_engine.begin() as steal_conn:  # pragma: no cover - runs; coverage sometimes misses it
             await steal_conn.execute(steal)
         lease_stolen.set()  # release the marker handler; its row buffers with the stale token
         await _wait_until(lambda: len(received) == n_rows, timeout=15.0)
@@ -2041,7 +2038,7 @@ async def test_worker_rebuilds_writer_connection_after_flush_failure(
                 if await _deleted():
                     break
                 await asyncio.sleep(0.1)  # pragma: no cover  # slow-hardware safety valve
-            else:  # pragma: no cover
+            else:  # pragma: no cover - only when the row is never cleared, failing the test
                 msg = "row not cleared after writer-connection rebuild"
                 raise AssertionError(msg)
 
