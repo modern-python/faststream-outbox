@@ -38,12 +38,15 @@ dependencies = [
     # AttributeError on pydantic 1 — v2 is a real requirement of ours, not a preference. The two
     # marked floors are wheel coverage: pydantic-core ships no cp313 wheel before pydantic 2.8.1
     # (2.8.0 carries pydantic-core 2.20.0, which has none) and no cp314 wheel before 2.12.
-    "pydantic>=2; python_version < '3.13'",
+    # 2.0.2, not 2.0: the fastapi extra excludes 2.0.0 and 2.0.1.
+    "pydantic>=2.0.2; python_version < '3.13'",
     "pydantic>=2.8.1; python_version == '3.13'",
     "pydantic>=2.12; python_version >= '3.14'",
     # 4.12.2, not 4.12.0: pydantic requires >=4.12.2 on 3.13+, and pinning 4.12.0 drags pydantic
     # back to a build whose pydantic-core has no cp313 wheel either.
     "typing-extensions>=4.12.2",
+    # pydantic 2.12, the 3.14 floor above, requires >=4.14.1.
+    "typing-extensions>=4.14.1; python_version >= '3.14'",
 ]
 
 [project.optional-dependencies]
@@ -67,8 +70,6 @@ all = ["faststream-outbox[asyncpg,validate,fastapi,prometheus,opentelemetry]"]
 
 [dependency-groups]
 dev = [
-    # Floored so `uv sync --resolution lowest-direct` resolves a usable harness: an
-    # unbounded name there resolves to the project's first-ever release.
     "pytest>=8",
     "pytest-asyncio>=0.24",
     "pytest-cov>=5",
