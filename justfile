@@ -40,9 +40,10 @@ adr_check_source := "https://raw.githubusercontent.com/modern-python/.github/mai
 adr-check:
     #!/usr/bin/env sh
     set -eu
-    file="$(mktemp -d)/test_adr_citations.py"
-    curl -fsSL "{{ adr_check_source }}" -o "$file"
-    uv run --no-sync pytest --rootdir=. "$file"
+    dir="$(mktemp -d .adr-check.XXXXXX)"
+    trap 'rm -rf "$dir"' EXIT
+    curl -fsSL "{{ adr_check_source }}" -o "$dir/test_adr_citations.py"
+    uv run --no-sync pytest --rootdir=. --noconftest -o addopts= "$dir/test_adr_citations.py"
 
 # Auth via PyPI Trusted Publishing (OIDC); uv publish auto-detects the CI id-token.
 publish:
