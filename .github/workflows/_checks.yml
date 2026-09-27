@@ -53,6 +53,7 @@ jobs:
           - "3.12"
           - "3.13"
           - "3.14"
+          - "3.14t"
     services:
       postgres:
         image: postgres:17
@@ -76,9 +77,11 @@ jobs:
           cache-dependency-glob: "**/pyproject.toml"
       - run: uv python install ${{ matrix.python-version }}
       - run: uv python pin ${{ matrix.python-version }}
-      - run: |
-          just install
-          just test-ci
+      - run: just install
+      - name: Assert the GIL is actually disabled
+        if: matrix.python-version == '3.14t'
+        run: uv run --no-sync python -c "import sys, asyncpg, sqlalchemy, pydantic_core, faststream, faststream_outbox; assert not sys._is_gil_enabled(), 'GIL re-enabled - a dependency lacks free-threaded support'"
+      - run: just test-ci
         env:
           PYTHONDONTWRITEBYTECODE: 1
           PYTHONUNBUFFERED: 1
@@ -91,6 +94,8 @@ jobs:
     # This leg resolves the lower bound instead, on every supported interpreter:
     # a floor's wheel coverage is per-interpreter, so two interpreters resolving
     # the same versions can still disagree on whether those versions install.
+    # 3.14t is out: the dev group's `faststream[kafka]` pulls aiokafka, which ships no cp314t
+    # wheel, so under --no-build this leg would measure upstream's gap rather than a floor.
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     strategy:
@@ -134,39 +139,6 @@ jobs:
       - run: uv pip install httpx
       # --no-cov: the coverage gate rides the resolved-highest leg in `test-ci`. This
       # one asks whether the floors work, which a coverage failure would only obscure.
-      - run: uv run --no-sync pytest . --no-cov
-        env:
-          PYTHONDONTWRITEBYTECODE: 1
-          PYTHONUNBUFFERED: 1
-          POSTGRES_DSN: postgresql+asyncpg://outbox:outbox@127.0.0.1:5432/outbox
-
-  freethreaded:
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: outbox
-          POSTGRES_PASSWORD: outbox
-          POSTGRES_DB: outbox
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U outbox"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    steps:
-      - uses: actions/checkout@v6
-      - uses: astral-sh/setup-uv@v8.2.0
-        with:
-          enable-cache: true
-          cache-dependency-glob: "**/pyproject.toml"
-      - run: uv python install 3.14t
-      - run: uv python pin 3.14t
-      - run: uv sync --all-extras --no-install-project
-      - name: Assert the GIL is actually disabled
-        run: uv run --no-sync python -c "import sys, asyncpg, sqlalchemy, pydantic_core, faststream, faststream_outbox; assert not sys._is_gil_enabled(), 'GIL re-enabled - a dependency lacks free-threaded support'"
       - run: uv run --no-sync pytest . --no-cov
         env:
           PYTHONDONTWRITEBYTECODE: 1
