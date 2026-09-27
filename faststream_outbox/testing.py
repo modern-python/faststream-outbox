@@ -330,7 +330,7 @@ async def _sync_dispatch(fake_client: FakeOutboxClient, broker: OutboxBroker, qu
         # No handler for this queue — leave the row in the fake client for inspection.
         return
     fake_row = next((r for r in fake_client.rows if r.id == row_id), None)
-    if fake_row is None:  # pragma: no cover  # defensive: feed just returned this id
+    if fake_row is None:  # pragma: no cover - only if an earlier handler in this batch deleted the row off the fake
         return
     _claim_fake_row(fake_row, now=utcnow(), token=uuid.uuid4())
     await subscriber.dispatch_one(_to_inner(fake_row))
