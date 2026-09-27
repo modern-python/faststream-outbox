@@ -16,6 +16,7 @@ jobs:
       - run: uv python install 3.11
       - run: uv python pin 3.11
       - run: just install lint-ci
+      - run: just adr-check
 
   docs:
     runs-on: ubuntu-latest
