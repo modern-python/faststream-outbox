@@ -67,7 +67,7 @@ class OutboxSubscriberConfig(SubscriberUsecaseConfig):
         # today, but dataclasses call only the most-derived one — if faststream adds init
         # logic there, this guarded call keeps it running instead of silently shadowing it.
         parent_post_init = getattr(super(), "__post_init__", None)
-        if parent_post_init is not None:  # pragma: no cover  # defensive: base has none today
+        if parent_post_init is not None:
             parent_post_init()
         self._validate()
 

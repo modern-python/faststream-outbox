@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from faststream._internal.configs import SubscriberUsecaseConfig
 from faststream._internal.parser import DefaultCodec
 from faststream._internal.producer import ProducerProto
 from faststream._internal.testing.broker import find_test_broker
@@ -3004,6 +3005,20 @@ async def test_run_with_reconnect_does_not_reset_backoff_when_open_fails(monkeyp
     assert attempts == [1, 2, 3]
 
 
+async def test_run_with_reconnect_returns_when_client_is_gone() -> None:
+    """A loop that finds no client, as after ``TestOutboxBroker`` restores ``None``, returns without opening."""
+    sub = _make_subscriber_for_listener_test()
+    sub.running = True
+    open_resources = MagicMock()
+    inner = AsyncMock()
+    await asyncio.wait_for(
+        sub._run_with_reconnect(name="worker", open_resources=open_resources, inner=inner),  # noqa: SLF001
+        timeout=1.0,
+    )
+    open_resources.assert_not_called()
+    inner.assert_not_awaited()
+
+
 async def test_outbox_client_delete_with_lease_uses_caller_conn() -> None:
     """``delete_with_lease`` runs its statement on the supplied conn with no explicit transaction."""
     metadata = MetaData()
@@ -3166,6 +3181,14 @@ def _register_subscriber(broker: OutboxBroker, **subscriber_kwargs: object) -> N
     call itself — no ``@`` decorator necessary.
     """
     broker.subscriber("orders", **subscriber_kwargs)  # ty: ignore[invalid-argument-type]
+
+
+def test_subscriber_config_runs_upstream_post_init(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An upstream ``SubscriberUsecaseConfig.__post_init__`` still runs under ``OutboxSubscriberConfig``'s own."""
+    parent_post_init = MagicMock()
+    monkeypatch.setattr(SubscriberUsecaseConfig, "__post_init__", parent_post_init, raising=False)
+    _register_subscriber(_make_broker())
+    parent_post_init.assert_called_once_with()
 
 
 def test_subscriber_rejects_zero_max_workers() -> None:

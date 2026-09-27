@@ -557,7 +557,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         # keeps running through drain to flush in-flight rows.
         while self.running and not (halt_on_drain and self._stopping):
             client = self._outer_config.client
-            if client is None:  # pragma: no cover  # defensive teardown race
+            if client is None:
                 return
             # F1-06: measure "healthy duration" from a *live* connection, not from before
             # open_resources — a slow pool checkout that blocks then fails would otherwise
