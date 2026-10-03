@@ -1,7 +1,7 @@
 # How it works
 
 `faststream-outbox` is a FastStream broker integration whose transport is
-**Postgres rows**, not a message bus. A producer writes an outbox row in the
+Postgres rows, not a message bus. A producer writes an outbox row in the
 same SQLAlchemy transaction as its domain entity; a subscriber polls the
 table, claims rows with `FOR UPDATE SKIP LOCKED`, runs the handler, and
 deletes the row on success.
@@ -34,8 +34,8 @@ transactions are the better fit.*
 ## Producer side
 
 `broker.publish(body, *, queue, session, ...)` inserts an outbox row through
-the caller's `AsyncSession`. It does **not** flush, commit, or open its own
-transaction — the row must commit with the caller's domain writes:
+the caller's `AsyncSession`. It does not flush, commit, or open its own
+transaction; the row must commit with the caller's domain writes:
 
 ```python
 async with session_factory() as session, session.begin():
@@ -48,11 +48,11 @@ async with session_factory() as session, session.begin():
 round-trip for many rows.
 
 The producer also emits `SELECT pg_notify('outbox_<table>', queue)` on the
-caller's session right after the INSERT, **except** when the row is
-genuinely future-dated (a future `activate_in` / `activate_at` — a *past*
+caller's session right after the INSERT, except when the row is
+genuinely future-dated (a future `activate_in` / `activate_at`; a *past*
 `activate_at`, e.g. a recovered idempotency token, still notifies) or a
 `timer_id` conflict made the insert a no-op. NOTIFY is transactional, so listeners only see it
-after the user's transaction commits — atomicity with the row insert is
+after the user's transaction commits, so atomicity with the row insert is
 automatic.
 
 Repeated publishes to the same queue within one transaction emit a single
@@ -63,7 +63,7 @@ bulk publish costs one NOTIFY, not one per row.
 
 Per subscriber, two loops run concurrently:
 
-**1. Fetch loop.** Owns a long-lived `AsyncConnection` for the fetch CTE and
+The fetch loop owns a long-lived `AsyncConnection` for the fetch CTE and
 a separate raw asyncpg connection for `LISTEN outbox_<table>`. A single CTE
 claims rows:
 
@@ -87,20 +87,20 @@ WHERE id IN (SELECT id FROM claimed)
 RETURNING *
 ```
 
-This is **simplified for illustration**. The real query writes each `OR`
+This is simplified for illustration. The real query writes each `OR`
 disjunct with its own partial-index predicate spelled out as a conjunct, so
 Postgres can use the `outbox_pending_idx` / `outbox_lease_idx` partial
-indexes instead of a seq-scan — the naive `OR` above is the exact shape the
+indexes instead of a seq-scan. The naive `OR` above is the exact shape the
 code avoids.
 
 The CTE reclaims both unleased rows AND rows whose lease has expired
 (`acquired_at < now() - lease_ttl_seconds`), so there is no separate stuck-row
-reaper. The idle-sleep is short-circuited by NOTIFY via an `asyncio.Event` —
+reaper. The idle-sleep is short-circuited by NOTIFY via an `asyncio.Event`, so
 idle dispatch latency drops from up to `max_fetch_interval` (default 10s) to
 ~10ms. If LISTEN setup fails (asyncpg missing, non-asyncpg driver, permission
 error), the loop logs once and falls back to polling.
 
-**2. Worker loop** (× `max_workers`). Pulls from an in-process
+The worker loop (× `max_workers`) pulls from an in-process
 `asyncio.Queue(maxsize=fetch_batch_size)`, dispatches each row via
 `OutboxSubscriber.dispatch_one` (which runs the handler), then
 flushes the row's terminal state (`DELETE` on success, `UPDATE
@@ -117,12 +117,12 @@ DELETE FROM outbox WHERE id = :id AND acquired_token = :token
 
 If a slow handler's lease expired and another worker reclaimed the row with
 a fresh token, the slow handler's `DELETE` finds `rowcount == 0` and is
-silently dropped — preventing it from clobbering the new lease holder. This
+silently dropped, which keeps it from clobbering the new lease holder. This
 is the load-bearing invariant; any new fetch or terminal path must preserve
 it.
 
-`lease_ttl_seconds` (default `60.0`, per-subscriber) **must exceed the P99
-handler duration with margin**, otherwise healthy in-flight handlers race
+`lease_ttl_seconds` (default `60.0`, per-subscriber) must exceed the P99
+handler duration with margin; otherwise healthy in-flight handlers race
 their own lease expiry and trigger duplicate deliveries. The lease cutoff is
 computed server-side via `make_interval(secs => :lease_ttl)`, so it's
 immune to worker / DB clock skew.
@@ -133,8 +133,8 @@ When the invariant fires, the broker emits a WARNING with structured fields:
 extra = {"event": "lease_lost", "phase": "terminal" | "retry", "row_id": ..., "queue": ..., "deliveries_count": ...}
 ```
 
-Recurring `event=lease_lost` records mean `lease_ttl_seconds < handler P99`
-— that's the operator playbook signal. Log-pipeline aggregators can alert
+Recurring `event=lease_lost` records mean `lease_ttl_seconds < handler P99`;
+that's the operator playbook signal. Log-pipeline aggregators can alert
 on the `event` field without parsing the message.
 
 ## At-least-once delivery
@@ -144,12 +144,12 @@ successfully. If the worker dies mid-handler, the lease expires and another
 worker re-claims the row. The same applies if the handler ran but the
 worker crashed before the terminal `DELETE` landed.
 
-The trade-off: handlers must be **idempotent**. A handler that succeeded
+The trade-off is that handlers must be idempotent. A handler that succeeded
 but whose `DELETE` failed to land will be retried.
 
 ## Opt-in DLQ on terminal failure
 
-By default, terminal failures `DELETE` the row — no archive table, no
+By default, terminal failures `DELETE` the row, with no archive table and no
 dead-letter queue. Pass `dlq_table=make_dlq_table(metadata)` to the broker
 and terminal-by-failure rows are copied into a sibling audit table in the
 same Postgres statement as the `DELETE`:
@@ -166,12 +166,12 @@ engine = create_async_engine("postgresql+asyncpg://outbox:outbox@localhost:5432/
 broker = OutboxBroker(engine, outbox_table=outbox_table, dlq_table=dlq_table)
 ```
 
-Successful rows are never archived — the success path stays a plain
+Successful rows are never archived; the success path stays a plain
 `DELETE`. Three failure paths land in the DLQ with a `failure_reason`
 column: `max_deliveries`, `retry_terminal`, `rejected`. Atomicity is via a
 single CTE (`DELETE … RETURNING` → `INSERT INTO <dlq>`), so DLQ-write
-failures roll back the `DELETE` — misconfiguration surfaces as outbox
-growth plus `lease_lost` spikes rather than silent audit loss. When
+failures roll back the `DELETE`. Misconfiguration surfaces as outbox
+growth plus `lease_lost` spikes, not silent audit loss. When
 `dlq_table` is configured, `broker.validate_schema()` checks both tables
 in one call and reports drift on either one. See the
 [Dead-letter queue](../usage/dlq.md) page for the schema, atomicity, and
@@ -184,9 +184,9 @@ you add).
 
 ## Failure modes
 
-- **Handlers must be idempotent.** A crash between the handler's side effect and the broker's `DELETE` re-delivers the message — see [At-least-once delivery](#at-least-once-delivery) above.
-- **Best-effort ordering only.** `FOR UPDATE SKIP LOCKED` does not preserve strict order under concurrent workers. If you need strict per-aggregate ordering, route to a single subscriber and run a single worker.
-- **DLQ is opt-in.** Without `dlq_table=`, terminal failures `DELETE` the row.
+- Handlers must be idempotent. A crash between the handler's side effect and the broker's `DELETE` re-delivers the message; see [At-least-once delivery](#at-least-once-delivery) above.
+- Ordering is best-effort only. `FOR UPDATE SKIP LOCKED` does not preserve strict order under concurrent workers. If you need strict per-aggregate ordering, route to a single subscriber and run a single worker.
+- The DLQ is opt-in. Without `dlq_table=`, terminal failures `DELETE` the row.
 
 ## Relay to Kafka / RabbitMQ / NATS / Redis
 
@@ -194,23 +194,23 @@ An `OutboxSubscriber` can source a FastStream-native cross-broker chain:
 stack a foreign-broker publisher decorator on the subscriber
 (`@kafka_pub @broker_outbox.subscriber("q")`) and the handler's return
 value is forwarded to the real bus. The outbox row stays the durability
-boundary — the row commits with the domain write, and the relay carries
+boundary: the row commits with the domain write, and the relay carries
 at-least-once end to end. Recovery comes from two tiers, so a bus outage
-never loses the row: a **transient blip** is absorbed by the client library
-(e.g. `aiokafka`) — the in-handler publish blocks until the broker returns,
-which the subscriber sees as one slow *successful* publish, no nack; a
-**sustained outage** eventually raises into the handler, which nacks the row
+never loses the row: a transient blip is absorbed by the client library
+(e.g. `aiokafka`), where the in-handler publish blocks until the broker returns,
+which the subscriber sees as one slow *successful* publish with no nack; a
+sustained outage eventually raises into the handler, which nacks the row
 and hands it to the configured `retry_strategy` to reschedule. (The one path
 that recovers via lease expiry rather than `retry_strategy` is a
-mis-composed publisher chain — see [relay guardrails](../usage/relay.md#what-not-to-do).)
+mis-composed publisher chain; see [relay guardrails](../usage/relay.md#what-not-to-do).)
 
-> **Worked end-to-end example → [Relay tutorial](../tutorials/add-kafka-relay.md).**
+For a worked end-to-end example, see the [Relay tutorial](../tutorials/add-kafka-relay.md).
 
 ## Acknowledgements
 
 The architecture of this package is heavily informed by Arseniy Popov's
 [PR #2704](https://github.com/ag2ai/faststream/pull/2704) (`feat: add sqla
-broker`) on upstream FastStream — the FastStream broker/registrator/subscriber
+broker`) on upstream FastStream. The FastStream broker/registrator/subscriber
 wiring, the `SELECT … FOR UPDATE SKIP LOCKED` fetch-and-claim CTE, the retry
 strategy hierarchy, and the in-transaction publish contract all originate
 from there. This package is a Postgres-only reimplementation that diverges in

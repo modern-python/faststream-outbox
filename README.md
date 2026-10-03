@@ -18,11 +18,11 @@
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![ty](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ty/main/assets/badge/v0.json)](https://github.com/astral-sh/ty)
 
-`faststream-outbox` is a [FastStream](https://faststream.ag2.ai) broker integration for the **transactional outbox pattern** — a Postgres table is the message queue.
+`faststream-outbox` is a [FastStream](https://faststream.ag2.ai) broker integration for the transactional outbox pattern, with a Postgres table as the message queue.
 
-A producer writes a domain entity and an outbox row in the *same* SQLAlchemy transaction by calling `broker.publish(body, queue=..., session=session)`. A separate subscriber polls the table and relays each row to a real message bus (Kafka, RabbitMQ, NATS, Redis…) with a single decorator — or processes the rows in-place if you don't have a downstream broker.
+A producer writes a domain entity and an outbox row in the *same* SQLAlchemy transaction by calling `broker.publish(body, queue=..., session=session)`. A separate subscriber polls the table and relays each row to a real message bus (Kafka, RabbitMQ, NATS, Redis…) with a single decorator, or processes the rows in place if you don't have a downstream broker.
 
-## Quickstart — outbox relay to Kafka
+## Quickstart: outbox relay to Kafka
 
 Write the outbox row in your domain transaction; relay rows to Kafka with a stacked decorator.
 
@@ -65,9 +65,9 @@ async with session_factory() as session, session.begin():
 
 The same one-decorator pattern works for RabbitMQ, NATS, Redis, and Confluent. See the [relay tutorial](https://faststream-outbox.modern-python.org/usage/relay/) for the FastAPI lifecycle, header propagation, router shapes, and the at-least-once contract.
 
-## Quickstart — standalone outbox queue
+## Quickstart: standalone outbox queue
 
-If you don't have a downstream broker, the same broker can process outbox rows in-place — the table *is* the queue.
+If you don't have a downstream broker, the same broker can process outbox rows in place, and the table *is* the queue.
 
 ```python
 from sqlalchemy import MetaData
@@ -97,9 +97,9 @@ async with session_factory() as session, session.begin():
 
 ## How it works
 
-A subscriber owns two async loops: a **fetch** loop claims available rows via a single CTE (`SELECT … FOR UPDATE SKIP LOCKED → UPDATE acquired_token=:uuid, acquired_at=now() RETURNING *`), and `max_workers` **worker** loops dispatch to the handler. On success, `DELETE WHERE id=:id AND acquired_token=:token`; on failure, the retry strategy schedules another attempt or terminally drops the row. Terminal failures `DELETE` by default; pass `dlq_table=make_dlq_table(metadata)` to atomically archive them into a sibling audit table instead — see [Dead-letter queue](https://faststream-outbox.modern-python.org/usage/dlq/).
+A subscriber owns two async loops: a fetch loop claims available rows via a single CTE (`SELECT … FOR UPDATE SKIP LOCKED → UPDATE acquired_token=:uuid, acquired_at=now() RETURNING *`), and `max_workers` worker loops dispatch to the handler. On success, `DELETE WHERE id=:id AND acquired_token=:token`; on failure, the retry strategy schedules another attempt or terminally drops the row. Terminal failures `DELETE` by default; pass `dlq_table=make_dlq_table(metadata)` to atomically archive them into a sibling audit table instead (see [Dead-letter queue](https://faststream-outbox.modern-python.org/usage/dlq/)).
 
-The `acquired_token` is the load-bearing invariant: a slow handler whose lease expired and was re-claimed by another worker finds its terminal `DELETE` to be a no-op (the token no longer matches), preventing it from clobbering the new lease holder.
+The `acquired_token` is the load-bearing invariant. If a slow handler's lease expired and another worker re-claimed the row, the slow handler's terminal `DELETE` is a no-op because the token no longer matches, so it cannot clobber the new lease holder.
 
 With the `asyncpg` driver, the fetch loop also `LISTEN`s on `outbox_<table>` and `publish` emits `pg_notify(...)`, so idle dispatch latency is ~10ms instead of up to `max_fetch_interval`.
 
@@ -107,15 +107,15 @@ See [How it works](https://faststream-outbox.modern-python.org/introduction/how-
 
 ## Optional extras
 
-- `faststream-outbox[asyncpg]` — asyncpg driver (enables `LISTEN/NOTIFY` for ~10ms idle dispatch)
-- `faststream-outbox[fastapi]` — FastAPI integration via `faststream_outbox.fastapi.OutboxRouter`
-- `faststream-outbox[validate]` — Alembic for `broker.validate_schema()`
-- `faststream-outbox[prometheus]` — Prometheus metrics adapter
-- `faststream-outbox[opentelemetry]` — OpenTelemetry metrics adapter
+- `faststream-outbox[asyncpg]`: asyncpg driver (enables `LISTEN/NOTIFY` for ~10ms idle dispatch)
+- `faststream-outbox[fastapi]`: FastAPI integration via `faststream_outbox.fastapi.OutboxRouter`
+- `faststream-outbox[validate]`: Alembic for `broker.validate_schema()`
+- `faststream-outbox[prometheus]`: Prometheus metrics adapter
+- `faststream-outbox[opentelemetry]`: OpenTelemetry metrics adapter
 
 ## Acknowledgements
 
-The architecture of this package is heavily informed by Arseniy Popov's [PR #2704](https://github.com/ag2ai/faststream/pull/2704) (`feat: add sqla broker`) on upstream FastStream — the FastStream broker/registrator/subscriber wiring, the `SELECT … FOR UPDATE SKIP LOCKED` fetch-and-claim CTE, the retry strategy hierarchy, and the in-transaction publish contract all originate from there. This package is a Postgres-only reimplementation that diverges in storage model (lease tokens instead of an explicit state column, archive table is opt-in), loop structure (two loops instead of four), wake-up mechanism (`LISTEN/NOTIFY`), and adds timer mechanics. Credit for the original design belongs to Arseniy.
+The architecture of this package is heavily informed by Arseniy Popov's [PR #2704](https://github.com/ag2ai/faststream/pull/2704) (`feat: add sqla broker`) on upstream FastStream. The FastStream broker/registrator/subscriber wiring, the `SELECT … FOR UPDATE SKIP LOCKED` fetch-and-claim CTE, the retry strategy hierarchy, and the in-transaction publish contract all originate from there. This package is a Postgres-only reimplementation. It differs in storage model (lease tokens in place of an explicit state column, and an opt-in archive table), loop structure (two loops where the PR has four), and wake-up mechanism (`LISTEN/NOTIFY`), and it adds timer mechanics. Credit for the original design belongs to Arseniy.
 
 ## 📚 [Documentation](https://faststream-outbox.modern-python.org)
 
@@ -126,4 +126,4 @@ The architecture of this package is heavily informed by Arseniy Popov's [PR #270
 ## Part of `modern-python`
 
 Browse the full list of templates and libraries in
-[`modern-python`](https://github.com/modern-python) — see the org profile for the categorized index.
+[`modern-python`](https://github.com/modern-python); the org profile has the categorized index.

@@ -1,9 +1,9 @@
 # FastAPI integration
 
-The outbox + FastAPI is the **canonical use case**: HTTP routes and outbox
+FastAPI is the canonical use case for the outbox. HTTP routes and outbox
 subscribers share the same `AsyncSession` via FastAPI's dependency
-injection, and the outbox row commits with the caller's domain writes —
-same transaction, same `session.commit()`.
+injection, and the outbox row commits with the caller's domain writes in
+the same transaction and the same `session.commit()`.
 
 `faststream_outbox.fastapi.OutboxRouter` subclasses FastStream's
 `StreamRouter` (which itself subclasses FastAPI's `APIRouter`), so HTTP
@@ -82,8 +82,8 @@ app = FastAPI()
 app.include_router(router)
 ```
 
-Mounting the router auto-starts the inner broker via FastAPI's lifespan —
-**you do not call `broker.start()`**. HTTP routes (`@router.get`,
+Mounting the router auto-starts the inner broker via FastAPI's lifespan,
+so you do not call `broker.start()`. HTTP routes (`@router.get`,
 `@router.post`, …) and outbox subscribers coexist on one router.
 
 ## Why this works
@@ -96,7 +96,7 @@ delivery, opened in a `session.begin()` block, committed on handler return,
 rolled back on exception.
 
 A handler's `AsyncSession` is therefore resolved exactly as in an HTTP
-route — a fresh session per delivery, not a shared instance — and
+route (a fresh session per delivery, not a shared instance), and
 `OutboxResponse(session=...)` commits the follow-on row with the handler's
 domain writes. See [Chained
 publishing](./publisher.md#chained-publishing).
@@ -123,30 +123,30 @@ dependency resolver, so `Depends(...)` and these shortcuts can be mixed
 freely.
 
 These shortcuts resolve through FastStream's subscriber-dispatch
-machinery, so they work **only inside `@router.subscriber` handlers** — not
+machinery, so they work only inside `@router.subscriber` handlers, not
 in HTTP routes. In an HTTP route, reach the broker via `router.broker` (as
 the quickstart's `create_order` does); a `broker: OutboxBroker` annotation
 there resolves as a request field and fails with a 422.
 
 ## What's intentionally not exposed
 
-Several `OutboxBroker.__init__` arguments are intentionally **not exposed**
+Several `OutboxBroker.__init__` arguments are intentionally not exposed
 on `OutboxRouter.__init__`:
 
-- `apply_types` — `StreamRouter` forces `apply_types=False` because
+- `apply_types`: `StreamRouter` forces `apply_types=False` because
   FastAPI's FastDepends takes over the parameter resolution. Letting the
   user flip it would produce weird half-resolved handlers.
-- `dependencies` — on the router signature this means FastAPI
+- `dependencies`: on the router signature this means FastAPI
   `Depends(...)` only; the broker's FastStream `Dependant` list is the
   wrong shape for this flow.
-- `routers` — not forwarded through the router; its semantics through the
+- `routers`: not forwarded through the router; its semantics through the
   FastAPI lifespan are unsettled. Register subscribers directly on the
   `OutboxRouter` instead.
 
 The [DLQ](./dlq.md) and the [metrics-recorder seam](./observability.md)
-**are** available through the router: pass `dlq_table=` and
+are also available through the router: pass `dlq_table=` and
 `metrics_recorder=` to `OutboxRouter(...)` exactly as you would to
-`OutboxBroker(...)` — they forward to the inner broker.
+`OutboxBroker(...)`, and they forward to the inner broker.
 
 ```python
 from faststream_outbox import make_dlq_table  # alongside make_outbox_table
@@ -165,7 +165,7 @@ in handlers for dependencies.
 
 ## Engine ownership
 
-The caller owns the `AsyncEngine`. `OutboxBroker` does **not** close it.
+The caller owns the `AsyncEngine`. `OutboxBroker` does not close it.
 Dispose it in your app's lifespan:
 
 ```python

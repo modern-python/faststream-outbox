@@ -21,7 +21,7 @@ async def handle_order(order_id: int) -> None:
 
 ## No `prefix`
 
-Unlike some FastStream routers, `OutboxRouter` does **not** accept a
+Unlike some FastStream routers, `OutboxRouter` does not accept a
 `prefix` argument. Queues are routed by their literal name, so producers
 and consumers must agree on the exact string. If you want namespacing
 (e.g., one Postgres instance shared across services), put it in the queue
@@ -32,7 +32,7 @@ name itself:
 async def handle_order(...): ...
 ```
 
-The reason is simple: the outbox row's `queue` column is what the fetch
+Prefixes are left out because the outbox row's `queue` column is what the fetch
 CTE filters on, and adding an implicit prefix would mean producers need to
 know which router published the subscriber. Explicit queue names keep that
 contract local.
@@ -73,7 +73,7 @@ router = OutboxRouter(
 
 All `@broker.subscriber` options (`max_workers`, `retry_strategy`,
 `fetch_batch_size`, `lease_ttl_seconds`, `max_deliveries`, `ack_policy`,
-…) are accepted by `OutboxRoute` and `router.subscriber` — see the
+…) are accepted by `OutboxRoute` and `router.subscriber`. See the
 [subscriber page](./subscriber.md) for the full list.
 
 ## Gotcha: walking every subscriber

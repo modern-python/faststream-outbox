@@ -1,7 +1,7 @@
 # Timers
 
-Schedule an outbox row to fire later by passing `activate_in` (relative)
-or `activate_at` (absolute, tz-aware) — exactly one. Pass `timer_id` to
+Schedule an outbox row to fire later by passing exactly one of
+`activate_in` (relative) or `activate_at` (absolute, tz-aware). Pass `timer_id` to
 deduplicate per `(queue, timer_id)`; cancel a not-yet-leased timer with
 `broker.cancel_timer(...)`.
 
@@ -36,7 +36,7 @@ same `(queue, timer_id)` already exists.
 ### Mutually exclusive
 
 Passing both `activate_in` and `activate_at` raises `ValueError`. They are
-two ways to say the same thing — "make this row invisible to fetch until
+two ways to say the same thing: "make this row invisible to fetch until
 the given moment".
 
 ### Timezone-aware `activate_at`
@@ -49,7 +49,7 @@ explicit `ValueError` rather than guessing your intended zone.
 For `publish` with `activate_in`, `next_attempt_at` is computed server-side
 via `now() + make_interval(secs => :s)` to stay clock-skew-safe. With
 `activate_at`, you supply an absolute instant, so it is stored verbatim and
-compared against the *worker's* clock at fetch time — only `activate_in` is
+compared against the *worker's* clock at fetch time. Only `activate_in` is
 skew-safe; `activate_at` is as accurate as your producers' and workers'
 clocks agree. For `publish_batch`, `activate_in` is also client-side
 (`datetime.now(UTC) + activate_in`) because executemany doesn't compose
@@ -85,9 +85,8 @@ assert second is None
 ```
 
 NOTIFY is skipped when the row is genuinely future-dated (a *future*
-`activate_in` / `activate_at`) OR the conflict path returned no row — both
-cases would either wake listeners that find nothing, or wake them
-prematurely. A *past* `activate_at` is already eligible, so it still
+`activate_in` / `activate_at`) or the conflict path returned no row. In both cases a NOTIFY would either
+wake listeners that find nothing or wake them prematurely. A *past* `activate_at` is already eligible, so it still
 notifies.
 
 `timer_id` is only available on single `publish`, not on `publish_batch`
@@ -95,17 +94,17 @@ notifies.
 
 ### `timer_id` dedups only *live* rows
 
-The unique index is **partial** — `(queue, timer_id) WHERE timer_id IS NOT
+The unique index is partial: `(queue, timer_id) WHERE timer_id IS NOT
 NULL`. It constrains only rows currently in the table. Once a timer fires
 (the row is deleted) or is cancelled, the same `timer_id` can be inserted
-fresh. So `timer_id` is a dedup key for **in-flight / pending** timers, not
-a permanent idempotency key — it won't stop a value from being re-published
+fresh. So `timer_id` is a dedup key for in-flight / pending timers, not
+a permanent idempotency key: it won't stop a value from being re-published
 after the original delivery has completed.
 
 ## Cancellation
 
 `broker.cancel_timer(*, queue, timer_id, session)` issues a `DELETE` on
-the caller's session, but only if the row is **not yet leased**:
+the caller's session, but only if the row is not yet leased:
 
 ```python
 deleted = await broker.cancel_timer(
@@ -128,7 +127,7 @@ returns `False`.
 
 Timer firing latency is bounded by the subscriber's `max_fetch_interval`
 (default `10` seconds) after `next_attempt_at` elapses. NOTIFY does not
-help here — listeners can't act on a future row, so the fetch loop has to
+help here: listeners can't act on a future row, so the fetch loop has to
 poll for it.
 
 Lower `max_fetch_interval` for sub-10s precision. Sub-second precision is
@@ -138,12 +137,12 @@ sleep inside the handler, or use a different scheduler.
 ## Test broker note
 
 In tests using `TestOutboxBroker` (default `run_loops=False` mode),
-`activate_in` / `activate_at` are **ignored** and timers fire immediately
-— sync dispatch ignores `next_attempt_at`. This trades production parity
+`activate_in` / `activate_at` are ignored and timers fire immediately,
+because sync dispatch ignores `next_attempt_at`. This trades production parity
 for test ergonomics: tests can assert handler effects without time travel.
 
-The schedule is still recorded on the fake row — bind the
-`TestOutboxBroker` to a name and read
-`tb.fake_client.rows[0].next_attempt_at` — if a test needs to assert on it.
+The schedule is still recorded on the fake row. If a test needs to assert
+on it, bind the `TestOutboxBroker` to a name and read
+`tb.fake_client.rows[0].next_attempt_at`.
 Pass `run_loops=True` if you need scheduled delivery to actually
 wait. See [Testing](./testing.md).
