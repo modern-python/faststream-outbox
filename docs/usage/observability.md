@@ -14,14 +14,13 @@ catalog, and the operator PromQL playbook.
 MetricsRecorder = Callable[[str, Mapping[str, Any]], None]
 ```
 
-The default (`_noop_recorder`) lets instrumentation sites call
-unconditionally. The recorder threads through `OutboxBrokerConfig` to:
+The default is a no-op recorder. The broker passes the recorder to:
 
-- The subscriber's seven core events via `OutboxSubscriber._emit_metric`
+- Every subscriber, which emits seven core events
   (`fetched`, `dispatched`, `acked`, `nacked_retried`, `nacked_terminal`,
   `lease_lost`, `drain_timeout`), plus a conditional `dlq_written` when a DLQ
   is configured
-- The producer's single event (`published`) via `OutboxProducer._emit_metric`
+- The producer, which emits a single event (`published`)
 
 ### Bare seam
 
@@ -147,11 +146,11 @@ dlq_written](./dlq.md#metric-dlq_written).
 
 ## Test broker note
 
-`TestOutboxBroker` patches `broker.publish` directly via
-`mock.patch.object`, bypassing `_basic_publish` — so middleware-registered
+`TestOutboxBroker` replaces `broker.publish` with a patched version that
+skips the middleware publish path, so middleware-registered
 **publish-scope** metrics do **not** fire in test mode. Middleware
-**consume-scope** metrics still fire (because `dispatch_one` calls
-`self.consume()` which walks the middleware stack normally).
+**consume-scope** metrics still fire, because handlers are still consumed
+through the normal middleware stack.
 
 The recorder-seam `published` event provides synthetic publish-side
 coverage in test mode via `FakeOutboxProducer`. The synthetic events use

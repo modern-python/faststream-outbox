@@ -17,13 +17,16 @@ The outbox solves this by collapsing both writes into a single database
 transaction. Instead of publishing to a broker, you `INSERT` a row into an
 `outbox` table on the same `AsyncSession` that holds your domain write. A
 separate process polls the table and forwards rows to their consumers. The
-row commits with your domain write or rolls back with it — atomicity is
-free.
+row commits or rolls back with your domain write.
 
-`faststream-outbox` collapses the third "separate process" into the
-subscriber itself: the same Postgres table holds the queue, and the
-subscriber's polling loop *is* the consumer. No relay process, no Kafka, no
-Rabbit.
+In `faststream-outbox` that separate process is an outbox subscriber, and
+you choose what it does with each row:
+
+- Standalone: the Postgres table is the queue and the subscriber's handler
+  is the consumer. No other message bus is involved.
+- Relay: the subscriber forwards each row to Kafka, RabbitMQ, NATS or Redis
+  through a foreign-broker publisher decorator. See
+  [Relay to a foreign broker](../usage/relay.md).
 
 *See [Comparison](../concepts/comparison.md) for when CDC or Kafka
 transactions are the better fit.*

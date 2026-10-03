@@ -165,6 +165,22 @@ in handlers for dependencies.
 
 ## Engine ownership
 
-The caller owns the `AsyncEngine`. `OutboxBroker` does **not** close it —
-typically your FastAPI app does, via `app.add_event_handler("shutdown",
-engine.dispose)` or its lifespan context manager.
+The caller owns the `AsyncEngine`. `OutboxBroker` does **not** close it.
+Dispose it in your app's lifespan:
+
+```python
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    yield
+    await engine.dispose()
+
+
+app = FastAPI(lifespan=lifespan)
+app.include_router(outbox_router)
+```

@@ -160,9 +160,9 @@ pip install 'faststream-outbox[opentelemetry,prometheus]' \
 
 Here OpenTelemetry supplies **spans** (exported to OTLP) and Prometheus
 supplies **all metrics** (two registries scraped over HTTP). The OTel
-middleware runs span-only — its meters would otherwise land on the global
-Prometheus registry, which neither endpoint below exposes, so they are left
-off to avoid a dead, unscraped meter path.
+middleware runs span-only: it gets no `meter_provider`, so its meters go to
+the global OpenTelemetry meter provider, which is a no-op unless you set one.
+Neither endpoint below exposes them.
 
 ```python
 # app.py — run with `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
@@ -191,7 +191,7 @@ trace.set_tracer_provider(tracer_provider)
 
 # Two registries: the middleware and the recorder both define the same
 # faststream_* consume/publish collectors, so sharing one registry raises
-# "Duplicated timeseries in CollectorRegistry" at broker construction.
+# "Duplicated timeseries in CollectorRegistry" when the second one is created.
 MIDDLEWARE_REGISTRY = CollectorRegistry()
 RECORDER_REGISTRY = CollectorRegistry()
 
@@ -236,15 +236,17 @@ contributes spans only, per the note above.)
 **The two seams overlap on consume/publish series.** Both the middleware
 and the recorder emit the same `faststream_received_*` / `faststream_published_*`
 collectors, which is why they must live on **separate registries** (above) —
-sharing one raises `Duplicated timeseries in CollectorRegistry` at broker
-construction, and summing across both double-counts every consume and
+sharing one raises `Duplicated timeseries in CollectorRegistry` as soon as
+the second of them is created, and summing across both double-counts every consume and
 publish. Treat the middleware as the source of truth for consume/publish;
 the recorder's unique value is the outbox-internal events the middleware
 can't see (`fetched`, `lease_lost`, terminal reasons, `dlq_written`).
 
 The providers set `messaging.system = "outbox"`, matching the
-recorder-seam adapters. The OTel provider maps `row.id →
+recorder-seam adapters. On consume spans the OTel provider maps `row.id →
 messaging.message.id`, `row.queue → messaging.destination_publish.name`,
-`correlation_id → messaging.message.conversation_id`, `len(payload) →
-messaging.message.payload_size_bytes`, and `len(cmd.batch_bodies) →
+`correlation_id → messaging.message.conversation_id`, and `len(payload) →
+messaging.message.payload_size_bytes`. On publish spans it maps the target
+`queue → messaging.destination.name`, `correlation_id →
+messaging.message.conversation_id`, and `len(cmd.batch_bodies) →
 messaging.batch.message_count` when >1.

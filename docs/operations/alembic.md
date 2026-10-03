@@ -367,7 +367,7 @@ op.execute("""
         created_at      TIMESTAMPTZ NOT NULL,
         failed_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
         failure_reason  VARCHAR(64) NOT NULL,
-        last_exception  TEXT,
+        last_exception  VARCHAR,
         timer_id        VARCHAR(255),
         PRIMARY KEY (id, failed_at)
     ) PARTITION BY RANGE (failed_at);

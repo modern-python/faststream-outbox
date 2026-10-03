@@ -11,6 +11,11 @@ of truth; the validator never duplicates the schema declaration. When the
 broker was constructed with a `dlq_table`, `validate_schema()` runs a
 second pass over the DLQ table the same way.
 
+Alembic's comparison cannot see partial-index predicates or check
+constraints, so the validator also queries `pg_catalog` (`pg_index`,
+`pg_constraint`) directly and reports a missing or drifted partial-index
+predicate or lease check constraint.
+
 ## Install
 
 Alembic is an **optional dependency**:
@@ -32,6 +37,17 @@ await broker.validate_schema()
 Raises `RuntimeError` if the live table is missing what the broker needs —
 absent table, missing columns, mismatched column types, flipped
 nullability, missing partial indexes.
+
+Pass `check_autovacuum=True` to also check that the outbox table carries
+the recommended autovacuum reloptions (see
+[Alembic migrations](../operations/alembic.md), `outbox_autovacuum_ddl`).
+An untuned table raises a `RuntimeError` whose message starts with
+`Outbox autovacuum not tuned:`, separate from any schema mismatch. The
+default (`False`) skips this check.
+
+```python
+await broker.validate_schema(check_autovacuum=True)
+```
 
 Extras are intentionally ignored: the validator only flags **missing**
 schema (`add_*` / `modify_*` ops). `remove_*` ops are silently dropped so

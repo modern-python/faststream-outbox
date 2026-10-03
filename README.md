@@ -108,7 +108,7 @@ See [How it works](https://faststream-outbox.modern-python.org/introduction/how-
 ## Optional extras
 
 - `faststream-outbox[asyncpg]` — asyncpg driver (enables `LISTEN/NOTIFY` for ~10ms idle dispatch)
-- `faststream-outbox[fastapi]` — FastAPI integration via `OutboxRouter`
+- `faststream-outbox[fastapi]` — FastAPI integration via `faststream_outbox.fastapi.OutboxRouter`
 - `faststream-outbox[validate]` — Alembic for `broker.validate_schema()`
 - `faststream-outbox[prometheus]` — Prometheus metrics adapter
 - `faststream-outbox[opentelemetry]` — OpenTelemetry metrics adapter
