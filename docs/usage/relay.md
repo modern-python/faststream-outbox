@@ -159,11 +159,26 @@ that `broker.include_router(router)` must happen *before* the brokers
 start. Inside `FastAPI(..., lifespan=...)` the include happens during app
 construction (before lifespan), so it's automatic.
 
-For the standalone (non-FastAPI) lifecycle, the order is:
+For the standalone (non-FastAPI) lifecycle, use the plain broker routers
+(`faststream.kafka.KafkaRouter` and `faststream_outbox.OutboxRouter`; the
+FastAPI routers above only mount on a FastAPI app) and include them before
+starting:
 
 ```python
-# kafka_router / outbox_router are constructed exactly as in the FastAPI
-# example above (KafkaRouter(...) / OutboxRouter(...)).
+from faststream.kafka import KafkaRouter
+from faststream_outbox import OutboxRouter
+
+kafka_router = KafkaRouter()
+outbox_router = OutboxRouter()
+publisher_kafka = kafka_router.publisher("kafka_topic")
+
+
+@publisher_kafka
+@outbox_router.subscriber("outbox_queue")
+async def relay(body: dict) -> dict:
+    return body
+
+
 broker_kafka.include_router(kafka_router)
 broker_outbox.include_router(outbox_router)
 # then start
@@ -180,7 +195,7 @@ from faststream_outbox import OutboxResponse
 @publisher_kafka
 @broker_outbox.subscriber("outbox_queue")
 async def relay(body: dict) -> OutboxResponse:
-    return OutboxResponse(body=body, queue="next_queue", session=...)  # rejected at dispatch
+    return OutboxResponse(body=body, queue="next_queue", session=session)  # rejected at dispatch
 ```
 
 This would both insert a row into the outbox AND publish to Kafka. The

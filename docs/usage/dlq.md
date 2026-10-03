@@ -75,8 +75,8 @@ same transaction, so the constraint would be unsatisfiable. There is also no
 
 ## Atomicity
 
-When `dlq_table` is configured, `OutboxClient.delete_with_lease` switches to
-a single CTE statement:
+When `dlq_table` is configured, the terminal delete becomes a single CTE
+statement:
 
 ```sql
 WITH deleted AS (
@@ -99,7 +99,7 @@ Two operator-visible properties fall out of this shape:
   lease-token guard documented in [Subscriber](./subscriber.md) is
   preserved.
 - **DLQ-write failure rolls back the DELETE.** If the INSERT fails
-  (column mismatch, disk full, ENUM violation), the whole statement
+  (column mismatch, disk full, a violated constraint), the whole statement
   rolls back. The outbox row stays leased and is reclaimed when the
   lease expires. Misconfiguration surfaces as outbox growth plus
   `lease_lost` spikes rather than silent audit loss.
@@ -109,8 +109,7 @@ round-trip per terminal flush, same cost as the no-DLQ path.
 
 ## `last_exception` truncation
 
-The serialized exception (`repr(exc)`) is bounded at 8 KiB by
-`_LAST_EXCEPTION_MAX_CHARS` in `faststream_outbox/subscriber/usecase.py`.
+The serialized exception (`repr(exc)`) is bounded at 8 KiB.
 Anything longer is truncated and `…[truncated]` appended.
 
 Rationale: some exceptions carry MB-scale payloads — pydantic validation
@@ -149,8 +148,8 @@ opt-in install + `/health` pattern.
 
 ## Metric: `dlq_written`
 
-`_flush_terminal` emits a `dlq_written` recorder event after the CTE
-commits successfully. Skipped on the lease-lost path (no audit row was
+The subscriber emits a `dlq_written` recorder event after the terminal
+flush with the DLQ insert commits successfully. Skipped on the lease-lost path (no audit row was
 written, so nothing to count).
 
 Tags:

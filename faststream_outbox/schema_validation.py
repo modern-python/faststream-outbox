@@ -275,7 +275,7 @@ def _run_validate(
     this flag.
     """
     if not is_alembic_installed:
-        msg = "validate_schema() requires alembic. Install with `pip install faststream-outbox[validate]`."
+        msg = "validate_schema() requires alembic. Install with `pip install 'faststream-outbox[validate]'`."
         raise ImportError(msg)
 
     # Isolated MetaData containing ONLY the canonical table, so the user's

@@ -79,18 +79,13 @@ All `@broker.subscriber` options (`max_workers`, `retry_strategy`,
 ## Gotcha: walking every subscriber
 
 Subscribers registered via `OutboxRouter` (then
-`broker.include_router(router)`) live on the router, not on
-`broker._subscribers`. If you need to introspect every subscriber on a
-broker — counting active queues, asserting on schema, etc. — walk
-`broker.subscribers` (the property):
+`broker.include_router(router)`) live on the router. If you need to
+introspect every subscriber on a broker (counting active queues,
+asserting on schema, etc.), walk `broker.subscribers`:
 
 ```python
 for sub in broker.subscribers:
     ...
 ```
 
-The property iterates `[*broker._subscribers,
-*(s for r in broker.routers for s in r.subscribers)]`, so it covers both
-inline and router-attached subscribers. The bare `broker._subscribers`
-(a `WeakSet`, set by the upstream `Registrator`) holds only the inline
-ones and will silently miss everything attached via a router.
+The property covers both inline and router-attached subscribers.

@@ -12,8 +12,15 @@ integration for the **transactional outbox pattern** — a Postgres table is
 the message queue. A producer writes a domain entity and an outbox row in
 the *same* SQLAlchemy transaction; a subscriber polls the table with
 `FOR UPDATE SKIP LOCKED`, runs the handler, and deletes the row on
-success. The table *is* the queue — no separate message bus, no relay
-process, no Kafka.
+success.
+
+There are two ways to use it:
+
+- Standalone: the table is the queue. Subscribers process rows in place,
+  with no separate message bus.
+- Relay: a subscriber forwards each row to Kafka, RabbitMQ, NATS or Redis
+  with a stacked publisher decorator. See
+  [Relay to a foreign broker](usage/relay.md).
 
 ## Use it when
 
@@ -72,6 +79,8 @@ one-line summary.
 - [How it works](introduction/how-it-works.md) — two-loop subscriber,
   lease-token invariant, at-least-once semantics, opt-in DLQ on terminal
   failure.
+- [Performance](concepts/performance.md): round-trips and table churn,
+  and the levers that address each.
 - [Comparison](concepts/comparison.md) — vs writing your own, vs CDC,
   vs Kafka transactions, vs `LISTEN/NOTIFY`, vs Celery, vs FastStream
   foreign-broker direct.

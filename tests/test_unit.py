@@ -1426,7 +1426,7 @@ def test_validate_schema_sync_raises_when_alembic_missing() -> None:
     # simulate "not installed" by flipping the boolean the function checks.
     with (
         patch("faststream_outbox.schema_validation.is_alembic_installed", new=False),
-        pytest.raises(ImportError, match=r"pip install faststream-outbox\[validate\]"),
+        pytest.raises(ImportError, match=r"pip install 'faststream-outbox\[validate\]'"),
     ):
         _validate_schema_sync(MagicMock(), t)
 

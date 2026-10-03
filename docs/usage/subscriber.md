@@ -108,12 +108,11 @@ Per-subscriber knobs, passed to `@broker.subscriber("…", …)`:
 async def handle_urgent(body: dict) -> None: ...
 ```
 
-`OutboxSubscriberConfig.__post_init__` (in `subscriber/config.py`) warns or
-raises on likely-wrong combinations (`lease_ttl_seconds <= max_fetch_interval`,
-`max_deliveries` without retry, `min_fetch_interval > max_fetch_interval`,
-etc.). Validation lives on the config, not the factory, so **every**
-construction path — `@broker.subscriber`, `@router.subscriber`, direct
-construction — is checked.
+Subscriber options are validated when the subscriber is created: likely-wrong
+combinations (`lease_ttl_seconds <= max_fetch_interval`, `max_deliveries`
+without retry, `min_fetch_interval > max_fetch_interval`, etc.) warn or
+raise. **Every** construction path (`@broker.subscriber`, `@router.subscriber`,
+`OutboxRoute`) is checked.
 
 The table above lists the outbox-specific knobs. The standard FastStream
 subscriber kwargs pass through unchanged too: `dependencies`, `parser`,

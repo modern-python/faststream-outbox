@@ -39,7 +39,7 @@ This is the "spans + bus parity" mode the native middleware
 
 ## What the middleware seam *can't* observe
 
-Three events fire **outside** the handler invocation, with no
+Four events fire **outside** the handler invocation, with no
 `StreamMessage` in scope:
 
 - **`fetched` ticks (including empty fetches).** Emitted by the fetch
@@ -57,6 +57,8 @@ Three events fire **outside** the handler invocation, with no
   the `max_deliveries` ceiling and was dropped *without invoking the
   handler*. No handler call = no `consume_scope`. The middleware has
   nothing to wrap.
+- **`drain_timeout`.** Fired during `stop()` when the shutdown drain
+  overruns `graceful_timeout`. There is no handler scope at all.
 
 ## What the recorder seam observes naturally
 
@@ -107,7 +109,6 @@ The "Both seams together" recipe in [Setup Prometheus and OpenTelemetry
 wires the recommended layout: native middleware on the broker, plus a
 `metrics_recorder` for the outbox-internal events.
 
-This isn't redundancy — each seam fires for events the other can't see.
 A service that registers only the middleware seam loses every
 `lease_lost`, `fetched`, and `max_deliveries`-terminal signal. A
 service that registers only the recorder seam loses tracing.

@@ -92,8 +92,8 @@ async def test_publisher() -> None:
 ```
 
 `broker.publisher("q").publish(...)` lands rows in the same fake store as
-`broker.publish(queue="q", ...)` — the test broker swaps the producer slot
-for a `FakeOutboxProducer` via the FastStream `_basic_publish` flow. The one
+`broker.publish(queue="q", ...)`, because the test broker swaps in a fake
+producer that both paths go through. The one
 difference in tests is the `session`: `broker.publish` is patched to make it
 optional, but the publisher path is not, so pass a (mock) `AsyncSession` as
 shown.
@@ -101,7 +101,7 @@ shown.
 ## Loop-driven mode
 
 For tests that exercise real polling semantics — retry rescheduling, lease
-expiry / reclaim, `_fetch_loop` error recovery, or honoring `activate_in`
+expiry / reclaim, fetch-loop error recovery, or honoring `activate_in`
 delays — opt in with `run_loops=True`:
 
 ```python
@@ -134,9 +134,8 @@ assert received == [{"order_id": 1}]
 `feed(queue, payload, *, headers=None, next_attempt_at=None, timer_id=None)`
 inserts a row straight into the in-memory store and (in loop mode) wakes the
 fetch loop like a production NOTIFY would. In loop mode, the real
-`_fetch_loop` / `_worker_loop` run against the fake client. Subscribers without registered handlers are skipped in
-`_fake_start` (mirrors `OutboxSubscriber.start`'s `if not self.calls:
-return`).
+fetch and worker loops run against the fake client. Subscribers without
+registered handlers are not started, matching production.
 
 ## Notes
 
@@ -154,24 +153,23 @@ return`).
   to another worker, but tests will only invoke the handler once.
   Idempotency must be verified separately. Use `run_loops=True` for tests
   that need to observe lease-expiry behavior.
-- **`FakeOutboxClient.validate_schema()` raises `NotImplementedError`** —
-  there is no real DB to validate against, and a silent pass would let
-  users ship broken schemas while their tests stay green. Tests that need
-  real schema validation must construct an `OutboxClient(real_engine,
-  table)` against the same DSN the migrations ran against.
+- **`broker.validate_schema()` raises `NotImplementedError` under
+  `TestOutboxBroker`**: there is no real DB to validate against, and a
+  silent pass would let users ship broken schemas while their tests stay
+  green. Tests that need real schema validation must call
+  `validate_schema()` on an `OutboxBroker(real_engine, outbox_table=...)`
+  outside the test broker, against the same DSN the migrations ran against.
 
 ## Limitations of the fake broker
 
-`TestOutboxBroker._fake_start` deliberately **skips the parent's
-publisher-iteration loop** (the one that calls
-`create_publisher_fake_subscriber`). FastStream's publisher-spy
-infrastructure mocks the registered handler to forward
-`publisher.publish()` calls — which conflicts with the outbox's real
-dispatch path (the fake producer already lands rows in the fake client
-*and* drives the real handler via `_sync_dispatch`).
-
-If you need FastStream's publisher-mock semantics for an outbox test,
-swap that override out before re-using the parent's `_fake_start`.
+`TestOutboxBroker` does not install FastStream's publisher spies (the
+fake subscribers that `TestKafkaBroker` and friends attach to each
+publisher). Those spies mock the registered handler to forward
+`publisher.publish()` calls, which would conflict with the outbox's real
+dispatch path: the fake producer already lands rows in the fake client
+*and* drives the real handler. Publisher-mock assertions such as
+`publisher.mock.assert_called_once_with(...)` are therefore not available;
+assert on handler side effects or `fake_client.rows` instead.
 
 ## pytest-asyncio configuration
 

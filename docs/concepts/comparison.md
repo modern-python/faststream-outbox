@@ -30,8 +30,8 @@ production system:
 - the **retry-strategy hierarchy** (`ExponentialRetry`, `NoRetry`, …)
   enforcing `max_attempts` and `max_total_delay_seconds` uniformly;
 - **`validate_schema()`** via Alembic's `autogenerate.compare_metadata`;
-- **drain semantics** on stop, with the `running` / `_stopping` two-flag
-  dance and parallel-gathered subscriber shutdown;
+- **drain semantics** on stop: new fetches stop while in-flight handlers
+  finish, and subscribers drain concurrently;
 - **`LISTEN/NOTIFY`** short-circuit on top of polling, with NOTIFY
   suppression on future-dated rows and `timer_id` conflict no-ops;
 - **`timer_id` dedup** via a partial unique index plus
@@ -39,8 +39,8 @@ production system:
 - the **DLQ atomicity CTE** that rolls back the DELETE when the DLQ insert
   fails.
 
-None of these is hard individually; in aggregate they decide whether the
-outbox survives the second year of production load.
+None of these is hard individually. Together they make up most of the work
+past an MVP.
 
 You also pick up the [Subscriber](../usage/subscriber.md),
 [Publisher](../usage/publisher.md), [Dead-letter queue](../usage/dlq.md), and
@@ -74,9 +74,8 @@ when the **async-Python logical-replication tooling gap** is too thin
 to lean on: there is no async-native logical-decoding client comparable
 to Debezium's JVM connectors, so a Python CDC path means either running
 the JVM stack alongside your app or driving `pg_recvlogical` / a thin
-`psycopg` replication-protocol wrapper yourself. That is the load-bearing
-point for this project — a 2026-05-07 reassessment confirmed the gap had
-not closed sufficiently to make CDC the recommended path here.
+`psycopg` replication-protocol wrapper yourself. That gap is why this
+project does not recommend CDC as the default path.
 
 **TL;DR.** Pick CDC when you already need WAL capture or have producers
 outside your control. Pick this when you own the producer and want

@@ -41,7 +41,7 @@ Installed 24 packages in 37ms
  + click==8.4.1
  + fast-depends==3.0.8
  + faststream==0.7.1
- + faststream-outbox==0.8.0
+ + faststream-outbox==0.14.1
  + greenlet==3.5.1
  + idna==3.18
  + mako==1.3.12
@@ -61,8 +61,8 @@ Installed 24 packages in 37ms
 ```
 
 Your exact pinned versions will differ; that is fine. The Python version
-line will reflect whatever `uv` resolves on your machine — 3.13 or 3.14
-are both fine.
+line will reflect whatever `uv` resolves on your machine; any Python 3.11
+or newer is fine.
 
 ## Step 2: Start Postgres
 
@@ -302,9 +302,8 @@ The interesting property is what happened *inside* `publish_one`: the
 `broker.publish` call inserted a row into the outbox table through the
 session you opened. `session.begin()` committed it. If that commit had
 rolled back — say, because a domain write on the same session
-failed — the outbox row would have rolled back with it. There is no
-universe where the row exists but the domain write doesn't, or vice
-versa. That atomicity is the whole point.
+failed — the outbox row would have rolled back with it. The row and
+the domain write commit or roll back together. That atomicity is the whole point.
 
 ## Clean up
 

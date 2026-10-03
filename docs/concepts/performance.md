@@ -52,11 +52,10 @@ still emits one NOTIFY), and the batched-flush win is largest at low `max_worker
 
 ### Producer: NOTIFY dedup (automatic)
 
-`broker.publish` / `publish_batch` used to emit one `SELECT pg_notify(...)` per
-call, so N publishes to the same queue in one transaction cost N NOTIFY
-round-trips — N−1 of them pure waste, since Postgres already coalesces identical
-notifications per transaction at delivery. Since 0.11.0 the producer emits **one
-`pg_notify` per (transaction, queue)**. It is default-on, has no knob, and is
+`broker.publish` / `publish_batch` emit **one `pg_notify` per (transaction,
+queue)**, so N publishes to the same queue in one transaction cost one NOTIFY
+round-trip. Postgres already coalesces identical notifications per transaction
+at delivery, so extra NOTIFYs would be pure waste. It is default-on, has no knob, and is
 behavior-preserving: the subscriber still gets its wake, fired inline at the first
 publish. You do not configure this — it just makes bulk publishing cheaper. See
 [How it works](../introduction/how-it-works.md) for the write path.

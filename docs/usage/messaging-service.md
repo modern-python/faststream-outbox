@@ -70,7 +70,7 @@ class Resources(Group):
     outbox_broker = providers.Factory(
         scope=Scope.APP,
         creator=lambda engine: OutboxBroker(engine, outbox_table=OUTBOX_TABLE),
-        kwargs={"engine": Resources.database_engine},
+        kwargs={"engine": database_engine},
     )
 ```
 
