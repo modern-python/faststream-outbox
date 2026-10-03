@@ -28,14 +28,14 @@ async def handle(body: dict) -> None: ...
 ```
 
 The subscriber claims rows from any of its queues in a single fetch. Its
-[connection budget](#connection-budget) is unchanged — `max_workers + 1`
+[connection budget](#connection-budget) is unchanged: `max_workers + 1`
 pool connections regardless of how many queues it serves.
 
 In the AsyncAPI document it appears as one channel per queue
 (`orders:Handle`, `refunds:Handle`), each addressed by that queue, rather
 than one channel for the subscriber.
 
-Do **not** register two subscribers on the **same** queue: they compete for
+Do not register two subscribers on the same queue: they compete for
 the same rows, and registration emits a warning to that effect. To run more
 than one handler over a queue, attach them to a single subscriber; to scale
 throughput, raise `max_workers`.
@@ -75,7 +75,7 @@ async def handle(msg: OutboxMessage, broker: OutboxBroker) -> None: ...
 
 `OutboxMessage`, `OutboxBroker`, `OutboxProducer`, and `OutboxClient` are
 all available. For FastAPI handlers, import the same names from
-`faststream_outbox.fastapi` — they resolve via the same `Context()` paths
+`faststream_outbox.fastapi`. They resolve via the same `Context()` paths
 but go through FastAPI's dependency resolver so `Depends(...)` and these
 shortcuts can be mixed freely.
 
@@ -89,7 +89,7 @@ Per-subscriber knobs, passed to `@broker.subscriber("…", …)`:
 | `fetch_batch_size` | `10` | Rows claimed per fetch cycle |
 | `min_fetch_interval` | `1.0` s | Base for the adaptive idle backoff (jittered ±50%, so an actual wait can land below it) and the wait when the inflight queue is full; no sleep at all while fetches keep returning rows |
 | `max_fetch_interval` | `10.0` s | Ceiling for the adaptive idle backoff (with jitter) |
-| `lease_ttl_seconds` | `60.0` s | How long a claim is valid before another fetch may reclaim it. **Must exceed your handler's P99 with margin.** |
+| `lease_ttl_seconds` | `60.0` s | How long a claim is valid before another fetch may reclaim it. Must exceed your handler's P99 with margin. |
 | `max_deliveries` | `None` (unbounded) | Total claims (including lease-expiry re-claims) after which the row is dropped without invoking the handler. Defends against handlers that consistently wedge. |
 | `terminal_flush_batch_size` | `1` (off) | Coalesce completed terminal `DELETE`s into one `DELETE … RETURNING` per N rows. `1` is one round-trip per message (unchanged). Higher trades a wider crash-redelivery window for far fewer round-trips. See [Batching terminal deletes](#batching-terminal-deletes). |
 | `ack_policy` | `AckPolicy.NACK_ON_ERROR` | See [Ack policy](#ack-policy) |
@@ -111,7 +111,7 @@ async def handle_urgent(body: dict) -> None: ...
 Subscriber options are validated when the subscriber is created: likely-wrong
 combinations (`lease_ttl_seconds <= max_fetch_interval`, `max_deliveries`
 without retry, `min_fetch_interval > max_fetch_interval`, etc.) warn or
-raise. **Every** construction path (`@broker.subscriber`, `@router.subscriber`,
+raise. Every construction path (`@broker.subscriber`, `@router.subscriber`,
 `OutboxRoute`) is checked.
 
 The table above lists the outbox-specific knobs. The standard FastStream
@@ -122,12 +122,12 @@ subscriber kwargs pass through unchanged too: `dependencies`, `parser`,
 spanning several queues it prefixes each channel (`Ingest:orders`,
 `Ingest:refunds`), since one title cannot name several channels on its own.
 
-## Slow handlers — dedicated queue
+## Slow handlers: dedicated queue
 
 When a handler's tail latency exceeds the subscriber's `lease_ttl_seconds`,
-the row's lease expires mid-flight and another fetch reclaims it →
-duplicate delivery. Don't hike `lease_ttl_seconds` globally — that delays
-reclaim of *actually* stuck rows everywhere. Instead, segregate slow work
+the row's lease expires mid-flight and another fetch reclaims it,
+causing duplicate delivery. Don't hike `lease_ttl_seconds` globally, because
+that delays reclaim of *actually* stuck rows everywhere. Instead, segregate slow work
 onto its own subscriber with a longer TTL:
 
 ```python
@@ -148,7 +148,7 @@ to the appropriate queue at `publish` time.
 !!! note "Account for queue depth, not just per-row latency"
     A fetch claims up to `fetch_batch_size` rows at once and each takes its
     lease at fetch time, then they wait their turn in an in-memory queue drained
-    by `max_workers` handlers. A row's lease clock runs **while it waits**, so the
+    by `max_workers` handlers. A row's lease clock runs while it waits, so the
     relevant bound is the *serialized* time to reach it, not one handler's P99:
 
     ```
@@ -165,7 +165,7 @@ to the appropriate queue at `publish` time.
 
 ## Batching terminal deletes
 
-By default each processed row is deleted with its own `DELETE` — one round-trip
+By default each processed row is deleted with its own `DELETE`, one round-trip
 per message. At `max_workers=1` those deletes serialise, and the round-trip
 (not the database work) is the throughput ceiling. Set
 `terminal_flush_batch_size` above `1` to coalesce completed rows and flush them
@@ -177,12 +177,12 @@ async def handle(order: dict) -> None: ...
 ```
 
 A worker buffers completed rows and flushes when the buffer reaches
-`terminal_flush_batch_size` **or** its inflight queue empties — so a
+`terminal_flush_batch_size` or its inflight queue empties, so a
 lightly-loaded queue still flushes immediately and batching adds no latency;
 batching only engages under sustained load.
 
-**What it buys.** In the benchmark (5 000 messages, `fetch_batch_size=100`), the
-terminal round-trips drop from one per message to one per batch — a **100×**
+In the benchmark (5 000 messages, `fetch_batch_size=100`), the
+terminal round-trips drop from one per message to one per batch, a 100×
 reduction in terminal `DELETE`s (5 000 → 50) with the same rows deleted. Because
 the terminal write stops being the bottleneck, a single batched worker
 out-throughputs a four-worker per-row subscriber, so you reach high throughput
@@ -190,12 +190,12 @@ without spending the extra [connection budget](#connection-budget) that more
 workers cost. The win is largest at low `max_workers` (where per-row deletes
 serialise) and narrows as worker parallelism rises.
 
-**The tradeoff — read before enabling.** Batching holds completed-but-undeleted
-rows in memory until the flush. On a **graceful** stop the buffer is flushed
-(no redelivery). But on an **ungraceful** crash (SIGKILL / OOM / power loss),
+Read the tradeoff before enabling it. Batching holds completed-but-undeleted
+rows in memory until the flush. On a graceful stop the buffer is flushed
+(no redelivery). But on an ungraceful crash (SIGKILL / OOM / power loss),
 up to `terminal_flush_batch_size` rows that already ran their handler are
 redelivered when another replica reclaims them. The outbox is *already*
-at-least-once — **handlers must be idempotent** — so this is not a new failure
+at-least-once (handlers must be idempotent), so this is not a new failure
 class, only a wider window: from at most one at-risk row (per-row) to up to a
 full batch. Two further effects to size for:
 
@@ -206,7 +206,7 @@ full batch. Two further effects to size for:
   `fetch_batch_size + max_workers × (terminal_flush_batch_size + 1)`; keep
   `lease_ttl_seconds` sized against that.
 
-It is **off by default** (`terminal_flush_batch_size=1` is byte-for-byte the
+It is off by default (`terminal_flush_batch_size=1` is byte-for-byte the
 per-row path). Enable it per subscriber when the queue is high-throughput and
 its handler is idempotent; leave it off for low-volume or
 exactly-once-sensitive queues.
@@ -225,10 +225,10 @@ row.
 | `AckPolicy.NACK_ON_ERROR` (default) | Consult the retry strategy on handler exceptions |
 | `AckPolicy.REJECT_ON_ERROR` | Delete on the first failure (the retry strategy is ignored) |
 | `AckPolicy.MANUAL` | Handler must call `await msg.ack()` / `nack()` / `reject()` itself |
-| `AckPolicy.ACK_FIRST` | **Not supported.** Passing it raises `ValueError` at registration |
+| `AckPolicy.ACK_FIRST` | Not supported. Passing it raises `ValueError` at registration |
 
 `ACK_FIRST` would delete the row *before* the handler runs, so a handler
-crash silently drops the message — defeating the outbox reliability
+crash silently drops the message, which defeats the outbox reliability
 guarantee. The factory rejects it at registration.
 
 ```python
@@ -248,9 +248,9 @@ async def handle(msg: OutboxMessage, body: dict) -> None:
 ```
 
 !!! warning "MANUAL: returning without acking is a terminal reject"
-    Under `AckPolicy.MANUAL`, a handler that returns **without** calling
+    Under `AckPolicy.MANUAL`, a handler that returns without calling
     `ack()` / `nack()` / `reject()` (and without raising) is treated as a
-    terminal **reject** — the row is **deleted** (or written to the DLQ with
+    terminal reject: the row is deleted (or written to the DLQ with
     `failure_reason="rejected"` if a `dlq_table` is configured), not retried.
     A handler that *raises* is nacked through the retry strategy instead, so
     only the silent-return path is destructive. Always ack/nack/reject on
@@ -293,7 +293,7 @@ U(-jitter_factor/2, +jitter_factor/2)` to spread out retries, matching
 
 | Strategy | Required | Optional (default) |
 |---|---|---|
-| `NoRetry` | — | — |
+| `NoRetry` | - | - |
 | `ConstantRetry` | `delay_seconds` | `jitter_factor` (`0.0`) |
 | `LinearRetry` | `initial_delay_seconds`, `step_seconds` | `jitter_factor` (`0.0`) |
 | `ExponentialRetry` | `initial_delay_seconds` | `multiplier` (`2.0`), `max_delay_seconds` (`None`), `jitter_factor` (`0.0`) |
@@ -335,17 +335,17 @@ The base strategy also enforces `max_attempts` and
 
 Each subscriber holds `max_workers + 1` long-lived SQLAlchemy pool
 connections (one writer per worker + one fetch), plus one raw asyncpg
-connection for `LISTEN` when available. Size your **engine pool** for
-`Σ subscribers × (max_workers + 1)`. An undersized pool does **not** block
-`broker.start()` — `start()` only schedules the loop tasks and returns;
-instead the fetch/worker loops stall on pool checkout and surface as
+connection for `LISTEN` when available. Size your engine pool for
+`Σ subscribers × (max_workers + 1)`. An undersized pool does not block
+`broker.start()`, because `start()` only schedules the loop tasks and returns.
+Instead the fetch/worker loops stall on pool checkout and surface as
 repeating reconnect ERROR logs with dispatch silently starved. SQLAlchemy's
 default `pool_size=5, max_overflow=10` covers a handful of single-worker
 subscribers; raise it for larger fleets.
 
 Server-side, the footprint is one larger: the raw asyncpg `LISTEN`
-connection lives **outside** the pool, so each subscriber consumes
-`max_workers + 2` Postgres connections. The budget is **per process** —
+connection lives outside the pool, so each subscriber consumes
+`max_workers + 2` Postgres connections. The budget is per process:
 each replica opens its own pool and LISTEN connections, so your Postgres
 `max_connections` needs to cover `replicas × Σ subscribers × (max_workers +
 2)`, otherwise additional replicas (or rolling deployments) are refused at
@@ -355,8 +355,8 @@ startup with `FATAL: too many connections`.
 
 ## Read-only inspection
 
-`subscriber.get_one()` and `async for msg in subscriber:` are **not
-supported** on `OutboxSubscriber` — both raise `NotImplementedError`.
+`subscriber.get_one()` and `async for msg in subscriber:` are not
+supported on `OutboxSubscriber`; both raise `NotImplementedError`.
 They would acquire a lease and bump `deliveries_count`, surprising
 semantics for a peek API. Use
 `broker.fetch_unprocessed(session=..., queue=...)` for lease-free reads of

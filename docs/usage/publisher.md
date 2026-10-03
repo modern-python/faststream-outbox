@@ -2,13 +2,13 @@
 
 There are three ways to write an outbox row:
 
-1. **`broker.publish(...)`** — inline call, one row.
-2. **`broker.publish_batch(...)`** — inline call, many rows in one INSERT.
-3. **`broker.publisher(queue, ...)`** — a typed, queue-scoped wrapper for
+1. `broker.publish(...)`: inline call, one row.
+2. `broker.publish_batch(...)`: inline call, many rows in one INSERT.
+3. `broker.publisher(queue, ...)`: a typed, queue-scoped wrapper for
    per-queue config and AsyncAPI spec coverage.
 
 All three share the same transactional contract: the caller supplies an
-`AsyncSession`, and the row commits with the caller's domain writes — the
+`AsyncSession`, and the row commits with the caller's domain writes. The
 broker does not flush, commit, or open its own transaction.
 
 For "consume from A → enqueue to B" relay flows, a fourth path is
@@ -80,15 +80,15 @@ await broker.publish_batch(
 ) -> None
 ```
 
-`publish_batch` returns nothing and does **not** accept `timer_id` —
-per-row dedup makes no sense in a batch. It also accepts `activate_in` /
+`publish_batch` returns nothing and does not accept `timer_id`,
+because per-row dedup makes no sense in a batch. It also accepts `activate_in` /
 `activate_at` to schedule every row in the batch identically; the schedule
 is applied client-side rather than server-side (a few-ms drift vs. the
 single-`publish` path).
 
 ## `broker.publisher(queue, ...)`
 
-`broker.publisher(queue, ...)` returns an `OutboxPublisher` — a typed,
+`broker.publisher(queue, ...)` returns an `OutboxPublisher`: a typed,
 queue-scoped wrapper around `broker.publish` with the same transactional
 contract:
 
@@ -120,12 +120,12 @@ broker.publisher(
 ```
 
 The publisher exists primarily for AsyncAPI spec coverage and to
-encapsulate per-queue config — hence the `title` / `description` / `schema`
-/ `include_in_schema` knobs above, alongside the static `headers`.
+encapsulate per-queue config, which is why it has the `title` / `description` / `schema`
+/ `include_in_schema` knobs above alongside the static `headers`.
 
 ### Not a relay decorator
 
-It is **standalone-only**: stacking it as a relay decorator on a
+It is standalone-only: stacking it as a relay decorator on a
 subscriber (`@orders_pub @broker.subscriber("inbox", ...)`) raises
 `NotImplementedError` at decoration time, because the dispatch loop has
 no reachable `AsyncSession` without breaking the outbox transactional
@@ -133,7 +133,7 @@ contract.
 
 For "consume from queue A → enqueue to queue B" relays, either call
 `broker.publish(value, queue="B", session=session)` directly inside your
-handler — on the same session that holds your domain writes — or
+handler, on the same session that holds your domain writes, or
 `return OutboxResponse(...)` (see below). (The inbound row's own terminal
 DELETE runs separately, on the worker's autocommit connection, not this
 session.)
@@ -148,15 +148,15 @@ transactional contract applies (you provide the session, the row commits
 with your domain writes):
 
 !!! note "The `session` must outlive the handler return"
-    The returned `OutboxResponse` is published **after** the handler
+    The returned `OutboxResponse` is published after the handler
     returns, so its `session` must still be open at that point. The
     requirement is about session *lifetime*, not any particular framework:
     provide the session through a dependency that the framework tears down
-    *after* the response flow — FastAPI's `Depends(get_session)` or
+    *after* the response flow. FastAPI's `Depends(get_session)` or
     FastStream's own `Depends` / `Context` session both do this. Opening
     your own `async with session_factory() as session:` inside the handler
-    does **not** work here: that session closes on `return`, before the row
-    is inserted — in that case call `broker.publish(..., session=session)`
+    does not work here: that session closes on `return`, before the row
+    is inserted. In that case, call `broker.publish(..., session=session)`
     directly inside the `async with` instead (see
     [§ Not a relay decorator](#not-a-relay-decorator)).
 
@@ -186,23 +186,23 @@ async def handle(
 ```
 
 `correlation_id` propagates from the inbound message if you don't set one
-explicitly — useful for trace stitching. Plain returns (`None`, `dict`,
+explicitly, which is useful for trace stitching. Plain returns (`None`, `dict`,
 etc.) are silently skipped, so handlers that don't want to chain just
 return normally.
 
 !!! warning "Duplicate delivery on crash"
     The chained `downstream` row commits with the handler's transaction,
-    but the inbound `orders` row's terminal `DELETE` runs **after** the
+    but the inbound `orders` row's terminal `DELETE` runs after the
     handler returns, on the worker's separate autocommit connection. A
     crash between those two points leaves the inbound row undeleted, so it
-    is redelivered — producing a **second** chained row. For non-idempotent
+    is redelivered and produces a second chained row. For non-idempotent
     chains, pass a deterministic `timer_id` derived from the inbound message
     so the duplicate insert is a no-op (see [Timers](./timers.md)).
 
 ## Annotated handler params
 
 `faststream_outbox.annotations` exports `Annotated[..., Context(...)]`
-shortcuts for the broker, producer, and client — useful when you want to
+shortcuts for the broker, producer, and client, useful when you want to
 publish from inside a handler:
 
 ```python
@@ -215,7 +215,7 @@ async def handle(msg: OutboxMessage, broker: OutboxBroker) -> None:
         await broker.publish({"chained": True}, queue="downstream", session=session)
 ```
 
-For FastAPI handlers, import the same names from `faststream_outbox.fastapi`
-— they resolve via the same `Context()` paths but go through FastAPI's
-dependency resolver so `Depends(...)` and these shortcuts can be mixed
+For FastAPI handlers, import the same names from `faststream_outbox.fastapi`.
+They resolve via the same `Context()` paths but go through FastAPI's
+dependency resolver, so `Depends(...)` and these shortcuts can be mixed
 freely. See [FastAPI integration](./fastapi.md).

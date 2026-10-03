@@ -2,7 +2,7 @@
 
 ## 1. Declare the outbox table
 
-The package never creates or migrates your schema — that's Alembic's job.
+The package never creates or migrates your schema; Alembic does that.
 `make_outbox_table(metadata, table_name="outbox")` returns a
 `sqlalchemy.Table` you attach to your own `MetaData`:
 
@@ -14,10 +14,10 @@ metadata = MetaData()
 outbox_table = make_outbox_table(metadata, table_name="outbox")
 ```
 
-The returned `Table` carries three indexes the broker needs at runtime — a
+The returned `Table` carries three indexes the broker needs at runtime: a
 partial index for the fetch CTE's unleased branch, a partial index for the
 expired-lease reclaim branch, and a partial unique index for `timer_id`
-deduplication — plus a `CHECK ((acquired_token IS NULL) = (acquired_at IS
+deduplication. It also carries a `CHECK ((acquired_token IS NULL) = (acquired_at IS
 NULL))` constraint that makes a half-set lease unrepresentable. Alembic
 autogenerate picks them all up alongside the table itself.
 
@@ -50,8 +50,8 @@ via `max_workers`, tuning, retry strategies).
 ## 4. Publish a message
 
 `broker.publish(body, *, queue, session, ...)` inserts an outbox row through
-the caller's `AsyncSession`. It does **not** flush, commit, or open its own
-transaction — the row commits with the caller's domain writes:
+the caller's `AsyncSession`. It does not flush, commit, or open its own
+transaction; the row commits with the caller's domain writes:
 
 ```python
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -111,8 +111,8 @@ pip install 'faststream-outbox[asyncpg]' 'faststream[cli]'
 See [Installation](../introduction/installation.md) for the full extras
 list and a one-line Postgres container.
 
-The package **declares** the outbox table but never creates it. Create it
-once before the first run — for local dev, a one-shot `metadata.create_all`
+The package declares the outbox table but never creates it. Create it
+once before the first run. For local dev, use a one-shot `metadata.create_all`
 against the same `metadata`/`engine` from above:
 
 ```python
@@ -127,16 +127,16 @@ full `create_schema.py` script. Once the table exists, save the module as
 
 ## Connection ownership
 
-`OutboxBroker` does **not** close the `AsyncEngine` you pass in — the
+`OutboxBroker` does not close the `AsyncEngine` you pass in; the
 caller owns its lifecycle. The same engine can be shared with other
 SQLAlchemy users (your FastAPI app, an Alembic upgrade, etc.); closing it
 from the broker would surprise them. Manage the engine with `try/finally`
-or — when running under FastAPI — let the framework's lifespan handle it
+or, when running under FastAPI, let the framework's lifespan handle it
 (see [FastAPI integration](./fastapi.md)).
 
 ## Where to read next
 
-- [How it works](../introduction/how-it-works.md) — architecture, lease invariant, at-least-once semantics
-- [Subscriber](./subscriber.md) — tuning, retry strategies, slow-handler queue segregation
-- [Publisher](./publisher.md) — `publish_batch`, `OutboxPublisher`, chained publishing
-- [FastAPI integration](./fastapi.md) — `OutboxRouter`, `Depends(get_session)` pattern
+- [How it works](../introduction/how-it-works.md): architecture, lease invariant, at-least-once semantics
+- [Subscriber](./subscriber.md): tuning, retry strategies, slow-handler queue segregation
+- [Publisher](./publisher.md): `publish_batch`, `OutboxPublisher`, chained publishing
+- [FastAPI integration](./fastapi.md): `OutboxRouter`, `Depends(get_session)` pattern

@@ -2,8 +2,8 @@
 
 Opt-in audit for terminal failures. Pass `dlq_table=make_dlq_table(metadata)`
 to the broker and every row that fails terminally is copied into the DLQ in
-the same Postgres statement as the outbox `DELETE`. Default behavior is
-unchanged when `dlq_table` is omitted — no audit table, no new code paths.
+the same Postgres statement as the outbox `DELETE`. When `dlq_table` is
+omitted, there is no audit table and none of the DLQ code paths run.
 
 ## Quickstart
 
@@ -25,20 +25,20 @@ engine = create_async_engine("postgresql+asyncpg://outbox:outbox@localhost:5432/
 broker = OutboxBroker(engine, outbox_table=outbox_table, dlq_table=dlq_table)
 ```
 
-The package does not create or migrate the table — run `metadata.create_all`
+The package does not create or migrate the table. Run `metadata.create_all`
 (or your Alembic migration) once both tables are declared. Subscribers and
 publishers need no further configuration; the broker reads `dlq_table` from
 its own config when it builds the terminal-flush SQL.
 
 ## What gets archived
 
-A row lands in the DLQ when it is **terminal-by-failure**, i.e. the
+A row lands in the DLQ when it is terminal-by-failure, i.e. the
 subscriber's terminal flush would otherwise `DELETE` the row because of a
 failure (not a clean ack). Three paths produce that:
 
 | `failure_reason` | Trigger |
 |---|---|
-| `max_deliveries` | `deliveries_count > max_deliveries` — handler is never invoked for this attempt. |
+| `max_deliveries` | `deliveries_count > max_deliveries`; the handler is never invoked for this attempt. |
 | `retry_terminal` | Handler raised; the retry strategy returned `None` (attempts / total-delay exhausted, or `NoRetry()`). |
 | `rejected` | Handler called `await msg.reject()` directly, or `AckPolicy.REJECT_ON_ERROR` rejected the row on an exception. |
 
@@ -55,23 +55,23 @@ behaviors that decide which reason fires.
 | Column | Type | Notes |
 |---|---|---|
 | `id` | `BigInteger`, PK, autoincrement | DLQ row identity. |
-| `original_id` | `BigInteger`, not null | The outbox row's id, for operator forensics. Not unique — a re-delivered `timer_id` row could legitimately land here twice. |
+| `original_id` | `BigInteger`, not null | The outbox row's id, for operator forensics. Not unique: a re-delivered `timer_id` row could legitimately land here twice. |
 | `queue` | `String(255)`, not null | Source queue name. |
 | `payload` | `LargeBinary`, not null | Verbatim copy of the outbox payload bytes. |
 | `headers` | `JSONB`, nullable | Verbatim copy, including the inherited `correlation_id`. |
 | `deliveries_count` | `BigInteger`, not null | Attempt count at the moment of failure. |
-| `created_at` | `DateTime(timezone=True)`, not null | The outbox row's original `created_at` — measures time-to-terminal-failure. |
+| `created_at` | `DateTime(timezone=True)`, not null | The outbox row's original `created_at`, which measures time-to-terminal-failure. |
 | `failed_at` | `DateTime(timezone=True)`, not null, default `now()` | When the audit row was written. |
 | `failure_reason` | `String(64)`, not null | One of the three values in the table above. |
 | `last_exception` | `String`, nullable | `repr()` of the raised exception, bounded at 8 KiB (see below). `None` on manual `reject()` without an exception. |
 | `timer_id` | `String(255)`, nullable | The originating single-publish dedup key, carried into the audit trail so a terminally-failed timer keeps its business key. `None` for non-timer rows. |
 
-Index: `(queue, failed_at)` (btree, non-unique) — supports "show me recent
+Index: `(queue, failed_at)` (btree, non-unique). It supports "show me recent
 failures for queue X" queries without a sequential scan as the DLQ grows.
 
 No foreign key references the outbox table: the source row is gone in the
 same transaction, so the constraint would be unsatisfiable. There is also no
-`LISTEN/NOTIFY` channel — nobody polls the DLQ.
+`LISTEN/NOTIFY` channel, since nobody polls the DLQ.
 
 ## Atomicity
 
@@ -92,37 +92,37 @@ FROM deleted;
 
 Two operator-visible properties fall out of this shape:
 
-- **Lease-lost is a transparent no-op.** If another worker reclaimed the
+- A lost lease is a transparent no-op. If another worker reclaimed the
   row after a lease expiry, `WHERE acquired_token = :token` matches
   nothing, `deleted` is empty, the INSERT inserts zero rows, and the
-  caller sees `rowcount == 0` — same observable as the no-DLQ path. The
+  caller sees `rowcount == 0`, the same observable result as the no-DLQ path. The
   lease-token guard documented in [Subscriber](./subscriber.md) is
   preserved.
-- **DLQ-write failure rolls back the DELETE.** If the INSERT fails
+- A failed DLQ write rolls back the DELETE. If the INSERT fails
   (column mismatch, disk full, a violated constraint), the whole statement
   rolls back. The outbox row stays leased and is reclaimed when the
   lease expires. Misconfiguration surfaces as outbox growth plus
   `lease_lost` spikes rather than silent audit loss.
 
-The statement runs on the worker's autocommit writer connection — one
-round-trip per terminal flush, same cost as the no-DLQ path.
+The statement runs on the worker's autocommit writer connection: one
+round-trip per terminal flush, the same cost as the no-DLQ path.
 
 ## `last_exception` truncation
 
 The serialized exception (`repr(exc)`) is bounded at 8 KiB.
 Anything longer is truncated and `…[truncated]` appended.
 
-Rationale: some exceptions carry MB-scale payloads — pydantic validation
-errors with the rejected request body, asyncpg `DataError` with the full
-row, etc. An unbounded `repr` would extend the writer round-trip on a
+The cap exists because some exceptions carry MB-scale payloads, such as pydantic
+validation errors with the rejected request body or asyncpg `DataError` with the
+full row. An unbounded `repr` would extend the writer round-trip on a
 poison row by hundreds of milliseconds and bloat the DLQ table. 8 KiB
 preserves the traceback and any structured detail while bounding worst
 case.
 
 ## Redacting `last_exception` (PII / secrets)
 
-That same `repr` is exactly why a poison-message exception can embed a
-request body, a rejected row, or a credential — and the DLQ persists it.
+Because of that same `repr`, a poison-message exception can embed a
+request body, a rejected row, or a credential, and the DLQ persists it.
 For deployments handling sensitive data, pass `last_exception_renderer` to
 transform (or drop) the stored text:
 
@@ -142,7 +142,7 @@ The same kwarg is available on the FastAPI `OutboxRouter`.
 
 When `dlq_table` is set, `await broker.validate_schema()` checks both
 tables and surfaces missing columns / indexes on either one. The DLQ
-table is validated independently — drift in one table does not mask drift
+table is validated independently, so drift in one table does not mask drift
 in the other. See [Schema validation](./schema-validation.md) for the
 opt-in install + `/health` pattern.
 
@@ -160,12 +160,12 @@ Tags:
 | `subscriber` | Subscriber handler name (`call_name`). |
 | `deliveries_count` | Attempt count at terminal flush. |
 | `failure_reason` | Same value set as the schema column. |
-| `exception_type` | The exception class name. **Omitted** (not set to `None`) for terminals with no exception — `max_deliveries`, or a manual `reject()` without one — so a custom recorder should treat the key as optional. |
+| `exception_type` | The exception class name. Omitted (not set to `None`) for terminals with no exception (`max_deliveries`, or a manual `reject()` without one), so a custom recorder should treat the key as optional. |
 
 The bundled adapters surface the event without further wiring:
 
-- **Prometheus**: counter `faststream_outbox_dlq_written_total{reason}`.
-- **OpenTelemetry**: counter `messaging.outbox.dlq_written` with the
+- Prometheus records the counter `faststream_outbox_dlq_written_total{reason}`.
+- OpenTelemetry records the counter `messaging.outbox.dlq_written` with the
   `messaging.outbox.dlq_reason` attribute and the standard
   `error.type` attribute when present.
 
@@ -173,8 +173,8 @@ Pair with `nacked_terminal` to alert on DLQ misconfiguration: every
 terminal-failure row should produce one `nacked_terminal` *and* one
 `dlq_written`. A persistent divergence (terminal rate > DLQ rate) means
 either the CTE keeps rolling back (DLQ schema drift) or the lease keeps
-expiring before flush (`lease_ttl_seconds` too low for handler P99) —
-both are operator-actionable signals. See
+expiring before flush (`lease_ttl_seconds` too low for handler P99).
+Both are operator-actionable signals. See
 [Observability](./observability.md) for the broader recorder + middleware
 story.
 
@@ -185,7 +185,7 @@ story.
 There is no built-in pruning. Operators are responsible for archival or
 expiry.
 
-Recommended pattern: partition the DLQ by `failed_at` (monthly or
+The recommended pattern is to partition the DLQ by `failed_at` (monthly or
 weekly) and drop old partitions via a cron job. The `(queue, failed_at)`
 index already supports partition pruning in operator queries; convert it
 to a partitioned table at create time if you expect a steady DLQ

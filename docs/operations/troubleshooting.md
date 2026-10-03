@@ -1,15 +1,15 @@
 # Troubleshooting
 
-Symptom → likely cause → fix. Each section below is the same shape:
-what you see, what's probably wrong, how to confirm, what to change,
-and a link into the reference page that owns the underlying design.
+Each entry below starts with what you see, then gives the probable cause,
+how to confirm it, what to change, and a link to the reference page that
+owns the underlying design.
 
 | Symptom | Likely cause |
 |---|---|
 | [`event=lease_lost` recurring in logs](#event-lease_lost-recurring-in-logs) | Handler P99 > `lease_ttl_seconds` |
 | [Outbox row count grows + `lease_lost` spike](#outbox-row-count-grows-lease_lost-spike) | DLQ CTE failing (DLQ schema drift) |
 | [Outbox row count grows, no `lease_lost`](#outbox-row-count-grows-no-lease_lost) | Fetch loop not running, or rows future-dated |
-| [Idle dispatch latency > `max_fetch_interval`](#idle-dispatch-latency-max_fetch_interval) | LISTEN setup failed → polling fallback |
+| [Idle dispatch latency > `max_fetch_interval`](#idle-dispatch-latency-max_fetch_interval) | LISTEN setup failed, so the subscriber falls back to polling |
 | [Subscriber dispatch never starts; rows pile up](#subscriber-blocks-at-brokerstart) | Engine pool exhausted on writer-connection checkout |
 | [Duplicate handler invocations](#duplicate-handler-invocations) | Lease expired before handler returned, or handler not idempotent |
 | [Rolling deploy leaks rows](#rolling-deploy-leaks-rows) | `graceful_timeout` < handler P99, or k8s grace too short |
@@ -21,298 +21,294 @@ and a link into the reference page that owns the underlying design.
 
 ## `event=lease_lost` recurring in logs { #event-lease_lost-recurring-in-logs }
 
-**Symptom.** WARNING-level logs with the message text
+You see WARNING-level logs with the message text
 `lease expired before terminal write` or `lease expired before retry write`,
 one per affected row. The record also carries `event=lease_lost` and
 `phase=terminal` / `phase=retry` as structured extras, visible when your log
 formatter renders extras (for example a JSON formatter).
 
-**Likely cause.** The subscriber's `lease_ttl_seconds` is shorter than
-the handler's P99 duration. A handler took longer than the lease,
-another fetch reclaimed the row mid-flight, and the original handler's
-terminal `DELETE` / `UPDATE` matched zero rows.
+The likely cause is a subscriber `lease_ttl_seconds` shorter than the
+handler's P99 duration. A handler took longer than the lease, another
+fetch reclaimed the row mid-flight, and the original handler's terminal
+`DELETE` / `UPDATE` matched zero rows.
 
-**Diagnose.** Grep for `lease expired before` (or, with an
+To confirm, grep for `lease expired before` (or, with an
 extras-rendering formatter, `event=lease_lost`) over the last hour and
-compare the rate against `dispatched`. A non-zero baseline rate
-(rather than occasional spikes) confirms TTL is the issue.
+compare the rate against `dispatched`. A steady non-zero rate, as
+opposed to occasional spikes, confirms that the TTL is the issue.
 
-**Fix.** Raise `lease_ttl_seconds` for the affected subscriber, OR
-segregate slow work onto its own subscriber with a taller TTL
-(recommended — keeps the fast queue's reclaim tight). TTL must exceed
-handler P99 with margin.
+To fix it, raise `lease_ttl_seconds` for the affected subscriber, or move
+slow work onto its own subscriber with a taller TTL. The second option is
+recommended because it keeps the fast queue's reclaim tight. Either way,
+the TTL must exceed handler P99 with margin.
 
-**Reference.** [Subscriber § Slow handlers — dedicated
+See [Subscriber § Slow handlers: dedicated
 queue](../usage/subscriber.md#slow-handlers-dedicated-queue).
 
 ## Outbox row count grows + `lease_lost` spike { #outbox-row-count-grows-lease_lost-spike }
 
-**Symptom.** Two things at once: row count in the outbox table grows
-without bound, *and* `event=lease_lost` log rate spikes.
+Two things happen at once: the row count in the outbox table grows
+without bound, *and* the `event=lease_lost` log rate spikes.
 
-**Likely cause.** The DLQ CTE is failing on every terminal flush —
-DLQ schema drift means the `INSERT INTO <dlq>` clause inside the
-`WITH deleted AS (DELETE … RETURNING …)` statement rolls back the
-DELETE too. Rows stay in the outbox, leases keep expiring, the
+The likely cause is a DLQ CTE that fails on every terminal flush. With
+DLQ schema drift, the `INSERT INTO <dlq>` clause inside the
+`WITH deleted AS (DELETE … RETURNING …)` statement fails and rolls back
+the DELETE too. Rows stay in the outbox, leases keep expiring, and the
 pattern compounds.
 
-**Diagnose.** Run `await broker.validate_schema()` against the live
-DB (the `[validate]` extra is required). It will surface missing
-columns / indexes on the DLQ table. A frequent cause on older
-deployments is a hand-written DLQ migration missing the `timer_id`
-column — `validate_schema()` reports it as a missing column on the DLQ
+To confirm, run `await broker.validate_schema()` against the live
+DB (the `[validate]` extra is required). It reports missing
+columns and indexes on the DLQ table. A frequent cause on older
+deployments is a hand-written DLQ migration without the `timer_id`
+column, which `validate_schema()` reports as a missing column on the DLQ
 table. The [Alembic guide](../operations/alembic.md#adding-the-dlq-after-the-fact)
 includes it.
 
-**Fix.** Bring the DLQ schema up to spec (apply the missing migration,
-or rename / drop the drifted column / index). After the schema is
+To fix it, bring the DLQ schema up to spec: apply the missing migration,
+or rename or drop the drifted column or index. Once the schema is
 correct, the next claim of each stuck row flushes through the CTE
-and the outbox drains naturally.
+and the outbox drains on its own.
 
-**Recommended alerts.** A persistent DLQ misconfiguration (or a permanent
-relay config error) is the one way a config bug degrades into a
-storage-exhaustion outage — the affected rows cycle through fetch/fail
-forever while new rows accumulate. There is no built-in circuit breaker,
-so **alert on outbox row count (trend / absolute ceiling) and on the
-`lease_lost` rate**, and watch `dlq_written` vs `nacked_terminal`
-divergence (a gap means terminal failures aren't reaching the DLQ).
+A persistent DLQ misconfiguration (or a permanent relay config error) is
+the one way a config bug degrades into a storage-exhaustion outage: the
+affected rows cycle through fetch and fail forever while new rows
+accumulate. There is no built-in circuit breaker, so alert on the outbox
+row count (trend and absolute ceiling) and on the `lease_lost` rate. Also
+watch for divergence between `dlq_written` and `nacked_terminal`; a gap
+means terminal failures aren't reaching the DLQ.
 
-**Reference.** [DLQ § Atomicity](../usage/dlq.md#atomicity), [Schema
+See [DLQ § Atomicity](../usage/dlq.md#atomicity) and [Schema
 validation](../usage/schema-validation.md).
 
 ## Outbox row count grows, no `lease_lost` { #outbox-row-count-grows-no-lease_lost }
 
-**Symptom.** Outbox rows accumulate, but logs are clean — no
-`lease_lost`, no exceptions.
+Outbox rows accumulate, but the logs are clean, with no `lease_lost` and
+no exceptions.
 
-**Likely cause.** Either no subscriber is registered for that queue,
-or the rows are future-dated (`activate_in` / `activate_at` set) and
-genuinely waiting to fire.
+Either no subscriber is registered for that queue, or the rows are
+future-dated (`activate_in` / `activate_at` set) and are waiting to fire.
 
-**Diagnose.** Inspect a stuck row's `next_attempt_at` — if it's in the
-future, the row is correctly waiting. Otherwise check whether a
-subscriber is registered: walk `broker.subscribers`, which covers
+To tell the two apart, inspect a stuck row's `next_attempt_at`. If it's
+in the future, the row is correctly waiting. Otherwise check whether a
+subscriber is registered by walking `broker.subscribers`, which covers
 router-attached subscribers too.
 
-**Fix.** Register the subscriber, or adjust the producer's `activate_*`
-arg if the future date was unintentional.
+To fix it, register the subscriber, or adjust the producer's `activate_*`
+argument if the future date was unintentional.
 
-**Reference.** [Subscriber](../usage/subscriber.md), [Router § Gotcha:
+See [Subscriber](../usage/subscriber.md), [Router § Gotcha:
 walking every subscriber](../usage/router.md#gotcha-walking-every-subscriber),
-[Timers](../usage/timers.md).
+and [Timers](../usage/timers.md).
 
 ## Idle dispatch latency > `max_fetch_interval` { #idle-dispatch-latency-max_fetch_interval }
 
-**Symptom.** Rows arrive but take up to `max_fetch_interval` (default
-10 s) to dispatch, even though no other rows are in flight. NOTIFY
-should short-circuit the idle wait to ~10 ms.
+Rows arrive but take up to `max_fetch_interval` (default 10 s) to
+dispatch, even though no other rows are in flight. NOTIFY should cut the
+idle wait short to about 10 ms.
 
-**Likely cause.** `LISTEN` setup failed at subscriber start. The raw
+The likely cause is a `LISTEN` setup failure at subscriber start. The raw
 asyncpg connection that owns `LISTEN outbox_<table>` is separate from
-the SQLAlchemy fetch connection; common failure modes are: the
-asyncpg driver isn't installed (no `[asyncpg]` extra), the engine URL
-is not asyncpg, or Postgres user lacks `LISTEN` permission.
+the SQLAlchemy fetch connection. Common failure modes are a missing
+asyncpg driver (no `[asyncpg]` extra), an engine URL that is not asyncpg,
+and a Postgres user without `LISTEN` permission.
 
-**Diagnose.** A connection or permission failure (`asyncpg.connect` /
-`add_listener` raising) logs a WARNING once at startup noting the NOTIFY
-fallback to polling. A **missing asyncpg driver or a non-asyncpg engine URL
-falls back silently** — there is no log line, so check the engine URL
-(`drivername` must be `postgresql+asyncpg`) and that the `[asyncpg]` extra
-is installed.
+A connection or permission failure (`asyncpg.connect` or `add_listener`
+raising) logs a WARNING once at startup noting the NOTIFY fallback to
+polling. A missing asyncpg driver or a non-asyncpg engine URL falls back
+silently, with no log line. In that case, check that the engine URL's
+`drivername` is `postgresql+asyncpg` and that the `[asyncpg]` extra is
+installed.
 
-**Fix.** Install the `[asyncpg]` extra and use an asyncpg-driven
-engine URL (`postgresql+asyncpg://...`). Restart the subscriber.
+To fix it, install the `[asyncpg]` extra, use an asyncpg-driven engine
+URL (`postgresql+asyncpg://...`), and restart the subscriber.
 
-**Reference.** [Installation § Optional extras
-](../introduction/installation.md#optional-extras), [How it works §
+See [Installation § Optional extras
+](../introduction/installation.md#optional-extras) and [How it works §
 Fetch loop](../introduction/how-it-works.md#subscriber-two-async-loops).
 
 ## Subscriber dispatch never starts; rows pile up { #subscriber-blocks-at-brokerstart }
 
-**Symptom.** Rows are published but never dispatched (the table grows) and
-the subscriber's loops emit repeating reconnect ERROR logs. `broker.start()`
-(or the FastAPI `include_router` lifespan) itself returns normally — it only
-schedules the loop tasks, so the failure shows up *after* startup, not as a
-hang.
+Rows are published but never dispatched (the table grows), and the
+subscriber's loops emit repeating reconnect ERROR logs. `broker.start()`
+(or the FastAPI `include_router` lifespan) returns normally because it
+only schedules the loop tasks, so the failure shows up *after* startup
+and does not look like a hang.
 
-**Likely cause.** SQLAlchemy pool exhausted on the per-worker writer
-connection checkout — the fetch/worker loops can't acquire their
+The likely cause is an exhausted SQLAlchemy pool on the per-worker writer
+connection checkout. The fetch and worker loops can't acquire their
 connections, so each cycle errors and backs off. Each subscriber needs
-`max_workers + 1` pool connections; the default pool is `pool_size=5,
-max_overflow=10`. A handful of single-worker subscribers fits, but a fleet
+`max_workers + 1` pool connections, and the default pool is `pool_size=5,
+max_overflow=10`. A handful of single-worker subscribers fits; a fleet
 of high-`max_workers` subscribers does not.
 
-**Diagnose.** Inspect the engine pool. Compute `Σ subs × (max_workers
-+ 1)` from your subscriber registrations and compare to
+To confirm, inspect the engine pool. Compute `Σ subs × (max_workers
++ 1)` from your subscriber registrations and compare it to
 `pool_size + max_overflow`.
 
-**Fix.** Raise `pool_size` / `max_overflow` on the engine, OR lower
-`max_workers` per subscriber. Also confirm Postgres
+To fix it, raise `pool_size` / `max_overflow` on the engine, or lower
+`max_workers` per subscriber. Also confirm that Postgres has
 `max_connections ≥ replicas × Σ subs × (max_workers + 2)` (the pool's
-`max_workers + 1` plus the raw `LISTEN` connection) — rolling
-deploys multiply the demand.
+`max_workers + 1` plus the raw `LISTEN` connection). Rolling deploys
+multiply the demand.
 
-**Reference.** [Subscriber § Connection
-budget](../usage/subscriber.md#connection-budget), [Production
+See [Subscriber § Connection
+budget](../usage/subscriber.md#connection-budget) and [Production
 checklist § Sizing](./checklist.md#sizing).
 
 ## Duplicate handler invocations
 
-**Symptom.** The same outbox row's handler runs more than once. Side
-effects double up if the handler isn't idempotent.
+The same outbox row's handler runs more than once, and side effects
+double up if the handler isn't idempotent.
 
-**Likely cause.** Either the handler's wall-clock duration exceeded
-`lease_ttl_seconds` and another fetch reclaimed the row mid-flight,
-or the worker crashed between the handler's external side effect and
-the terminal `DELETE`. Both are at-least-once-delivery edge cases.
+There are two likely causes, both edge cases of at-least-once delivery.
+Either the handler's wall-clock duration exceeded `lease_ttl_seconds`
+and another fetch reclaimed the row mid-flight, or the worker crashed
+between the handler's external side effect and the terminal `DELETE`.
 
-**Diagnose.** Cross-reference handler-side logs (the side effect)
+To tell them apart, cross-reference handler-side logs (the side effect)
 with `lease expired before` warnings (`event=lease_lost` with an
-extras-rendering formatter). Matching row IDs confirm TTL is too
-short. Crash-induced duplicates correlate with worker-process
-restarts.
+extras-rendering formatter). Matching row IDs confirm that the TTL is too
+short. Crash-induced duplicates correlate with worker-process restarts.
 
-**Fix.** Handlers must be idempotent; delivery is at-least-once. Also
-tune `lease_ttl_seconds` above handler P99 so healthy handlers don't
-race their lease.
+Delivery is at-least-once, so handlers must be idempotent. Also tune
+`lease_ttl_seconds` above handler P99 so healthy handlers don't race
+their lease.
 
-**Reference.** [How it works § At-least-once
-delivery](../introduction/how-it-works.md#at-least-once-delivery),
-[Subscriber § Slow handlers — dedicated
+See [How it works § At-least-once
+delivery](../introduction/how-it-works.md#at-least-once-delivery) and
+[Subscriber § Slow handlers: dedicated
 queue](../usage/subscriber.md#slow-handlers-dedicated-queue).
 
 ## Rolling deploy leaks rows
 
-**Symptom.** During a rolling restart, outbox rows are left in the
-"acquired" state until lease expiry, even though handlers were
-nominally healthy. Drain duration appears longer than expected.
+During a rolling restart, outbox rows stay in the "acquired" state until
+lease expiry, even though handlers were nominally healthy. Draining takes
+longer than expected.
 
-**Likely cause.** Either the broker's `graceful_timeout` is shorter
-than the in-flight handler's remaining work, or Kubernetes
-`terminationGracePeriodSeconds` is shorter than the broker's
-`graceful_timeout` (subscribers drain concurrently, so a clean shutdown
-takes about one `graceful_timeout`), and `SIGKILL` arrives mid-drain.
+Either the broker's `graceful_timeout` is shorter than the in-flight
+handler's remaining work, or Kubernetes `terminationGracePeriodSeconds`
+is shorter than the broker's `graceful_timeout` and `SIGKILL` arrives
+mid-drain. Subscribers drain concurrently, so a clean shutdown takes
+about one `graceful_timeout`.
 
-**Diagnose.** Time a clean shutdown locally (`docker compose kill -s
-SIGTERM application`) and compare to your k8s grace period. Look for
+To confirm, time a clean shutdown locally (`docker compose kill -s
+SIGTERM application`) and compare it to your k8s grace period. Look for
 log lines indicating drain abandonment.
 
-**Fix.** Raise `graceful_timeout` past handler P99 + margin. Raise
-`terminationGracePeriodSeconds` past `graceful_timeout` plus a
-buffer. The `dispatch_one` shutdown-race guard is
-always on; you don't need to opt into it.
+To fix it, raise `graceful_timeout` past handler P99 plus margin, and
+raise `terminationGracePeriodSeconds` past `graceful_timeout` plus a
+buffer. The `dispatch_one` shutdown-race guard is always on; you don't
+need to opt into it.
 
-**Reference.** [Production checklist § Drain &
+See [Production checklist § Drain &
 lifecycle](./checklist.md#drain-lifecycle).
 
 ## `activate_in` / `activate_at` fires immediately in tests { #activate_in-activate_at-fires-immediately-in-tests }
 
-**Symptom.** A unit test publishes a row with `activate_in=30s` and
-the handler runs synchronously inside `await broker.publish(...)`.
+A unit test publishes a row with `activate_in=30s`, and the handler runs
+synchronously inside `await broker.publish(...)`.
 
-**Likely cause.** By design. `TestOutboxBroker(run_loops=False)`
-(the default) drives handlers synchronously through `dispatch_one`,
-which ignores `next_attempt_at`. This is the documented test-broker
-contract — trades production parity for test ergonomics.
+This is by design. `TestOutboxBroker(run_loops=False)` (the default)
+drives handlers synchronously through `dispatch_one`, which ignores
+`next_attempt_at`. That is the documented test-broker contract: it
+trades production parity for test ergonomics.
 
-**Diagnose.** Check the call site: `TestOutboxBroker(broker)` →
-sync mode, expected immediate firing.
+Check the call site. `TestOutboxBroker(broker)` runs in sync mode, where
+immediate firing is expected.
 
-**Fix.** Opt into `TestOutboxBroker(broker, run_loops=True)` for
-tests that need scheduled delivery to actually wait. Loop mode runs
-the real fetch and worker loops against the fake client.
+For tests that need scheduled delivery to wait, opt into
+`TestOutboxBroker(broker, run_loops=True)`. Loop mode runs the real
+fetch and worker loops against the fake client.
 
-**Reference.** [Testing § Loop-driven
-mode](../usage/testing.md#loop-driven-mode), [Timers § Test broker
+See [Testing § Loop-driven
+mode](../usage/testing.md#loop-driven-mode) and [Timers § Test broker
 note](../usage/timers.md#test-broker-note).
 
 ## `AckPolicy.ACK_FIRST` raises `ValueError` at registration { #ackpolicyack_first-raises-valueerror-at-registration }
 
-**Symptom.** `@broker.subscriber("q", ack_policy=AckPolicy.ACK_FIRST)`
-fails with `ValueError` at decoration time.
+`@broker.subscriber("q", ack_policy=AckPolicy.ACK_FIRST)` fails with
+`ValueError` at decoration time.
 
-**Likely cause.** By design. `ACK_FIRST` would delete the outbox row
-*before* the handler runs, so a handler crash would silently drop
-the message — exactly the failure mode the outbox pattern exists to
-prevent.
+This is by design. `ACK_FIRST` would delete the outbox row *before* the
+handler runs, so a handler crash would silently drop the message, which
+is exactly the failure the outbox pattern exists to prevent. The error
+message names the policy, so there is nothing else to diagnose.
 
-**Diagnose.** None needed; the message identifies the policy.
+Use the default `AckPolicy.NACK_ON_ERROR` (retry on handler exception
+via the configured retry strategy), `AckPolicy.REJECT_ON_ERROR` (delete
+on first failure), or `AckPolicy.MANUAL` (the handler calls `ack` /
+`nack` / `reject`).
 
-**Fix.** Use the default `AckPolicy.NACK_ON_ERROR` (retry on handler
-exception via the configured retry strategy), or
-`AckPolicy.REJECT_ON_ERROR` (delete on first failure), or
-`AckPolicy.MANUAL` (handler calls `ack` / `nack` / `reject`).
-
-**Reference.** [Subscriber § Ack
-policy](../usage/subscriber.md#ack-policy).
+See [Subscriber § Ack policy](../usage/subscriber.md#ack-policy).
 
 ## `OutboxResponse(...)` + foreign-publisher decorator logs a configuration error { #outboxresponse-foreign-publisher-decorator-config-error }
 
-**Symptom.** A handler with both `@kafka_pub` and an
-`OutboxResponse(...)` return value logs an ERROR on every dispatch:
+A handler with both `@kafka_pub` and an `OutboxResponse(...)` return
+value logs an ERROR on every dispatch:
 `Outbox configuration error (fix required; row left to lease-expiry retry)`.
 
-**Likely cause.** By design. The combination would both insert a row
-into the outbox *and* publish to Kafka, a dual-fire that doubles
-delivery. The subscriber refuses the chain composition after the
-handler returns. The worker logs the error and moves on without
-nacking, so the retry strategy is not consulted. The row's lease expires, a later fetch reclaims
-it, and the cycle repeats until the configuration is fixed.
+This is by design. The combination would both insert a row into the
+outbox *and* publish to Kafka, a dual-fire that doubles delivery. The
+subscriber refuses the chain composition after the handler returns. The
+worker logs the error and moves on without nacking, so the retry
+strategy is not consulted. The row's lease expires, a later fetch
+reclaims it, and the cycle repeats until the configuration is fixed.
 
-**Diagnose.** Inspect the handler decorator stack and return type.
+To confirm, inspect the handler's decorator stack and return type.
 
-**Fix.** Pick one path. Either `return body` plain (the foreign
+To fix it, pick one path: either `return body` plain (the foreign
 publisher picks it up) or `return OutboxResponse(body, queue="...",
-session=...)` (an outbox-internal chain) but not both.
+session=...)` (an outbox-internal chain), but not both.
 
-**Reference.** [Relay § What not to do](../usage/relay.md#what-not-to-do),
+See [Relay § What not to do](../usage/relay.md#what-not-to-do) and
 [Publisher § Chained
 publishing](../usage/publisher.md#chained-publishing).
 
 ## A chained `OutboxResponse` row's handler keeps retrying after the handler "succeeded" { #outboxresponse-relay-publish-failure }
 
-**Symptom.** A handler that returns `OutboxResponse(...)` completes its
-own logic, yet the inbound row keeps nacking/retrying (and may DLQ as
-`retry_terminal`), with an exception that's about the *publish*, not the
-handler's work.
+A handler that returns `OutboxResponse(...)` completes its own logic,
+yet the inbound row keeps nacking and retrying (and may go to the DLQ as
+`retry_terminal`), with an exception about the *publish* and not about
+the handler's work.
 
-**Likely cause.** The follow-on `OutboxResponse` row is published **after**
-the handler returns, inside the same consume scope — so a failure there
-(e.g. a DB error on the follow-on insert) unwinds through the
-`AcknowledgementMiddleware` and nacks the inbound row. There is
-**no distinct signal** separating "handler OK, relay-publish failed" from
-an ordinary handler exception: the metric reads as a normal
+The follow-on `OutboxResponse` row is published after the handler
+returns, inside the same consume scope. A failure there (for example a
+DB error on the follow-on insert) unwinds through the
+`AcknowledgementMiddleware` and nacks the inbound row. No distinct
+signal separates "handler OK, relay-publish failed" from an ordinary
+handler exception: the metric reads as a normal
 `nacked_retried`/`retry_terminal`, and the ERROR log shows the publish
-exception rather than a handler one.
+exception, not a handler one.
 
-**Diagnose.** Read the logged exception: a `sqlalchemy`/`asyncpg` error or
+To confirm, read the logged exception. A `sqlalchemy`/`asyncpg` error or
 an envelope `ValueError` naming `content-type`/`correlation_id` points at
 the relay publish, not the handler body.
 
-**Fix.** Resolve the underlying publish failure (schema/connection for the
-follow-on insert; drop conflicting headers). For non-idempotent chains,
-pass a deterministic `timer_id` so a redelivery's insert is a no-op.
+To fix it, resolve the underlying publish failure: the schema or
+connection for the follow-on insert, or conflicting headers that need
+dropping. For non-idempotent chains, pass a deterministic `timer_id` so
+a redelivery's insert is a no-op.
 
-**Reference.** [Publisher § Chained publishing](../usage/publisher.md#chained-publishing).
+See [Publisher § Chained publishing](../usage/publisher.md#chained-publishing).
 
 ## `validate_schema()` raises `ImportError` { #validate_schema-raises-importerror }
 
-**Symptom.** Calling `await broker.validate_schema()` raises:
+Calling `await broker.validate_schema()` raises:
 
 ```text
 ImportError: validate_schema() requires alembic. Install with `pip install 'faststream-outbox[validate]'`.
 ```
 
-**Likely cause.** The `[validate]` extra isn't installed. Alembic is
-an optional dependency by design — every other code path works
-without it, but the schema validator delegates to Alembic's
-`autogenerate.compare_metadata` and so requires it.
+The `[validate]` extra isn't installed. Alembic is an optional
+dependency by design. Every other code path works without it, but the
+schema validator delegates to Alembic's `autogenerate.compare_metadata`
+and so requires it.
 
-**Diagnose.** `pip show alembic` returns nothing, or
-`pip list | grep alembic` is empty.
+To confirm, run `pip show alembic` (it returns nothing) or
+`pip list | grep alembic` (empty output).
 
-**Fix.** `pip install 'faststream-outbox[validate]'`. The validator
-runs unchanged after that; nothing else in the package needs to
+To fix it, run `pip install 'faststream-outbox[validate]'`. The
+validator works after that, and nothing else in the package needs to
 change.
 
-**Reference.** [Schema validation](../usage/schema-validation.md).
+See [Schema validation](../usage/schema-validation.md).

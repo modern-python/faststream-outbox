@@ -2,19 +2,19 @@
 
 The [tutorials](../tutorials/first-outbox-app.md) build a greenfield app one
 primitive at a time, and each guide documents one feature on its own. This page
-is different: it walks a single service that **composes** three outbox
-primitives — a transactional event relay, a fire-unless-cancelled timer, and an
+walks through a single service that composes three outbox
+primitives: a transactional event relay, a fire-unless-cancelled timer, and an
 in-process test of the whole chain.
 
 The service is a generic chat / notifications backend. Users post messages into
-chats. It has two obligations, and both must be **atomic with the database
-write** — they commit with the domain row and must never fire if the
+chats. It has two obligations, and both must be atomic with the database
+write: they commit with the domain row and must never fire if the
 transaction rolls back:
 
-1. **Broadcast events.** Every message created, read, or deleted is published to
+1. Every message created, read, or deleted is broadcast as an event to
    downstream consumers over Kafka.
-2. **Unread notifications.** If a message is still unread `N` seconds after it
-   arrives, notify the recipient — *unless they read it first*.
+2. If a message is still unread `N` seconds after it arrives, an unread
+   notification goes to the recipient, *unless they read it first*.
 
 A plain message bus can't give you "commits with the domain row": publishing to
 Kafka and committing to Postgres are two systems, so a crash between them either
@@ -32,11 +32,11 @@ two obligations: `chat-events` and `unread-timers`.
   ReadMessageUseCase ── cancel_timer("unread-timers", timer_id) ┘
 ```
 
-- **Use cases** write domain rows and outbox rows in one transaction.
-- **The broker** is an `OutboxBroker` over the application's `AsyncEngine`; the
+- Use cases write domain rows and outbox rows in one transaction.
+- The broker is an `OutboxBroker` over the application's `AsyncEngine`; the
   outbox table lives on the app's own `MetaData` via `make_outbox_table`, so
   Alembic owns its migrations.
-- **Subscribers** poll each queue and relay the row onward to Kafka.
+- Subscribers poll each queue and relay the row onward to Kafka.
 
 ```python title="tables.py"
 from faststream_outbox import make_outbox_table
@@ -74,11 +74,11 @@ class Resources(Group):
     )
 ```
 
-## Pattern 1 — Transactional event relay
+## Pattern 1: transactional event relay
 
-A thin producer wraps `broker.publish`. Note the contract: `publish` inserts the
-outbox row through the caller's `AsyncSession` but **does not flush, commit, or
-open its own transaction** — the row commits with your domain writes.
+A thin producer wraps `broker.publish`. `publish` inserts the
+outbox row through the caller's `AsyncSession` but does not flush, commit, or
+open its own transaction; the row commits with your domain writes.
 
 ```python title="producers.py"
 import dataclasses
@@ -107,7 +107,7 @@ class OutboxEventProducer:
         )
 ```
 
-The use case calls the producer **inside** its transaction, beside the domain
+The use case calls the producer inside its transaction, beside the domain
 write, and commits once. If the commit fails, no event row exists; if it
 succeeds, the event is guaranteed durable:
 
@@ -136,9 +136,9 @@ class CreateMessageUseCase:
 ```
 
 This atomicity is load-bearing on one wiring detail: the `producer`,
-`messages_repository`, and `transaction` must all resolve the **same
-request-scoped `AsyncSession`**. `publish` inserts through whatever session the
-producer holds — if that is a different session from the one the repository
+`messages_repository`, and `transaction` must all resolve the same
+request-scoped `AsyncSession`. `publish` inserts through whatever session the
+producer holds. If that is a different session from the one the repository
 writes through, the outbox row commits on its own and the "commits with the
 domain row" guarantee silently breaks, with no error. Scope the session per
 request in your DI container so all three share it.
@@ -172,9 +172,9 @@ Register the router on the broker (the `OutboxBroker` built in `ioc.py`) with
 > single decorator over the subscriber, see
 > [Relay to Kafka / RabbitMQ / NATS](relay.md).
 
-## Pattern 2 — Fire-unless-cancelled timer
+## Pattern 2: fire-unless-cancelled timer
 
-The unread notification is a **delayed** outbox row, armed in the same create
+The unread notification is a delayed outbox row, armed in the same create
 transaction. `timer_id` deduplicates while a row is live (at most one live
 row per `(queue, timer_id)`, not a global idempotency key); `activate_in`
 defers it:
@@ -206,7 +206,7 @@ class OutboxEventProducer:  # ... continued from Pattern 1
         )
 ```
 
-When the recipient reads the message, a second use case **cancels** the timer in
+When the recipient reads the message, a second use case cancels the timer in
 its own transaction:
 
 ```python title="use_cases.py (continued)"
@@ -228,22 +228,22 @@ class ReadMessageUseCase:
 
 Two properties make this safe, and one is a limit worth knowing:
 
-- **At-most-one-live.** `timer_id` deduplicates per `(queue, timer_id)`. Arming
+- At most one timer row is live: `timer_id` deduplicates per `(queue, timer_id)`. Arming
   the same id twice while a row is in flight is a no-op, so retries don't
   produce two notifications.
-- **Cancel is lease-guarded.** `cancel_timer` only deletes a row that is not yet
+- Cancel is lease-guarded. `cancel_timer` only deletes a row that is not yet
   being delivered (it filters on an unheld lease) and returns `False` otherwise.
-- **The race window is real.** Once the timer is leased for delivery, a read can
-  no longer cancel it — the notification fires. Downstream consumers should
+- The race window is real. Once the timer is leased for delivery, a read can
+  no longer cancel it, and the notification fires. Downstream consumers should
   tolerate the occasional already-read notification.
 
 More on scheduling semantics: [Timers](timers.md).
 
-## Pattern 3 — Testing the composed app
+## Pattern 3: testing the composed app
 
-Nest `TestOutboxBroker` and `TestKafkaBroker`. In the default **sync mode**,
+Nest `TestOutboxBroker` and `TestKafkaBroker`. In the default sync mode,
 `broker.publish` drives the subscriber in-process, so one call to a use case
-runs the whole chain — outbox row → relay handler → Kafka — and you assert on
+runs the whole chain (outbox row → relay handler → Kafka), and you assert on
 the Kafka test broker without any background loop:
 
 ```python title="test_messaging.py"
@@ -266,12 +266,12 @@ async def test_create_message_relays_event_to_kafka(
 
 Two caveats specific to this composition:
 
-- **Future-dated rows fire immediately in sync mode.** The 30-second
+- Future-dated rows fire immediately in sync mode. The 30-second
   `unread-timers` row is dispatched at once, so a sync-mode test sees the
   notification without waiting. To test the *delay* and the cancel race for
-  real, construct `TestOutboxBroker(outbox_broker, run_loops=True)` — that runs
+  real, construct `TestOutboxBroker(outbox_broker, run_loops=True)`, which runs
   the real fetch/worker loops against the in-memory store.
-- **`validate_schema()` needs a real engine.** The fake client raises
+- `validate_schema()` needs a real engine. The fake client raises
   `NotImplementedError`, so put the schema check in its own test against a real
   `OutboxBroker`:
 
@@ -287,9 +287,9 @@ More on the test broker's two modes: [Testing](testing.md).
 
 ## See also
 
-- [Relay to Kafka / RabbitMQ / NATS](relay.md) — the native relay
+- [Relay to Kafka / RabbitMQ / NATS](relay.md): the native relay
   decorator, an alternative to the hand-rolled hop above.
-- [Dead-letter queue](dlq.md) — archive terminal failures instead of
+- [Dead-letter queue](dlq.md): archive terminal failures instead of
   deleting them.
-- [Observability](observability.md) — the metrics recorder and the
+- [Observability](observability.md): the metrics recorder and the
   Prometheus / OpenTelemetry middleware.

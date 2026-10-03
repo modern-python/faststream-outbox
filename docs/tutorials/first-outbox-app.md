@@ -3,7 +3,7 @@
 ## What you'll build
 
 A tiny app where calling `broker.publish` inside a database transaction
-triggers a handler — no message bus required, just Postgres. By the end
+triggers a handler. It needs no message bus, just Postgres. By the end
 you will have run a single message end-to-end and seen the handler
 print it.
 
@@ -118,7 +118,7 @@ session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
 `make_outbox_table` returns a `sqlalchemy.Table` attached to your
 `MetaData`. The package never creates or migrates the schema on its
-own — Step 4 is where we run that.
+own; Step 4 is where we run that.
 
 ## Step 4: Create the schema
 
@@ -158,7 +158,7 @@ Run it:
 uv run python create_schema.py
 ```
 
-You should see no output — that is success.
+You should see no output, which means it succeeded.
 
 Verify the table landed:
 
@@ -195,7 +195,7 @@ Check constraints:
 ```
 
 Three partial indexes show up alongside the columns, plus a check
-constraint that keeps a lease either fully set or fully unset — the
+constraint that keeps a lease either fully set or fully unset. The
 broker uses both at runtime; you don't need to think about them.
 
 ## Step 5: Define a handler
@@ -209,14 +209,14 @@ async def handle(order_id: int) -> None:
     print(f"got order {order_id}")
 ```
 
-No command yet — the handler runs once we publish a row and start the
+There is nothing to run yet; the handler runs once we publish a row and start the
 app.
 
 ## Step 6: Publish a row
 
 Add an `@app.after_startup` hook to the bottom of `app.py` that publishes
 one row right after the app boots. `broker.publish` inserts an outbox
-row through the session you give it — the row commits with the
+row through the session you give it, and the row commits with the
 surrounding transaction. There is no separate "send" step; the commit
 is the send.
 
@@ -293,7 +293,7 @@ Press `Ctrl-C`:
 
 - An outbox table inside your own Postgres database, owned by your
   schema.
-- A FastStream app whose "transport" is rows in that table — no
+- A FastStream app whose "transport" is rows in that table, with no
   external broker.
 - A handler that ran exactly once, in-process, against a row committed
   by your own session.
@@ -301,9 +301,9 @@ Press `Ctrl-C`:
 The interesting property is what happened *inside* `publish_one`: the
 `broker.publish` call inserted a row into the outbox table through the
 session you opened. `session.begin()` committed it. If that commit had
-rolled back — say, because a domain write on the same session
-failed — the outbox row would have rolled back with it. The row and
-the domain write commit or roll back together. That atomicity is the whole point.
+rolled back (say, because a domain write on the same session
+failed), the outbox row would have rolled back with it. The row and
+the domain write commit or roll back together.
 
 ## Clean up
 
@@ -313,16 +313,16 @@ docker stop outbox-postgres
 
 ## What's next
 
-- [Subscriber reference](../usage/subscriber.md) — tuning, worker
+- [Subscriber reference](../usage/subscriber.md): tuning, worker
   counts, retry strategies.
-- [Publisher reference](../usage/publisher.md) — `publish_batch`, the
+- [Publisher reference](../usage/publisher.md): `publish_batch`, the
   `OutboxPublisher` decorator, chained publishing.
-- [FastAPI integration](../usage/fastapi.md) — wire the outbox into
+- [FastAPI integration](../usage/fastapi.md): wire the outbox into
   a real HTTP service with `Depends(get_session)`.
-- [Schema validation](../usage/schema-validation.md) — this tutorial
-  installed the `validate` extra; call `validate_schema()` from a
+- [Schema validation](../usage/schema-validation.md): this tutorial
+  installed the `validate` extra, so you can call `validate_schema()` from a
   startup hook or `/health` check to catch a table that drifted from
   what the broker expects (e.g. a missing partial index after a
   migration).
-- [Tutorial: Add a Kafka relay](./add-kafka-relay.md) — extend this
+- [Tutorial: Add a Kafka relay](./add-kafka-relay.md): extend this
   app to forward each row into Kafka with one stacked decorator.

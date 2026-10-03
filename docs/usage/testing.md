@@ -1,11 +1,11 @@
 # Testing
 
-`faststream-outbox` ships `TestOutboxBroker` — a test context manager that
+`faststream-outbox` ships `TestOutboxBroker`, a test context manager that
 swaps the SQLAlchemy-backed client for an in-memory `FakeOutboxClient` so
 unit tests don't need Postgres.
 
-By default it dispatches handlers **synchronously inside `publish`** —
-matching `TestKafkaBroker` / `TestRabbitBroker`. No `_wait_until`, no
+By default it dispatches handlers synchronously inside `publish`, matching
+`TestKafkaBroker` / `TestRabbitBroker`, so tests need no `_wait_until` or
 `sleep`.
 
 ## Basic test
@@ -37,13 +37,13 @@ async def test_handler() -> None:
     assert received == [1]
 ```
 
-On `broker.publish` (and `publish_batch`), `session=` is optional in tests —
-the test broker patches those methods to ignore it. This does **not** extend
+On `broker.publish` (and `publish_batch`), `session=` is optional in tests:
+the test broker patches those methods to ignore it. This does not extend
 to `broker.publisher("q").publish(...)`, which still requires a `session`
 (see [Testing publishers](#testing-publishers) below).
 
 The fake client keeps an in-memory list of rows you can inspect via
-`fake_client.rows` — but `fake_client` is an attribute of the
+`fake_client.rows`. `fake_client` is an attribute of the
 `TestOutboxBroker` harness, not the broker, so bind the harness to a name:
 
 ```python
@@ -100,9 +100,9 @@ shown.
 
 ## Loop-driven mode
 
-For tests that exercise real polling semantics — retry rescheduling, lease
+For tests that exercise real polling semantics (retry rescheduling, lease
 expiry / reclaim, fetch-loop error recovery, or honoring `activate_in`
-delays — opt in with `run_loops=True`:
+delays), opt in with `run_loops=True`:
 
 ```python
 import asyncio
@@ -139,22 +139,22 @@ registered handlers are not started, matching production.
 
 ## Notes
 
-- **`activate_in` / `activate_at` are ignored in sync mode.** Timers fire
+- `activate_in` / `activate_at` are ignored in sync mode. Timers fire
   immediately. The intended firing time is preserved on the harness's
   `fake_client.rows[i].next_attempt_at` for assertions. Use
   `run_loops=True` if you need scheduled delivery to actually wait.
-- **`cancel_timer` and `fetch_unprocessed` run against the fake client**
+- `cancel_timer` and `fetch_unprocessed` run against the fake client
   (the test broker swaps its client in, so `broker.<method>` reaches it).
   The `session` argument is still required but is ignored in tests.
-- **The fake producer uses the same envelope format as the real one**, so
+- The fake producer uses the same envelope format as the real one, so
   all serialization paths are exercised.
-- **`lease_ttl_seconds` and re-delivery are not simulated** in sync mode —
-  handlers that exceed the configured TTL in production may be re-delivered
+- `lease_ttl_seconds` and re-delivery are not simulated in sync mode.
+  Handlers that exceed the configured TTL in production may be re-delivered
   to another worker, but tests will only invoke the handler once.
   Idempotency must be verified separately. Use `run_loops=True` for tests
   that need to observe lease-expiry behavior.
-- **`broker.validate_schema()` raises `NotImplementedError` under
-  `TestOutboxBroker`**: there is no real DB to validate against, and a
+- `broker.validate_schema()` raises `NotImplementedError` under
+  `TestOutboxBroker`: there is no real DB to validate against, and a
   silent pass would let users ship broken schemas while their tests stay
   green. Tests that need real schema validation must call
   `validate_schema()` on an `OutboxBroker(real_engine, outbox_table=...)`

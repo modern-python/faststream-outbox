@@ -3,7 +3,7 @@
 *Setting it up: [Setup Prometheus and OpenTelemetry](./setup-prometheus-opentelemetry.md).
 Why two seams: [Concepts § Instrumentation seams](../concepts/instrumentation-seams.md).*
 
-This page is the **Reference**: the recorder-seam API, the event
+This page is the reference for the recorder-seam API, the event
 catalog, and the operator PromQL playbook.
 
 ## The recorder seam
@@ -57,16 +57,16 @@ broker = OutboxBroker(
 ```
 
 `OpenTelemetryRecorder` (`faststream_outbox.metrics.opentelemetry`) is the
-OTel equivalent. Full wiring — including running the recorder seam and the
-native middleware together — is in
+OTel equivalent. Full wiring, including running the recorder seam and the
+native middleware together, is in
 [Setup Prometheus and OpenTelemetry](./setup-prometheus-opentelemetry.md).
 
 ### Recorder must not block
 
-The recorder is called from the event loop. **Do not block in it.**
+The recorder is called from the event loop. Do not block in it.
 Synchronous `prometheus_client.Counter.inc()` is fine (microseconds); a
 blocking HTTP / StatsD call is not. The library does not wrap recorders in
-`asyncio.to_thread` — that would destroy ordering and explode the task
+`asyncio.to_thread`, because that would destroy ordering and explode the task
 graph.
 
 Every call site wraps the recorder in `try/except` and logs at DEBUG, so a
@@ -76,15 +76,15 @@ broken recorder never poisons the dispatch loop.
 
 | Event | Tags (always present) | Tags (situational) | Fired by |
 |---|---|---|---|
-| `fetched` | `queue`, `subscriber`, `count` | | Fetch loop, once per fetch attempt (`count=0` on an empty fetch) — **skipped** when the in-flight queue is full (no fetch is issued). `queue` is tagged with the subscriber's **first** queue only; multi-queue subscribers should break down by queue using the row-level events instead |
+| `fetched` | `queue`, `subscriber`, `count` | | Fetch loop, once per fetch attempt (`count=0` on an empty fetch). Skipped when the in-flight queue is full (no fetch is issued). `queue` is tagged with the subscriber's first queue only; multi-queue subscribers should break down by queue using the row-level events instead |
 | `dispatched` | `queue`, `subscriber`, `deliveries_count`, `size_bytes` | | Worker loop, before handler runs |
 | `acked` | `queue`, `subscriber`, `deliveries_count`, `duration_seconds` | | Handler returned successfully |
 | `nacked_retried` | `queue`, `subscriber`, `deliveries_count`, `duration_seconds`, `next_delay_seconds` | `exception_type` | Retry scheduled |
 | `nacked_terminal` | `queue`, `subscriber`, `deliveries_count`, `reason` | `duration_seconds`, `exception_type` | Row terminally failed (`duration_seconds` absent for `max_deliveries`, which never ran the handler) |
 | `lease_lost` | `queue`, `subscriber`, `phase`, `row_id`, `deliveries_count` | | Terminal or retry write found `rowcount == 0` (`phase` = `terminal` \| `retry`) |
 | `published` | `queue`, `status`, `count`, `size_bytes`, `duration_seconds` | `exception_type` | Producer, after the INSERT executes (pre-commit; also fires on error with `status="error"`) |
-| `dlq_written` | `queue`, `subscriber`, `deliveries_count`, `failure_reason` | `exception_type` | DLQ CTE wrote an audit row. `exception_type` is **omitted** — not set to `None` — when the terminal had no exception (`max_deliveries`, or a manual `reject()` without one) |
-| `drain_timeout` | `queue`, `subscriber`, `drain_timeout_seconds` | | A `stop()` drain exceeded `graceful_timeout`; in-flight rows were abandoned to lease-expiry retry. `queue` is the subscriber's **first** queue |
+| `dlq_written` | `queue`, `subscriber`, `deliveries_count`, `failure_reason` | `exception_type` | DLQ CTE wrote an audit row. `exception_type` is omitted (not set to `None`) when the terminal had no exception (`max_deliveries`, or a manual `reject()` without one) |
+| `drain_timeout` | `queue`, `subscriber`, `drain_timeout_seconds` | | A `stop()` drain exceeded `graceful_timeout`; in-flight rows were abandoned to lease-expiry retry. `queue` is the subscriber's first queue |
 
 `reason` on `nacked_terminal` is one of `max_deliveries`,
 `retry_terminal`, `rejected`. The same value lands in the DLQ
@@ -95,9 +95,9 @@ broken recorder never poisons the dispatch loop.
 Operator queries that key off the recorder-side metrics. The
 `faststream_outbox_*` series below (`_lease_lost_total`,
 `_terminal_total`, `_dlq_written_total`) are emitted by
-**`PrometheusRecorder`** (`faststream_outbox.metrics.prometheus`), wired
-via `metrics_recorder=…` — see [Setup](./setup-prometheus-opentelemetry.md);
-the native `OutboxPrometheusMiddleware` does **not** emit them. The
+`PrometheusRecorder` (`faststream_outbox.metrics.prometheus`), wired
+via `metrics_recorder=…` (see [Setup](./setup-prometheus-opentelemetry.md)).
+The native `OutboxPrometheusMiddleware` does not emit them. The
 `broker` label is always `"outbox"`; add the filter to disambiguate from
 upstream FastStream services.
 
@@ -148,8 +148,8 @@ dlq_written](./dlq.md#metric-dlq_written).
 
 `TestOutboxBroker` replaces `broker.publish` with a patched version that
 skips the middleware publish path, so middleware-registered
-**publish-scope** metrics do **not** fire in test mode. Middleware
-**consume-scope** metrics still fire, because handlers are still consumed
+publish-scope metrics do not fire in test mode. Middleware
+consume-scope metrics still fire, because handlers are still consumed
 through the normal middleware stack.
 
 The recorder-seam `published` event provides synthetic publish-side
@@ -157,4 +157,4 @@ coverage in test mode via `FakeOutboxProducer`. The synthetic events use
 `duration_seconds=0.0` since the in-memory client has no real write to
 time.
 
-Mirrors `TestKafkaBroker` / `TestRabbitBroker` — same posture, same reason.
+`TestKafkaBroker` and `TestRabbitBroker` behave the same way, for the same reason.

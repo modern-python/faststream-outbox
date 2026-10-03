@@ -1,6 +1,6 @@
 # Setup Prometheus and OpenTelemetry
 
-You've decided to wire metrics. This page is the recipe. For the *why
+This page is the recipe for wiring metrics. For the *why
 two instrumentation seams*, see [Concepts § Instrumentation
 seams](../concepts/instrumentation-seams.md); for the event catalog
 and operator PromQL playbook, see [Reference §
@@ -54,10 +54,10 @@ app = AsgiFastStream(
 `AsgiFastStream` accepts any ASGI sub-app under `asgi_routes`; mount
 `make_asgi_app(REGISTRY)` to expose Prometheus exposition without
 pulling FastAPI in. `make_ping_asgi(broker)` is FastStream's built-in
-liveness probe — handy for Kubernetes.
+liveness probe, handy for Kubernetes.
 
-The `broker` label is always `"outbox"`; existing FastStream Grafana
-dashboards keep working — add `broker="outbox"` to the PromQL filter.
+The `broker` label is always `"outbox"`. Existing FastStream Grafana
+dashboards keep working; add `broker="outbox"` to the PromQL filter.
 
 ### Consume vs publish label set
 
@@ -72,8 +72,8 @@ operator query catalog.
 
 ## OpenTelemetry adapter
 
-Drop-in compatible with FastStream's `TelemetryMiddleware`, **meter
-only — no spans** (use the [native middleware](#native-middleware-spans--bus-parity)
+Drop-in compatible with FastStream's `TelemetryMiddleware`, but it records
+meters only, no spans (use the [native middleware](#native-middleware-spans--bus-parity)
 section below if you need spans).
 
 ```bash
@@ -124,10 +124,10 @@ swap the reader for `PeriodicExportingMetricReader(OTLPMetricExporter(...))`
 and drop the `/metrics` route.
 
 Instrument names match `faststream.opentelemetry.TelemetryMiddleware` for
-the bus-scope metrics — `messaging.process.duration`,
+the bus-scope metrics: `messaging.process.duration`,
 `messaging.publish.duration`, and (when `include_messages_counters=True`)
-`messaging.process.messages` / `messaging.publish.messages` — plus four
-outbox-specific counters the middleware can't emit:
+`messaging.process.messages` / `messaging.publish.messages`. The adapter
+adds four outbox-specific counters the middleware can't emit:
 `messaging.outbox.fetch.batches`, `messaging.outbox.lease_lost`,
 `messaging.outbox.dlq_written`, and `messaging.outbox.drain_timeout`. Units
 and constructor args
@@ -135,7 +135,7 @@ and constructor args
 The `messaging.system="outbox"` attribute disambiguates outbox traffic
 from Kafka / Rabbit data on the same instruments.
 
-**Tracing (spans) is not modelled by this adapter** — the callable
+This adapter does not model tracing (spans), because the callable
 seam can't bracket a span lifecycle. For spans, use the [native
 middleware](#native-middleware-spans--bus-parity) integration below.
 
@@ -143,14 +143,14 @@ middleware](#native-middleware-spans--bus-parity) integration below.
 
 For OTel spans wrapping `consume_scope` / `publish_scope` and the
 exact upstream label / instrument schema, register the native
-middleware subclasses via `middlewares=[...]` — same
+middleware subclasses via `middlewares=[...]`, using the same
 registration pattern as `KafkaPrometheusMiddleware` /
 `RabbitTelemetryMiddleware`.
 
 ## Both seams together { #both-seams-together }
 
 The recommended setup pairs middleware with the recorder so every
-event the bus emits **and** every outbox-internal event lands in one
+event the bus emits and every outbox-internal event lands in one
 observability stack:
 
 ```bash
@@ -158,8 +158,8 @@ pip install 'faststream-outbox[opentelemetry,prometheus]' \
     opentelemetry-exporter-otlp uvicorn
 ```
 
-Here OpenTelemetry supplies **spans** (exported to OTLP) and Prometheus
-supplies **all metrics** (two registries scraped over HTTP). The OTel
+Here OpenTelemetry supplies spans (exported to OTLP) and Prometheus
+supplies all metrics (two registries scraped over HTTP). The OTel
 middleware runs span-only: it gets no `meter_provider`, so its meters go to
 the global OpenTelemetry meter provider, which is a no-op unless you set one.
 Neither endpoint below exposes them.
@@ -228,15 +228,15 @@ app = AsgiFastStream(
 ```
 
 Traces flow to OTLP (Jaeger / Tempo / Honeycomb / collector); the
-Prometheus **middleware's** consume/publish meters land on `/metrics` and the
-**recorder's** outbox-internal counters on `/metrics/outbox` for Prometheus to
-scrape — two scrape targets, one process. (The OTel middleware here
+Prometheus middleware's consume/publish meters land on `/metrics` and the
+recorder's outbox-internal counters on `/metrics/outbox` for Prometheus to
+scrape: two scrape targets, one process. (The OTel middleware here
 contributes spans only, per the note above.)
 
-**The two seams overlap on consume/publish series.** Both the middleware
+The two seams overlap on consume/publish series. Both the middleware
 and the recorder emit the same `faststream_received_*` / `faststream_published_*`
-collectors, which is why they must live on **separate registries** (above) —
-sharing one raises `Duplicated timeseries in CollectorRegistry` as soon as
+collectors, which is why they must live on separate registries (above).
+Sharing one raises `Duplicated timeseries in CollectorRegistry` as soon as
 the second of them is created, and summing across both double-counts every consume and
 publish. Treat the middleware as the source of truth for consume/publish;
 the recorder's unique value is the outbox-internal events the middleware

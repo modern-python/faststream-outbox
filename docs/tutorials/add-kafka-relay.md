@@ -4,7 +4,7 @@
 
 In [Tutorial: Your first outbox app](./first-outbox-app.md) the handler
 printed the row and that was the end of it. Real outbox systems usually
-*relay* the row to a real message bus — Kafka, RabbitMQ, NATS — so
+*relay* the row to a real message bus such as Kafka, RabbitMQ, or NATS so
 downstream services can consume it. In this tutorial you'll add a Kafka
 broker, stack a single decorator above the existing subscriber, and watch
 a row written inside a Postgres transaction land on a Kafka topic.
@@ -16,9 +16,9 @@ relay and seen the row arrive at a `kafka-console-consumer`.
 
 - You finished [Tutorial: Your first outbox app](./first-outbox-app.md).
   This tutorial extends that same `app.py`, the same `outbox-postgres`
-  container, and the same project directory. **If you ran Tutorial 1's
-  final cleanup**, its `--rm` Postgres container (and its data) is gone —
-  re-run Tutorial 1's Postgres-start and schema-creation steps first; this
+  container, and the same project directory. If you ran Tutorial 1's
+  final cleanup, its `--rm` Postgres container (and its data) is gone, so
+  re-run Tutorial 1's Postgres-start and schema-creation steps first. This
   tutorial assumes `outbox-postgres` is up with the `outbox` table.
 - Docker Compose (the `docker compose` CLI) for the Kafka container.
 - Another ten minutes.
@@ -26,15 +26,15 @@ relay and seen the row arrive at a `kafka-console-consumer`.
 ## Step 1: Add Kafka via docker-compose
 
 Postgres should still be running from Tutorial 1 (see the note above if you
-ran its cleanup). Add Kafka via a small `docker-compose.yml`. Single-broker
-[KRaft mode](https://kafka.apache.org/documentation/#kraft) — no separate
+ran its cleanup). Add Kafka via a small `docker-compose.yml`. It runs a single broker in
+[KRaft mode](https://kafka.apache.org/documentation/#kraft), so there is no separate
 ZooKeeper service, and Confluent's `cp-kafka:7.6.0` image is known to
-run well on Apple Silicon. Two listeners: one on the host at `localhost:9092`
+run well on Apple Silicon. There are two listeners: one on the host at `localhost:9092`
 (for your `faststream run` process) and one inside the Docker network at
 `kafka:29092` (inter-broker traffic). The Step 5 console consumer runs
 *inside* the broker container via `docker compose exec`, so it bootstraps
-against the host listener at its advertised address `localhost:9092` —
-inside the container the loopback reaches the same `0.0.0.0:9092` listener,
+against the host listener at its advertised address `localhost:9092`.
+Inside the container the loopback reaches the same `0.0.0.0:9092` listener,
 so no separate in-network client listener is needed for it.
 
 ```yaml title="docker-compose.yml"
@@ -130,7 +130,7 @@ Stack `@kafka_publisher` above the existing
 `@broker_outbox.subscriber("orders")` and change the handler to `return
 order_id`. The stacked decorator picks up the return value and publishes
 it to `orders.kafka`. The outbox subscriber is still the one driving
-delivery — Kafka becomes the *destination*, not a second subscriber.
+delivery; Kafka becomes the *destination*, not a second subscriber.
 
 ```python title="app.py (edits)"
 @kafka_publisher
@@ -198,7 +198,7 @@ got order 1
 
 The `Topic orders.kafka not found in cluster metadata` line is
 `aiokafka` noticing a brand-new topic and asking the broker to
-auto-create it — first-run only.
+auto-create it. It appears on the first run only.
 
 In a second terminal, attach a console consumer to the topic:
 
@@ -224,10 +224,10 @@ If Kafka were unavailable when the outbox subscriber dispatched a row,
 the foreign publish would raise, the outbox row would be nacked, and
 the configured `retry_strategy` would reschedule it. The next dispatch
 re-runs the handler and re-attempts the foreign publish. The net effect
-is **at-least-once delivery to the foreign broker** — the outbox row is
+is at-least-once delivery to the foreign broker. The outbox row is
 the durability boundary, and it stays in the table for the duration of the
 retry budget (the default `ExponentialRetry` allows 10 attempts). Once the
-budget is exhausted the row is deleted — the default configures no DLQ — so
+budget is exhausted the row is deleted (the default configures no DLQ), so
 configure a longer `retry_strategy` or a `dlq_table` to survive outages
 beyond that (the default schedule spans roughly 8-9 minutes: nine backoffs
 of 1, 2, 4, … 256 seconds sum to ~8.5 minutes before the 10th attempt is
@@ -248,20 +248,20 @@ contract in full.
 - A two-broker app: an `OutboxBroker` over Postgres and a `KafkaBroker`
   over a local Kafka container.
 - A single subscriber whose return value is forwarded to a Kafka topic
-  via a stacked publisher decorator — no second handler, no manual
-  client code.
+  via a stacked publisher decorator, with no second handler and no
+  manual client code.
 - An at-least-once relay: the row is durable in Postgres until the
   Kafka publish succeeds.
 
 The interesting property is the *transactional* part of the publish.
 The `broker_outbox.publish(1, ...)` call in `publish_one` ran inside a
-session that committed atomically — the row reached the outbox table
+session that committed atomically: the row reached the outbox table
 as part of the same `COMMIT` that any sibling domain writes would have
 committed. There is no window in which the row exists but a sibling
 domain write doesn't, or vice versa. The Kafka delivery happens *after*
 that boundary, asynchronously, with its own retry safety net. The
-outbox is what makes those two halves — transactional domain write and
-non-transactional bus publish — survive a process crash together.
+outbox is what makes those two halves (transactional domain write and
+non-transactional bus publish) survive a process crash together.
 
 ## Clean up
 
@@ -275,13 +275,13 @@ stops the Postgres container from Tutorial 1.
 
 ## What's next
 
-- [Relay reference](../usage/relay.md) — the full contract: header
+- [Relay reference](../usage/relay.md): the full contract, including header
   propagation, two-broker lifecycle, other foreign brokers
-  (RabbitMQ / NATS / Redis), what *not* to do.
-- [Subscriber retry strategies](../usage/subscriber.md#retry-strategies)
-  — `ExponentialRetry`, `LinearRetry`, `ConstantRetry`, `NoRetry`, and
+  (RabbitMQ / NATS / Redis), and what *not* to do.
+- [Subscriber retry strategies](../usage/subscriber.md#retry-strategies):
+  `ExponentialRetry`, `LinearRetry`, `ConstantRetry`, `NoRetry`, and
   "retry only on transient errors."
-- [Comparison](../concepts/comparison.md) — see the section *"vs.
+- [Comparison](../concepts/comparison.md): see the section *"vs.
   FastStream + `KafkaBroker` / `RabbitBroker` directly"* for the
   pattern's trade-offs vs. just publishing to Kafka straight from
   your request handler.
