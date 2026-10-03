@@ -125,6 +125,7 @@ asyncio.run(main())
 is no real DB to validate against, and a silent pass would let users ship
 broken schemas while their `TestOutboxBroker`-backed tests stay green.
 
-Tests that need real schema validation must construct an
-`OutboxClient(real_engine, table)` against the same DSN the migrations
-ran against. See [Testing](./testing.md).
+Tests that need real schema validation must build an
+`OutboxBroker(engine=real_engine, outbox_table=table)` against the same
+DSN the migrations ran against and call `await broker.validate_schema()`.
+See [Testing](./testing.md).
