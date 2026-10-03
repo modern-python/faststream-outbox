@@ -21,6 +21,7 @@ from sqlalchemy import MetaData
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from faststream_outbox import NoRetry, OutboxMessage, OutboxResponse, make_dlq_table, make_outbox_table
+from faststream_outbox import OutboxRouter as BrokerOutboxRouter
 from faststream_outbox.fastapi import (
     OutboxBroker as AnnotatedOutboxBroker,
 )
@@ -287,3 +288,35 @@ async def test_outbox_router_forwards_dlq_table_and_metrics_recorder_to_inner_br
         await router.broker.publish({"x": 1}, queue="orders")  # ty: ignore[missing-argument]
 
     assert events  # the recorder seam is live under the FastAPI router
+
+
+async def test_included_broker_router_subscriber_resolves_fastapi_depends() -> None:
+    """INVARIANT: a broker-level ``OutboxRouter`` included into the FastAPI router gets the FastAPI bridge.
+
+    ``StreamRouter.include_router`` wraps each nested subscriber with the FastAPI compatibility
+    decorator before handing the router to the broker. Including it on the broker directly (or via
+    ``OutboxBroker(routers=...)``) skips that wrap, and the handler receives the ``Depends`` object
+    itself instead of the resolved value.
+    """
+    router = OutboxRouter(outbox_table=_make_outbox_table())
+    sub = BrokerOutboxRouter()
+    seen: list[tuple[dict, str]] = []
+
+    def get_tenant() -> str:
+        return "tenant-a"
+
+    tenant_dep = Depends(get_tenant)
+
+    @sub.subscriber("orders")
+    async def handle(body: dict, tenant: str = tenant_dep) -> None:
+        seen.append((body, tenant))
+
+    router.include_router(sub)
+
+    app = _make_app_with_router(router)
+    with TestClient(app) as client:
+        await router.broker.publish({"x": 1}, queue="orders")  # ty: ignore[missing-argument]
+        schema = client.get("/asyncapi.json").json()
+
+    assert seen == [({"x": 1}, "tenant-a")]
+    assert any(name.startswith("orders") for name in schema["channels"])

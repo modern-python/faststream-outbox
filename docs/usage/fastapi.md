@@ -128,6 +128,49 @@ in HTTP routes. In an HTTP route, reach the broker via `router.broker` (as
 the quickstart's `create_order` does); a `broker: OutboxBroker` annotation
 there resolves as a request field and fails with a 422.
 
+## Grouping subscribers
+
+To define subscribers in separate modules, put them on the plain
+[`faststream_outbox.OutboxRouter`](./router.md) and include that into the
+FastAPI router:
+
+```python
+# myapp/orders.py
+from faststream_outbox import OutboxRouter
+
+orders = OutboxRouter()
+
+
+@orders.subscriber("orders")
+async def handle(
+    body: dict,
+    session: AsyncSession = Depends(get_session),
+) -> None: ...
+```
+
+```python
+# myapp/main.py
+from faststream_outbox.fastapi import OutboxRouter
+
+from myapp.orders import orders
+
+router = OutboxRouter(engine, outbox_table=outbox_table)
+router.include_router(orders)
+
+app = FastAPI()
+app.include_router(router)
+```
+
+`router.include_router(...)` wraps each included subscriber with the same
+FastAPI bridge as `@router.subscriber`, so `Depends(...)` resolves in
+them. They start with the inner broker in the FastAPI lifespan and appear
+in the document served at `schema_url`.
+
+Two things do not work. Including one FastAPI `OutboxRouter` into another
+raises `TypeError` (FastStream does not support nesting `StreamRouter`s),
+and calling `router.broker.include_router(orders)` skips the bridge, so
+`Depends(...)` in those handlers does not resolve.
+
 ## What's intentionally not exposed
 
 Several `OutboxBroker.__init__` arguments are intentionally not exposed
@@ -139,9 +182,9 @@ on `OutboxRouter.__init__`:
 - `dependencies`: on the router signature this means FastAPI
   `Depends(...)` only; the broker's FastStream `Dependant` list is the
   wrong shape for this flow.
-- `routers`: not forwarded through the router; its semantics through the
-  FastAPI lifespan are unsettled. Register subscribers directly on the
-  `OutboxRouter` instead.
+- `routers`: subscribers passed this way would skip the FastAPI bridge, so
+  `Depends(...)` in them would not resolve. Use `router.include_router(...)`
+  instead (see [Grouping subscribers](#grouping-subscribers)).
 
 The [DLQ](./dlq.md) and the [metrics-recorder seam](./observability.md)
 are also available through the router: pass `dlq_table=` and
