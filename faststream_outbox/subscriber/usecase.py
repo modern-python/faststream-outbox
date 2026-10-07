@@ -26,7 +26,7 @@ import logging
 import random
 import time
 import typing
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager, suppress
 from itertools import chain
 
@@ -348,7 +348,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
     async def _open_fetch_resources(
         self,
         engine: "AsyncEngine | None",
-    ) -> AsyncIterator[Mapping[str, object]]:
+    ) -> AsyncGenerator[Mapping[str, object]]:
         """Yield the kwargs ``_fetch_inner`` needs, owning fetch_conn + listen_conn lifetimes.
 
         Production path opens a long-lived ``AsyncConnection`` for the fetch CTE and a
@@ -513,7 +513,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
     async def _open_worker_resources(
         self,
         engine: "AsyncEngine | None",
-    ) -> AsyncIterator[Mapping[str, object]]:
+    ) -> AsyncGenerator[Mapping[str, object]]:
         """Yield ``writer_conn`` for ``_worker_inner``, owning its lifetime across all flushes.
 
         One long-lived ``AsyncConnection`` per outer reconnect cycle — every terminal/retry

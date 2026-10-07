@@ -32,7 +32,7 @@ from faststream_outbox.schema import _DLQ_INJECTED_COLUMNS, _DLQ_PROJECTION
 
 
 if typing.TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Generator, Sequence
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -620,7 +620,7 @@ class TestOutboxBroker(TestBroker[OutboxBroker, OutboxBroker], broker=OutboxBrok
         return row_id
 
     @contextmanager
-    def _patch_producer(self, broker: OutboxBroker) -> "Iterator[None]":
+    def _patch_producer(self, broker: OutboxBroker) -> "Generator[None]":
         # Swap the broker's producer slot for one that routes inserts through
         # the in-memory fake client. ``OutboxPublisher.publish`` flows through
         # ``_basic_publish(cmd, producer=...)``, so replacing the producer is
@@ -644,7 +644,7 @@ class TestOutboxBroker(TestBroker[OutboxBroker, OutboxBroker], broker=OutboxBrok
             broker.config.broker_config.producer = original_producer
 
     @contextmanager
-    def _patch_broker(self, broker: OutboxBroker) -> "Iterator[None]":
+    def _patch_broker(self, broker: OutboxBroker) -> "Generator[None]":
         original_client = broker.config.broker_config.client
         broker.config.broker_config.client = self.fake_client
         # Mirror real publish's serializer wiring so pydantic / dataclass bodies
