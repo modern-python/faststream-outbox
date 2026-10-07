@@ -8,7 +8,7 @@ the in-memory fake client during the FastAPI lifespan, mirroring the existing
 yielding a session-shaped mock from a normal FastAPI dependency.
 """
 
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
 from unittest.mock import AsyncMock
@@ -48,7 +48,7 @@ def _make_app_with_router(router: OutboxRouter) -> FastAPI:
     """Build a FastAPI app mounted with the router; wrap the broker in TestOutboxBroker."""
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         del app
         # Swap in the in-memory fake client for the broker the router owns,
         # then let the router's own lifespan run (it starts subscribers).
@@ -176,7 +176,7 @@ async def test_annotated_context_shortcuts_resolve_in_router_handler() -> None:
     test_broker = TestOutboxBroker(router.broker)
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         del app
         async with test_broker:
             yield

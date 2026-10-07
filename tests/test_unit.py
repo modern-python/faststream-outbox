@@ -8,6 +8,7 @@ import time
 import typing
 import uuid
 import warnings
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -2896,7 +2897,7 @@ async def test_fetch_reconnect_loop_exits_on_drain_without_churning() -> None:
     opens = {"n": 0}
 
     @asynccontextmanager
-    async def _open(_engine: object) -> typing.AsyncIterator[dict[str, object]]:
+    async def _open(_engine: object) -> AsyncGenerator[dict[str, object]]:
         opens["n"] += 1  # pragma: no cover - the drain guard exits before resources open
         yield {}  # pragma: no cover - the drain guard exits before resources open
 
@@ -2940,7 +2941,7 @@ async def test_run_with_reconnect_resets_backoff_after_sustained_uptime(monkeypa
     monkeypatch.setattr("faststream_outbox.subscriber.usecase._BACKOFF_RESET_THRESHOLD_SECONDS", 0.0)
 
     @asynccontextmanager
-    async def _open(_engine: object) -> typing.AsyncIterator[dict[str, object]]:
+    async def _open(_engine: object) -> AsyncGenerator[dict[str, object]]:
         yield {}
 
     async with test_broker:
@@ -2988,7 +2989,7 @@ async def test_run_with_reconnect_does_not_reset_backoff_when_open_fails(monkeyp
         sub.running = True
 
         @asynccontextmanager
-        async def _failing_open(_engine: object) -> typing.AsyncIterator[dict[str, object]]:
+        async def _failing_open(_engine: object) -> AsyncGenerator[dict[str, object]]:
             if len(attempts) >= 3:  # exit cleanly after observing 3 escalating attempts
                 sub.running = False
                 yield {}
@@ -3732,7 +3733,7 @@ async def test_fetch_cte_carries_partial_index_predicates_as_conjuncts() -> None
         class _CapturingConn:
             def begin(self) -> object:
                 @asynccontextmanager
-                async def _cm() -> typing.AsyncIterator[None]:
+                async def _cm() -> AsyncGenerator[None]:
                     yield
 
                 return _cm()

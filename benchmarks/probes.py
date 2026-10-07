@@ -24,7 +24,7 @@ Two hazards, both hit while prototyping this design:
 
 import contextlib
 import dataclasses
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
@@ -155,7 +155,7 @@ class ProbeResult:
 
 
 @contextlib.asynccontextmanager
-async def _autocommit(engine: AsyncEngine) -> AsyncIterator[AsyncConnection]:
+async def _autocommit(engine: AsyncEngine) -> AsyncGenerator[AsyncConnection]:
     """Open a connection that emits no implicit BEGIN/COMMIT/ROLLBACK.
 
     pg_stat_statements tracks utility statements, and none of BEGIN/COMMIT/ROLLBACK
@@ -200,7 +200,7 @@ async def assert_owns_database(engine: AsyncEngine) -> None:
 
 
 @contextlib.asynccontextmanager
-async def probe(engine: AsyncEngine, table_name: str, schema: str | None = None) -> AsyncIterator[list[ProbeResult]]:
+async def probe(engine: AsyncEngine, table_name: str, schema: str | None = None) -> AsyncGenerator[list[ProbeResult]]:
     """Snapshot the catalogs around the wrapped workload.
 
     Yields a list that holds exactly one :class:`ProbeResult` once the block exits.
