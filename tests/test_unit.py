@@ -1,5 +1,5 @@
 import asyncio
-import datetime as _dt
+import datetime as dt
 import json
 import logging
 import math
@@ -267,9 +267,9 @@ def test_encode_payload_serializes_pydantic_model_with_default_serializer() -> N
 # --- retry strategies ---
 
 
-def _make_times() -> tuple[_dt.datetime, _dt.datetime]:
-    first = _dt.datetime(2026, 1, 1, tzinfo=_dt.UTC)
-    last = first + _dt.timedelta(seconds=10)
+def _make_times() -> tuple[dt.datetime, dt.datetime]:
+    first = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
+    last = first + dt.timedelta(seconds=10)
     return first, last
 
 
@@ -360,11 +360,11 @@ def _make_msg(**overrides: object) -> OutboxInnerMessage:
         "headers": None,
         "attempts_count": 0,
         "deliveries_count": 1,
-        "created_at": _dt.datetime.now(tz=_dt.UTC),
-        "next_attempt_at": _dt.datetime.now(tz=_dt.UTC),
+        "created_at": dt.datetime.now(tz=dt.UTC),
+        "next_attempt_at": dt.datetime.now(tz=dt.UTC),
         "first_attempt_at": None,
         "last_attempt_at": None,
-        "acquired_at": _dt.datetime.now(tz=_dt.UTC),
+        "acquired_at": dt.datetime.now(tz=dt.UTC),
         "acquired_token": uuid.uuid4(),
     }
     base.update(overrides)
@@ -561,7 +561,7 @@ async def test_nack_with_raising_strategy_degrades_to_retry_terminal() -> None:
 def test_exponential_retry_does_not_overflow_at_extreme_attempts() -> None:
     """B7: ExponentialRetry with no max_attempts/max_delay must not raise OverflowError."""
     strategy = ExponentialRetry(initial_delay_seconds=1.0, multiplier=2.0)
-    now = _dt.datetime.now(tz=_dt.UTC)
+    now = dt.datetime.now(tz=dt.UTC)
     delay = strategy.get_next_attempt_delay(first_attempt_at=now, last_attempt_at=now, attempts_count=2000)
     assert delay is not None
     assert math.isfinite(delay)
@@ -849,14 +849,14 @@ async def test_publish_command_validates_activate_args_mutex() -> None:
             b"x",
             queue="orders",
             session=session,
-            activate_in=_dt.timedelta(seconds=1),
-            activate_at=_dt.datetime.now(tz=_dt.UTC) + _dt.timedelta(seconds=1),
+            activate_in=dt.timedelta(seconds=1),
+            activate_at=dt.datetime.now(tz=dt.UTC) + dt.timedelta(seconds=1),
         )
 
 
 async def test_publish_command_rejects_naive_activate_at() -> None:
     session = _make_session_mock()
-    naive = _dt.datetime(2026, 5, 23, 12, 0, 0)  # noqa: DTZ001
+    naive = dt.datetime(2026, 5, 23, 12, 0, 0)  # noqa: DTZ001
     with pytest.raises(ValueError, match="timezone-aware"):
         OutboxPublishCommand(b"x", queue="orders", session=session, activate_at=naive)
 
@@ -867,6 +867,12 @@ async def test_publish_command_batch_bodies_preserves_none_body() -> None:
     assert OutboxPublishCommand(None, b"x", queue="q", session=session).batch_bodies == (None, b"x")
     assert OutboxPublishCommand(None, queue="q", session=session).batch_bodies == (None,)
     assert OutboxPublishCommand(b"a", b"b", queue="q", session=session).batch_bodies == (b"a", b"b")
+
+
+async def test_publish_command_batch_bodies_is_assignable() -> None:
+    cmd = OutboxPublishCommand(b"a", b"b", queue="q", session=_make_session_mock())
+    cmd.batch_bodies = (None, b"c")
+    assert cmd.batch_bodies == (None, b"c")
 
 
 def test_publish_command_rejects_empty_queue() -> None:
@@ -970,15 +976,15 @@ async def test_broker_publish_rejects_activate_in_and_at_together() -> None:
             b"x",
             queue="orders",
             session=session,
-            activate_in=_dt.timedelta(seconds=1),
-            activate_at=_dt.datetime.now(tz=_dt.UTC) + _dt.timedelta(seconds=1),
+            activate_in=dt.timedelta(seconds=1),
+            activate_at=dt.datetime.now(tz=dt.UTC) + dt.timedelta(seconds=1),
         )
 
 
 async def test_broker_publish_with_activate_in_skips_notify() -> None:
     broker = _make_broker()
     session = _make_session_mock()
-    await broker.publish(b"x", queue="orders", session=session, activate_in=_dt.timedelta(seconds=30))
+    await broker.publish(b"x", queue="orders", session=session, activate_in=dt.timedelta(seconds=30))
     # Only the INSERT — no NOTIFY for future-dated rows.
     assert session.execute.await_count == 1
     insert_stmt = session.execute.await_args_list[0].args[0]
@@ -989,7 +995,7 @@ async def test_broker_publish_with_activate_in_skips_notify() -> None:
 async def test_broker_publish_with_activate_at_skips_notify() -> None:
     broker = _make_broker()
     session = _make_session_mock()
-    fire = _dt.datetime.now(tz=_dt.UTC) + _dt.timedelta(minutes=5)
+    fire = dt.datetime.now(tz=dt.UTC) + dt.timedelta(minutes=5)
     await broker.publish(b"x", queue="orders", session=session, activate_at=fire)
     assert session.execute.await_count == 1
     params = session.execute.await_args_list[0].args[0].compile().params
@@ -1001,7 +1007,7 @@ async def test_broker_publish_emits_notify_when_activate_at_is_past() -> None:
     # listeners wake without waiting for the next poll tick.
     broker = _make_broker()
     session = _make_session_mock()
-    past = _dt.datetime.now(tz=_dt.UTC) - _dt.timedelta(seconds=5)
+    past = dt.datetime.now(tz=dt.UTC) - dt.timedelta(seconds=5)
     await broker.publish(b"x", queue="orders", session=session, activate_at=past)
     assert session.execute.await_count == 2
     notify_stmt, notify_params = session.execute.await_args_list[1].args
@@ -1012,7 +1018,7 @@ async def test_broker_publish_emits_notify_when_activate_at_is_past() -> None:
 async def test_broker_publish_emits_notify_when_activate_in_is_zero() -> None:
     broker = _make_broker()
     session = _make_session_mock()
-    await broker.publish(b"x", queue="orders", session=session, activate_in=_dt.timedelta(0))
+    await broker.publish(b"x", queue="orders", session=session, activate_in=dt.timedelta(0))
     assert session.execute.await_count == 2
     notify_stmt, _params = session.execute.await_args_list[1].args
     assert "pg_notify" in str(notify_stmt)
@@ -1021,7 +1027,7 @@ async def test_broker_publish_emits_notify_when_activate_in_is_zero() -> None:
 async def test_broker_publish_rejects_naive_activate_at() -> None:
     broker = _make_broker()
     session = _make_session_mock()
-    naive = _dt.datetime(2026, 5, 23, 12, 0, 0)  # noqa: DTZ001
+    naive = dt.datetime(2026, 5, 23, 12, 0, 0)  # noqa: DTZ001
     with pytest.raises(ValueError, match="timezone-aware"):
         await broker.publish(b"x", queue="orders", session=session, activate_at=naive)
 
@@ -1064,8 +1070,8 @@ async def test_broker_publish_batch_rejects_activate_in_and_at_together() -> Non
             b"a",
             queue="orders",
             session=session,
-            activate_in=_dt.timedelta(seconds=1),
-            activate_at=_dt.datetime.now(tz=_dt.UTC) + _dt.timedelta(seconds=1),
+            activate_in=dt.timedelta(seconds=1),
+            activate_at=dt.datetime.now(tz=dt.UTC) + dt.timedelta(seconds=1),
         )
 
 
@@ -1077,7 +1083,7 @@ async def test_broker_publish_batch_with_activate_in_skips_notify() -> None:
         b"b",
         queue="orders",
         session=session,
-        activate_in=_dt.timedelta(seconds=30),
+        activate_in=dt.timedelta(seconds=30),
     )
     # Insert only — no NOTIFY for future-dated batch.
     assert session.execute.await_count == 1
@@ -1088,7 +1094,7 @@ async def test_broker_publish_batch_with_activate_in_skips_notify() -> None:
 async def test_broker_publish_batch_with_activate_at_skips_notify() -> None:
     broker = _make_broker()
     session = AsyncMock(spec=AsyncSession)
-    fire = _dt.datetime.now(tz=_dt.UTC) + _dt.timedelta(minutes=5)
+    fire = dt.datetime.now(tz=dt.UTC) + dt.timedelta(minutes=5)
     await broker.publish_batch(b"a", b"b", queue="orders", session=session, activate_at=fire)
     # No NOTIFY: future-dated rows.
     assert session.execute.await_count == 1
@@ -1099,7 +1105,7 @@ async def test_broker_publish_batch_with_activate_at_skips_notify() -> None:
 async def test_broker_publish_batch_emits_notify_when_activate_at_is_past() -> None:
     broker = _make_broker()
     session = _make_session_mock()
-    past = _dt.datetime.now(tz=_dt.UTC) - _dt.timedelta(seconds=5)
+    past = dt.datetime.now(tz=dt.UTC) - dt.timedelta(seconds=5)
     await broker.publish_batch(b"a", b"b", queue="orders", session=session, activate_at=past)
     # INSERT + NOTIFY: past activate_at is immediately eligible.
     assert session.execute.await_count == 2
@@ -1111,7 +1117,7 @@ async def test_broker_publish_batch_emits_notify_when_activate_at_is_past() -> N
 async def test_broker_publish_batch_rejects_naive_activate_at() -> None:
     broker = _make_broker()
     session = AsyncMock(spec=AsyncSession)
-    naive = _dt.datetime(2026, 5, 23, 12, 0, 0)  # noqa: DTZ001
+    naive = dt.datetime(2026, 5, 23, 12, 0, 0)  # noqa: DTZ001
     with pytest.raises(ValueError, match="timezone-aware"):
         await broker.publish_batch(b"a", queue="orders", session=session, activate_at=naive)
 
@@ -1682,7 +1688,7 @@ async def test_client_mark_pending_with_lease_raises_typeerror_on_none_conn() ->
     metadata = MetaData()
     t = make_outbox_table(metadata)
     client = OutboxClient(AsyncMock(), t)
-    now = _dt.datetime.now(tz=_dt.UTC)
+    now = dt.datetime.now(tz=dt.UTC)
     with pytest.raises(TypeError, match=r"OutboxClient\.mark_pending_with_lease requires a live AsyncConnection"):
         await client.mark_pending_with_lease(
             None,
@@ -1818,7 +1824,7 @@ async def test_fake_client_delete_miss() -> None:
 async def test_fake_client_mark_pending_miss() -> None:
 
     client = FakeOutboxClient()
-    now = _dt.datetime.now(tz=_dt.UTC)
+    now = dt.datetime.now(tz=dt.UTC)
     updated = await client.mark_pending_with_lease(
         None,
         999,
@@ -2098,7 +2104,7 @@ def _make_msg_over_max_deliveries(**overrides: object) -> OutboxInnerMessage:
 async def test_fake_client_fetch_ties_break_on_id() -> None:
     """L2: rows with identical ``next_attempt_at`` are claimed in ``id`` order."""
     client = FakeOutboxClient()
-    same_time = _dt.datetime(2026, 5, 23, 12, 0, 0, tzinfo=_dt.UTC)
+    same_time = dt.datetime(2026, 5, 23, 12, 0, 0, tzinfo=dt.UTC)
     id_a = client.feed(queue="orders", payload=b"a", next_attempt_at=same_time)
     id_b = client.feed(queue="orders", payload=b"b", next_attempt_at=same_time)
     id_c = client.feed(queue="orders", payload=b"c", next_attempt_at=same_time)
@@ -3050,7 +3056,7 @@ async def test_outbox_client_mark_pending_with_lease_uses_caller_conn() -> None:
     fake_conn = MagicMock()
     fake_conn.begin = MagicMock()
     fake_conn.execute = AsyncMock(return_value=MagicMock(rowcount=1))
-    now = _dt.datetime.now(tz=_dt.UTC)
+    now = dt.datetime.now(tz=dt.UTC)
 
     updated = await client.mark_pending_with_lease(
         fake_conn,
@@ -4158,7 +4164,7 @@ async def test_dlq_cte_insert_columns_match_make_dlq_table() -> None:
 
 def test_outbox_response_rejects_naive_activate_at_eagerly() -> None:
     """OutboxResponse must reject a naive activate_at at construction, not defer it to dispatch time."""
-    naive = _dt.datetime(2030, 1, 1, 12, 0, 0)  # noqa: DTZ001  # deliberately tz-naive
+    naive = dt.datetime(2030, 1, 1, 12, 0, 0)  # noqa: DTZ001  # deliberately tz-naive
     with pytest.raises(ValueError, match="OutboxResponse requires activate_at to be timezone-aware"):
         OutboxResponse(
             {"x": 1},
@@ -4170,13 +4176,13 @@ def test_outbox_response_rejects_naive_activate_at_eagerly() -> None:
 
 def test_outbox_response_rejects_both_activate_args_eagerly() -> None:
     """OutboxResponse must reject activate_in + activate_at together at construction."""
-    aware = _dt.datetime(2030, 1, 1, 12, 0, 0, tzinfo=_dt.UTC)
+    aware = dt.datetime(2030, 1, 1, 12, 0, 0, tzinfo=dt.UTC)
     with pytest.raises(ValueError, match="OutboxResponse accepts at most one of activate_in / activate_at"):
         OutboxResponse(
             {"x": 1},
             queue="q",
             session=None,  # ty: ignore[invalid-argument-type]  # error raises before session is used
-            activate_in=_dt.timedelta(seconds=5),
+            activate_in=dt.timedelta(seconds=5),
             activate_at=aware,
         )
 

@@ -5,7 +5,7 @@ test exercises the real ``broker.publish`` path (no test broker patching) so
 publish-scope middleware fires through ``_basic_publish``.
 """
 
-import datetime as _dt
+import datetime as dt
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -47,7 +47,7 @@ def _session_mock() -> AsyncMock:
 
 
 def _make_inner_message(*, payload: bytes = b"hello", queue: str = "orders") -> OutboxInnerMessage:
-    now = _dt.datetime.now(tz=_dt.UTC)
+    now = dt.datetime.now(tz=dt.UTC)
     return OutboxInnerMessage(
         id=7,
         queue=queue,

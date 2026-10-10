@@ -11,7 +11,7 @@ tests that exercise retry rescheduling, lease expiry, fetch-loop error recovery,
 or scheduled delivery actually waiting. ``feed()`` simulates a row insert.
 """
 
-import datetime as _dt
+import datetime as dt
 import typing
 import uuid
 from contextlib import contextmanager
@@ -47,16 +47,16 @@ class _FakeRow:
     headers: dict[str, str] | None
     attempts_count: int = 0
     deliveries_count: int = 0
-    created_at: _dt.datetime = field(default_factory=utcnow)
-    next_attempt_at: _dt.datetime = field(default_factory=utcnow)
-    first_attempt_at: _dt.datetime | None = None
-    last_attempt_at: _dt.datetime | None = None
-    acquired_at: _dt.datetime | None = None
+    created_at: dt.datetime = field(default_factory=utcnow)
+    next_attempt_at: dt.datetime = field(default_factory=utcnow)
+    first_attempt_at: dt.datetime | None = None
+    last_attempt_at: dt.datetime | None = None
+    acquired_at: dt.datetime | None = None
     acquired_token: uuid.UUID | None = None
     timer_id: str | None = None
 
 
-def _claim_fake_row(row: _FakeRow, *, now: _dt.datetime, token: uuid.UUID) -> None:
+def _claim_fake_row(row: _FakeRow, *, now: dt.datetime, token: uuid.UUID) -> None:
     """Set the lease and bump ``deliveries_count`` — the shared claim mechanics (F1-08).
 
     Both ``FakeOutboxClient.fetch`` (loop mode) and ``_sync_dispatch`` (sync mode) route
@@ -99,7 +99,7 @@ class FakeOutboxClient(AbstractOutboxClient):
         queue: str,
         payload: bytes,
         headers: dict[str, str] | None = None,
-        next_attempt_at: _dt.datetime | None = None,
+        next_attempt_at: dt.datetime | None = None,
         timer_id: str | None = None,
     ) -> int | None:
         # P31: reject naive datetimes up front — the publish path is tz-strict, and a
@@ -156,7 +156,7 @@ class FakeOutboxClient(AbstractOutboxClient):
         if not queues:
             return []
         now = utcnow()
-        lease_cutoff = now - _dt.timedelta(seconds=max(0.0, lease_ttl_seconds))
+        lease_cutoff = now - dt.timedelta(seconds=max(0.0, lease_ttl_seconds))
         token = uuid.uuid4()
         out: list[OutboxInnerMessage] = []
         eligible = sorted(
@@ -226,12 +226,12 @@ class FakeOutboxClient(AbstractOutboxClient):
         *,
         delay_seconds: float,
         attempts_count: int,
-        first_attempt_at: _dt.datetime,
-        last_attempt_at: _dt.datetime,
+        first_attempt_at: dt.datetime,
+        last_attempt_at: dt.datetime,
     ) -> bool:
         for row in self._rows:
             if row.id == message_id and _lease_token_matches(row.acquired_token, acquired_token):
-                row.next_attempt_at = utcnow() + _dt.timedelta(seconds=max(0.0, delay_seconds))
+                row.next_attempt_at = utcnow() + dt.timedelta(seconds=max(0.0, delay_seconds))
                 row.attempts_count = attempts_count
                 row.first_attempt_at = first_attempt_at
                 row.last_attempt_at = last_attempt_at
@@ -371,7 +371,7 @@ async def _fake_publish_one(
     queue: str,
     headers: dict[str, str] | None,
     correlation_id: str | None,
-    next_at: "_dt.datetime | None",
+    next_at: "dt.datetime | None",
     timer_id: str | None,
     run_loops: bool,
 ) -> int | None:
@@ -396,7 +396,7 @@ async def _fake_publish_many(
     bodies: "Sequence[typing.Any]",
     queue: str,
     headers: dict[str, str] | None,
-    next_at: "_dt.datetime | None",
+    next_at: "dt.datetime | None",
     run_loops: bool,
 ) -> None:
     """Shared batch insert for both batch paths (P29).
@@ -507,8 +507,8 @@ def _build_fake_publish(
         session: typing.Any = None,
         headers: dict[str, str] | None = None,
         correlation_id: str | None = None,
-        activate_in: _dt.timedelta | None = None,
-        activate_at: _dt.datetime | None = None,
+        activate_in: dt.timedelta | None = None,
+        activate_at: dt.datetime | None = None,
         timer_id: str | None = None,
     ) -> int | None:
         # P33: test mode is intentionally lenient about ``session`` — the fake client has
@@ -546,8 +546,8 @@ def _build_fake_publish_batch(
         queue: str,
         session: typing.Any = None,
         headers: dict[str, str] | None = None,
-        activate_in: _dt.timedelta | None = None,
-        activate_at: _dt.datetime | None = None,
+        activate_in: dt.timedelta | None = None,
+        activate_at: dt.datetime | None = None,
     ) -> None:
         del session
         validate_activate_args("broker.publish_batch", activate_in, activate_at)
@@ -604,7 +604,7 @@ class TestOutboxBroker(TestBroker[OutboxBroker, OutboxBroker], broker=OutboxBrok
         payload: bytes,
         *,
         headers: dict[str, str] | None = None,
-        next_attempt_at: _dt.datetime | None = None,
+        next_attempt_at: dt.datetime | None = None,
         timer_id: str | None = None,
     ) -> int | None:
         """Insert a row directly into the in-memory store. Returns the row id, or None on timer_id conflict."""

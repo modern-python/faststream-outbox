@@ -8,7 +8,7 @@ so a re-claimed row's lease holder is the only writer.
 ``OutboxMessage`` adapts the inner message to FastStream's ``StreamMessage``.
 """
 
-import datetime as _dt
+import datetime as dt
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
@@ -89,11 +89,11 @@ class OutboxInnerMessage:
     headers: dict[str, str] | None
     attempts_count: int
     deliveries_count: int
-    created_at: _dt.datetime
-    next_attempt_at: _dt.datetime
-    first_attempt_at: _dt.datetime | None
-    last_attempt_at: _dt.datetime | None
-    acquired_at: _dt.datetime | None
+    created_at: dt.datetime
+    next_attempt_at: dt.datetime
+    first_attempt_at: dt.datetime | None
+    last_attempt_at: dt.datetime | None
+    acquired_at: dt.datetime | None
     acquired_token: uuid.UUID | None
 
     # P9: the originating timer_id (single-publish dedup key), so a terminally-failed

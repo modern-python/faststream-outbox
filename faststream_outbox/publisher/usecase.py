@@ -8,7 +8,7 @@ wanting outbox→outbox chaining should call ``broker.publish(...)`` inside thei
 handler on the same session that owns the inbound row's terminal write.
 """
 
-import datetime as _dt
+import datetime as dt
 import typing
 
 from faststream._internal.endpoint.publisher import PublisherUsecase
@@ -71,8 +71,8 @@ class OutboxPublisher(PublisherUsecase):
         session: AsyncSession,
         headers: dict[str, str] | None = None,
         correlation_id: str | None = None,
-        activate_in: _dt.timedelta | None = None,
-        activate_at: _dt.datetime | None = None,
+        activate_in: dt.timedelta | None = None,
+        activate_at: dt.datetime | None = None,
         timer_id: str | None = None,
     ) -> int | None:
         """Insert one outbox row scoped to this publisher's queue.
