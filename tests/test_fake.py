@@ -1,5 +1,5 @@
 import asyncio
-import datetime as _dt
+import datetime as dt
 import logging
 import typing
 import uuid
@@ -223,7 +223,7 @@ async def test_fake_broker_failing_handler_with_default_retry_keeps_row() -> Non
     assert len(test_broker.fake_client.rows) == 1
     row = test_broker.fake_client.rows[0]
     assert row.attempts_count == 1
-    assert row.next_attempt_at > _dt.datetime.now(tz=_dt.UTC)  # rescheduled, not deleted
+    assert row.next_attempt_at > dt.datetime.now(tz=dt.UTC)  # rescheduled, not deleted
 
 
 async def test_fake_broker_correlation_id_in_handler_context() -> None:
@@ -287,7 +287,7 @@ async def test_fake_broker_publish_with_activate_in_dispatches_immediately() -> 
         await broker.publish(  # ty: ignore[missing-argument]
             "delayed",
             queue="orders",
-            activate_in=_dt.timedelta(seconds=5),
+            activate_in=dt.timedelta(seconds=5),
         )
 
     assert received == ["delayed"]
@@ -304,7 +304,7 @@ async def test_fake_broker_publish_with_activate_at_dispatches_immediately() -> 
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        future = _dt.datetime.now(tz=_dt.UTC) + _dt.timedelta(seconds=5)
+        future = dt.datetime.now(tz=dt.UTC) + dt.timedelta(seconds=5)
         await broker.publish("at-future", queue="orders", activate_at=future)  # ty: ignore[missing-argument]
 
     assert received == ["at-future"]
@@ -325,7 +325,7 @@ async def test_fake_broker_publish_batch_with_activate_in_dispatches_immediately
             "a",
             "b",
             queue="orders",
-            activate_in=_dt.timedelta(seconds=5),
+            activate_in=dt.timedelta(seconds=5),
         )
 
     assert received == ["a", "b"]
@@ -342,7 +342,7 @@ async def test_fake_broker_publish_batch_with_activate_at_dispatches_immediately
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        future = _dt.datetime.now(tz=_dt.UTC) + _dt.timedelta(seconds=5)
+        future = dt.datetime.now(tz=dt.UTC) + dt.timedelta(seconds=5)
         await broker.publish_batch("a", "b", queue="orders", activate_at=future)  # ty: ignore[missing-argument]
 
     assert received == ["a", "b"]
@@ -357,8 +357,8 @@ async def test_fake_broker_publish_rejects_both_activate_in_and_activate_at() ->
             await broker.publish(  # ty: ignore[missing-argument]
                 "x",
                 queue="orders",
-                activate_in=_dt.timedelta(seconds=1),
-                activate_at=_dt.datetime.now(tz=_dt.UTC),
+                activate_in=dt.timedelta(seconds=1),
+                activate_at=dt.datetime.now(tz=dt.UTC),
             )
 
 
@@ -370,8 +370,8 @@ async def test_fake_broker_publish_batch_rejects_both_activate_in_and_activate_a
             await broker.publish_batch(  # ty: ignore[missing-argument]
                 "x",
                 queue="orders",
-                activate_in=_dt.timedelta(seconds=1),
-                activate_at=_dt.datetime.now(tz=_dt.UTC),
+                activate_in=dt.timedelta(seconds=1),
+                activate_at=dt.datetime.now(tz=dt.UTC),
             )
 
 
@@ -384,7 +384,7 @@ async def test_fake_broker_publish_rejects_naive_activate_at() -> None:
             await broker.publish(  # ty: ignore[missing-argument]
                 "x",
                 queue="orders",
-                activate_at=_dt.datetime.now(),  # noqa: DTZ005
+                activate_at=dt.datetime.now(),  # noqa: DTZ005
             )
 
 
@@ -396,7 +396,7 @@ async def test_fake_broker_publish_batch_rejects_naive_activate_at() -> None:
             await broker.publish_batch(  # ty: ignore[missing-argument]
                 "x",
                 queue="orders",
-                activate_at=_dt.datetime.now(),  # noqa: DTZ005
+                activate_at=dt.datetime.now(),  # noqa: DTZ005
             )
 
 
@@ -623,8 +623,8 @@ async def test_fake_broker_retry_strategy_receives_handler_exception() -> None:
         def get_next_attempt_delay(
             self,
             *,
-            first_attempt_at: _dt.datetime,  # noqa: ARG002
-            last_attempt_at: _dt.datetime,  # noqa: ARG002
+            first_attempt_at: dt.datetime,  # noqa: ARG002
+            last_attempt_at: dt.datetime,  # noqa: ARG002
             attempts_count: int,  # noqa: ARG002
             exception: BaseException | None = None,
         ) -> float | None:
@@ -772,7 +772,7 @@ async def test_loop_mode_expired_lease_is_reclaimed() -> None:
     test_broker = TestOutboxBroker(broker, run_loops=True)
     async with test_broker:
         # Manually create a row with an expired lease — fetch must reclaim it.
-        old = _dt.datetime.now(tz=_dt.UTC) - _dt.timedelta(seconds=10)
+        old = dt.datetime.now(tz=dt.UTC) - dt.timedelta(seconds=10)
         test_broker.fake_client._rows.append(  # noqa: SLF001
             _FakeRow(
                 id=99,
@@ -797,7 +797,7 @@ async def test_loop_mode_delays_delivery_by_next_attempt_at() -> None:
 
     test_broker = TestOutboxBroker(broker, run_loops=True)
     async with test_broker:
-        future = _dt.datetime.now(tz=_dt.UTC) + _dt.timedelta(milliseconds=300)
+        future = dt.datetime.now(tz=dt.UTC) + dt.timedelta(milliseconds=300)
         test_broker.feed("orders", b'"delayed"', next_attempt_at=future, headers={"content-type": "application/json"})
         # Before the gate opens: nothing delivered.
         await asyncio.sleep(0.1)
@@ -938,8 +938,8 @@ async def test_loop_mode_retry_strategy_can_branch_on_exception_type() -> None:
         def get_next_attempt_delay(
             self,
             *,
-            first_attempt_at: _dt.datetime,  # noqa: ARG002
-            last_attempt_at: _dt.datetime,  # noqa: ARG002
+            first_attempt_at: dt.datetime,  # noqa: ARG002
+            last_attempt_at: dt.datetime,  # noqa: ARG002
             attempts_count: int,  # noqa: ARG002
             exception: BaseException | None = None,
         ) -> float | None:
@@ -1234,7 +1234,7 @@ def test_fake_client_feed_rejects_naive_next_attempt_at() -> None:
     """P31: feed() rejects a naive datetime up front, matching the tz-strict publish path."""
     fake = FakeOutboxClient()
     with pytest.raises(ValueError, match="timezone-aware"):
-        fake.feed(queue="q", payload=b"x", next_attempt_at=_dt.datetime.now())  # noqa: DTZ005  # naive on purpose
+        fake.feed(queue="q", payload=b"x", next_attempt_at=dt.datetime.now())  # noqa: DTZ005  # naive on purpose
 
 
 async def test_fake_headers_not_shared_by_reference() -> None:
@@ -1260,7 +1260,7 @@ async def test_fake_client_cancel_timer_skips_leased_row() -> None:
     fake = FakeOutboxClient()
     fake.feed(queue="q", payload=b"x", timer_id="email-1")
     fake.rows[0].acquired_token = uuid.uuid4()
-    fake.rows[0].acquired_at = _dt.datetime.now(tz=_dt.UTC)
+    fake.rows[0].acquired_at = dt.datetime.now(tz=dt.UTC)
     assert await fake.cancel_timer(queue="q", timer_id="email-1", session=object()) is False  # ty: ignore[invalid-argument-type]
     assert len(fake.rows) == 1
 
@@ -1271,7 +1271,7 @@ async def test_fake_client_terminal_writes_reject_none_token() -> None:
     row_id = fake.feed(queue="q", payload=b"x")  # unleased -> acquired_token is None
     assert row_id is not None
     assert fake.rows[0].acquired_token is None
-    now = _dt.datetime.now(tz=_dt.UTC)
+    now = dt.datetime.now(tz=dt.UTC)
     # Without the ``acquired_token is not None`` guard the fake's ``None == None`` would match
     # this row, deleting / rescheduling where the real client's SQL no-ops.
     assert await fake.delete_with_lease(None, row_id, None) is False  # ty: ignore[invalid-argument-type]
@@ -1338,7 +1338,7 @@ async def test_fake_broker_nack_on_error_default_keeps_row_for_retry() -> None:
     assert len(test_broker.fake_client.rows) == 1
     row = test_broker.fake_client.rows[0]
     assert row.attempts_count == 1
-    assert row.next_attempt_at > _dt.datetime.now(tz=_dt.UTC)
+    assert row.next_attempt_at > dt.datetime.now(tz=dt.UTC)
 
 
 async def test_fake_broker_manual_policy_handler_exception_retries_not_deletes() -> None:
@@ -1360,7 +1360,7 @@ async def test_fake_broker_manual_policy_handler_exception_retries_not_deletes()
     assert len(test_broker.fake_client.rows) == 1
     row = test_broker.fake_client.rows[0]
     assert row.attempts_count == 1
-    assert row.next_attempt_at > _dt.datetime.now(tz=_dt.UTC)
+    assert row.next_attempt_at > dt.datetime.now(tz=dt.UTC)
 
 
 async def test_fake_broker_nack_message_exception_retries_not_deletes() -> None:
@@ -1380,7 +1380,7 @@ async def test_fake_broker_nack_message_exception_retries_not_deletes() -> None:
     assert len(test_broker.fake_client.rows) == 1
     row = test_broker.fake_client.rows[0]
     assert row.attempts_count == 1
-    assert row.next_attempt_at > _dt.datetime.now(tz=_dt.UTC)
+    assert row.next_attempt_at > dt.datetime.now(tz=dt.UTC)
 
 
 async def test_fake_broker_manual_handler_without_ack_is_rejected_via_dispatch() -> None:
@@ -1467,9 +1467,9 @@ async def test_publisher_with_activate_in_records_next_attempt() -> None:
     # inspect next_attempt_at without sync dispatch deleting it.
     pub = broker.publisher("backlog")
     test_broker = TestOutboxBroker(broker)
-    before = _dt.datetime.now(tz=_dt.UTC)
+    before = dt.datetime.now(tz=dt.UTC)
     async with test_broker:
-        await pub.publish(b"x", session=_fake_session(), activate_in=_dt.timedelta(seconds=30))
+        await pub.publish(b"x", session=_fake_session(), activate_in=dt.timedelta(seconds=30))
         assert len(test_broker.fake_client.rows) == 1
         assert test_broker.fake_client.rows[0].next_attempt_at > before
 
@@ -1654,7 +1654,7 @@ async def test_handler_returning_outbox_response_with_activate_in_records_future
             body="delayed",
             queue="downstream",  # no subscriber — row persists for inspection
             session=_fake_session(),
-            activate_in=_dt.timedelta(seconds=60),
+            activate_in=dt.timedelta(seconds=60),
         )
 
     test_broker = TestOutboxBroker(broker)
@@ -1663,7 +1663,7 @@ async def test_handler_returning_outbox_response_with_activate_in_records_future
 
     downstream = [r for r in test_broker.fake_client.rows if r.queue == "downstream"]
     assert len(downstream) == 1
-    assert downstream[0].next_attempt_at > _dt.datetime.now(tz=_dt.UTC)
+    assert downstream[0].next_attempt_at > dt.datetime.now(tz=dt.UTC)
 
 
 async def test_handler_returning_outbox_response_with_timer_id_dedups() -> None:
@@ -1891,7 +1891,7 @@ async def test_fake_dlq_captures_max_deliveries_failure() -> None:
         row = test_broker.fake_client.rows[0]
         row.deliveries_count = 5
         row.acquired_token = uuid.uuid4()
-        row.acquired_at = _dt.datetime.now(tz=_dt.UTC)
+        row.acquired_at = dt.datetime.now(tz=dt.UTC)
         sub = next(iter(broker._subscribers))  # noqa: SLF001
         await sub.dispatch_one(_to_inner(row), writer_conn=None)
 
@@ -1972,7 +1972,7 @@ async def test_fake_dlq_written_omits_exception_type_when_no_exception() -> None
         row = test_broker.fake_client.rows[0]
         row.deliveries_count = 5  # over max_deliveries=1 → terminal without ever running the handler
         row.acquired_token = uuid.uuid4()
-        row.acquired_at = _dt.datetime.now(tz=_dt.UTC)
+        row.acquired_at = dt.datetime.now(tz=dt.UTC)
         await sub.dispatch_one(_to_inner(row), writer_conn=None)
 
     dlq_events = [t for e, t in events if e == "dlq_written"]

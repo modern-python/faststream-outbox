@@ -11,8 +11,9 @@ The relay path (``@publisher`` decorating a subscriber) is not supported, so
 ``from_cmd`` raises — see ``OutboxPublisher.__call__`` for the rationale.
 """
 
-import datetime as _dt
+import datetime as dt
 import typing
+from collections.abc import Sequence
 
 from faststream.response.publish_type import PublishType
 from faststream.response.response import BatchPublishCommand, PublishCommand, Response
@@ -32,8 +33,8 @@ def _validate_publish_args(
     *,
     queue: object,
     session: object,
-    activate_in: _dt.timedelta | None,
-    activate_at: _dt.datetime | None,
+    activate_in: dt.timedelta | None,
+    activate_at: dt.datetime | None,
 ) -> None:
     """Fail-fast validation shared by every real outbox publish entry point.
 
@@ -79,8 +80,8 @@ class OutboxPublishCommand(BatchPublishCommand):
         session: AsyncSession,
         headers: dict[str, str] | None = None,
         correlation_id: str | None = None,
-        activate_in: _dt.timedelta | None = None,
-        activate_at: _dt.datetime | None = None,
+        activate_in: dt.timedelta | None = None,
+        activate_at: dt.datetime | None = None,
         timer_id: str | None = None,
         _publish_type: PublishType = PublishType.PUBLISH,
     ) -> None:
@@ -124,6 +125,11 @@ class OutboxPublishCommand(BatchPublishCommand):
         # truth, so overriding here fixes the producer, the fake producer, and the
         # OpenTelemetry batch-count attribute in one place.
         return (self.body, *self.extra_bodies)
+
+    @batch_bodies.setter
+    def batch_bodies(self, value: Sequence[typing.Any]) -> None:
+        self.body, *rest = value or (None,)
+        self.extra_bodies = tuple(rest)
 
     @classmethod
     def from_cmd(
@@ -173,8 +179,8 @@ class OutboxResponse(Response):
         session: AsyncSession,
         headers: dict[str, str] | None = None,
         correlation_id: str | None = None,
-        activate_in: _dt.timedelta | None = None,
-        activate_at: _dt.datetime | None = None,
+        activate_in: dt.timedelta | None = None,
+        activate_at: dt.datetime | None = None,
         timer_id: str | None = None,
     ) -> None:
         _validate_publish_args(

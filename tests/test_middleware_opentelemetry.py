@@ -6,7 +6,7 @@ unit tests exercise attribute mapping directly. We use OTel SDK's
 ``tests/test_metrics_opentelemetry.py``.
 """
 
-import datetime as _dt
+import datetime as dt
 import typing
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -61,7 +61,7 @@ def _session_mock() -> AsyncMock:
 
 
 def _make_inner_message(*, payload: bytes = b"hello", queue: str = "orders") -> OutboxInnerMessage:
-    now = _dt.datetime.now(tz=_dt.UTC)
+    now = dt.datetime.now(tz=dt.UTC)
     return OutboxInnerMessage(
         id=7,
         queue=queue,

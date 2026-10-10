@@ -2,7 +2,7 @@
 
 import asyncio
 import contextlib
-import datetime as _dt
+import datetime as dt
 import logging
 import uuid
 from collections.abc import Mapping
@@ -229,7 +229,7 @@ async def test_writer_connection_autocommit_round_trip(pg_engine: AsyncEngine, o
     is valid on the asyncpg dialect.
     """
     token = uuid.uuid4()
-    now = _dt.datetime.now(tz=_dt.UTC)
+    now = dt.datetime.now(tz=dt.UTC)
     async with pg_engine.begin() as conn:
         result = await conn.execute(
             insert(outbox_table)
@@ -273,15 +273,15 @@ async def test_mark_pending_with_lease_uses_db_clock(pg_engine: AsyncEngine, out
             msg.acquired_token,  # ty: ignore[invalid-argument-type]
             delay_seconds=delay,
             attempts_count=1,
-            first_attempt_at=_dt.datetime.now(tz=_dt.UTC),
-            last_attempt_at=_dt.datetime.now(tz=_dt.UTC),
+            first_attempt_at=dt.datetime.now(tz=dt.UTC),
+            last_attempt_at=dt.datetime.now(tz=dt.UTC),
         )
     async with pg_engine.connect() as conn:
         db_after = (await conn.execute(text("SELECT clock_timestamp()"))).scalar_one()
         next_at = (await conn.execute(select(outbox_table.c.next_attempt_at))).scalar_one()
     # next_attempt_at was set by the autocommit'd UPDATE whose server-side
     # now() falls between db_before and db_after.
-    assert db_before + _dt.timedelta(seconds=delay) <= next_at <= db_after + _dt.timedelta(seconds=delay)
+    assert db_before + dt.timedelta(seconds=delay) <= next_at <= db_after + dt.timedelta(seconds=delay)
 
 
 async def test_end_to_end_subscriber_delivers_inserted_row(pg_engine, outbox_table) -> None:
@@ -574,7 +574,7 @@ async def test_publish_with_activate_in_delays_delivery(pg_engine, outbox_table)
                 {"order_id": 1},
                 queue="orders",
                 session=session,
-                activate_in=_dt.timedelta(milliseconds=500),
+                activate_in=dt.timedelta(milliseconds=500),
             )
         # Before the gate opens: nothing delivered.
         await asyncio.sleep(0.2)
@@ -592,7 +592,7 @@ async def test_publish_with_activate_at_delays_delivery(pg_engine, outbox_table)
     async def handle(body: dict) -> None:
         received.append(body)
 
-    fire_at = _dt.datetime.now(tz=_dt.UTC) + _dt.timedelta(milliseconds=500)
+    fire_at = dt.datetime.now(tz=dt.UTC) + dt.timedelta(milliseconds=500)
     session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
     async with broker:
         async with session_factory() as session, session.begin():
@@ -617,8 +617,8 @@ async def test_publish_rejects_activate_in_and_at_together(pg_engine, outbox_tab
                 {"x": 1},
                 queue="orders",
                 session=session,
-                activate_in=_dt.timedelta(seconds=1),
-                activate_at=_dt.datetime.now(tz=_dt.UTC),
+                activate_in=dt.timedelta(seconds=1),
+                activate_at=dt.datetime.now(tz=dt.UTC),
             )
 
 
@@ -680,7 +680,7 @@ async def test_cancel_timer_before_fire_prevents_delivery(pg_engine, outbox_tabl
                 {"order_id": 9},
                 queue="orders",
                 session=session,
-                activate_in=_dt.timedelta(seconds=1),
+                activate_in=dt.timedelta(seconds=1),
                 timer_id="email-cancel",
             )
         # Cancel before activate_in elapses.
@@ -752,7 +752,7 @@ async def test_publish_batch_with_activate_in_delays_all_rows(pg_engine, outbox_
             {"i": 3},
             queue="orders",
             session=session,
-            activate_in=_dt.timedelta(minutes=10),  # well past any test horizon
+            activate_in=dt.timedelta(minutes=10),  # well past any test horizon
         )
     # Rows are inserted but invisible to fetch (next_attempt_at in the future).
     assert await _row_count(pg_engine, outbox_table) == 3
@@ -830,15 +830,15 @@ async def test_fetch_unprocessed_includes_future_dated_rows(pg_engine, outbox_ta
             "later",
             queue="orders",
             session=session,
-            activate_in=_dt.timedelta(minutes=5),
+            activate_in=dt.timedelta(minutes=5),
         )
 
     async with session_factory() as session:
         rows = await broker.fetch_unprocessed(session=session, queue="orders")
 
     assert len(rows) == 2
-    now = _dt.datetime.now(tz=_dt.UTC)
-    future = [r for r in rows if r.next_attempt_at > now + _dt.timedelta(minutes=1)]
+    now = dt.datetime.now(tz=dt.UTC)
+    future = [r for r in rows if r.next_attempt_at > now + dt.timedelta(minutes=1)]
     assert len(future) == 1
 
 
@@ -1380,7 +1380,7 @@ async def test_publisher_with_activate_in_delays_delivery(pg_engine, outbox_tabl
     start = asyncio.get_event_loop().time()
     async with broker:
         async with session_factory() as session, session.begin():
-            await pub.publish({"x": 1}, session=session, activate_in=_dt.timedelta(seconds=delay_seconds))
+            await pub.publish({"x": 1}, session=session, activate_in=dt.timedelta(seconds=delay_seconds))
         await _wait_until(lambda: received, timeout=5.0)
 
     elapsed = asyncio.get_event_loop().time() - start
@@ -1675,7 +1675,7 @@ async def test_lease_pairing_check_rejects_half_set_lease(pg_engine: AsyncEngine
                 insert(outbox_table).values(
                     queue="orders",
                     payload=b"x",
-                    acquired_at=_dt.datetime.now(tz=_dt.UTC),  # acquired_token left NULL
+                    acquired_at=dt.datetime.now(tz=dt.UTC),  # acquired_token left NULL
                 ),
             )
 
@@ -2343,7 +2343,7 @@ async def test_notify_still_skipped_for_future_dated(pg_engine, outbox_table) ->
     session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
     with _count_pg_notify(pg_engine) as count:
         async with session_factory() as session, session.begin():
-            await broker.publish({"n": 1}, queue="orders", session=session, activate_in=_dt.timedelta(minutes=5))
+            await broker.publish({"n": 1}, queue="orders", session=session, activate_in=dt.timedelta(minutes=5))
     assert count[0] == 0  # future-dated -> no NOTIFY (unchanged), dedup did not break the skip
 
 

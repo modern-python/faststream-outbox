@@ -6,7 +6,7 @@ owns subscribers on the consumer side.
 """
 
 import asyncio
-import datetime as _dt
+import datetime as dt
 import logging
 import typing
 import warnings
@@ -381,8 +381,8 @@ class OutboxBroker(
         session: AsyncSession,
         headers: dict[str, str] | None = None,
         correlation_id: str | None = None,
-        activate_in: _dt.timedelta | None = None,
-        activate_at: _dt.datetime | None = None,
+        activate_in: dt.timedelta | None = None,
+        activate_at: dt.datetime | None = None,
         timer_id: str | None = None,
     ) -> int | None:
         """Insert one outbox row using *session*'s open transaction.
@@ -420,8 +420,8 @@ class OutboxBroker(
         queue: str,
         session: AsyncSession,
         headers: dict[str, str] | None = None,
-        activate_in: _dt.timedelta | None = None,
-        activate_at: _dt.datetime | None = None,
+        activate_in: dt.timedelta | None = None,
+        activate_at: dt.datetime | None = None,
     ) -> None:
         """Insert multiple outbox rows via *session*. Same transactional contract as ``publish``.
 

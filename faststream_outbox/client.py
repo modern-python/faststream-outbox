@@ -16,7 +16,7 @@ can no longer mutate that row.
 
 import abc
 import asyncio
-import datetime as _dt
+import datetime as dt
 import uuid
 from typing import TYPE_CHECKING
 
@@ -117,8 +117,8 @@ class AbstractOutboxClient(abc.ABC):
         *,
         delay_seconds: float,
         attempts_count: int,
-        first_attempt_at: _dt.datetime,
-        last_attempt_at: _dt.datetime,
+        first_attempt_at: dt.datetime,
+        last_attempt_at: dt.datetime,
     ) -> bool: ...
 
     @abc.abstractmethod
@@ -398,8 +398,8 @@ class OutboxClient(AbstractOutboxClient):
         *,
         delay_seconds: float,
         attempts_count: int,
-        first_attempt_at: _dt.datetime,
-        last_attempt_at: _dt.datetime,
+        first_attempt_at: dt.datetime,
+        last_attempt_at: dt.datetime,
     ) -> bool:
         """Release the lease on *message_id* and reschedule it for retry, iff it still holds the lease.
 

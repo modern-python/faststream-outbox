@@ -25,7 +25,7 @@ DB-vs-worker clock skew, so the real client's server-side ``make_interval`` cloc
 authority stays a documented invariant (AGENTS.md), not an assertion here.
 """
 
-import datetime as _dt
+import datetime as dt
 import os
 import uuid
 from collections.abc import AsyncIterator
@@ -68,7 +68,7 @@ class _FakeHarness:
         rid = self._client.feed(
             queue=queue,
             payload=payload,
-            next_attempt_at=utcnow() + _dt.timedelta(seconds=next_attempt_offset),
+            next_attempt_at=utcnow() + dt.timedelta(seconds=next_attempt_offset),
             timer_id=timer_id,
         )
         assert rid is not None
@@ -76,7 +76,7 @@ class _FakeHarness:
         row.deliveries_count = deliveries_count
         if leased_token is not None:
             row.acquired_token = leased_token
-            row.acquired_at = utcnow() - _dt.timedelta(seconds=acquired_age or 0.0)
+            row.acquired_at = utcnow() - dt.timedelta(seconds=acquired_age or 0.0)
         return rid
 
     async def fetch(self, queues: list[str], *, limit: int, lease_ttl_seconds: float) -> list[OutboxInnerMessage]:
@@ -101,8 +101,8 @@ class _FakeHarness:
         *,
         delay_seconds: float,
         attempts_count: int,
-        first_attempt_at: _dt.datetime,
-        last_attempt_at: _dt.datetime,
+        first_attempt_at: dt.datetime,
+        last_attempt_at: dt.datetime,
     ) -> bool:
         return await self._client.mark_pending_with_lease(
             None,
@@ -200,8 +200,8 @@ class _RealHarness:
         *,
         delay_seconds: float,
         attempts_count: int,
-        first_attempt_at: _dt.datetime,
-        last_attempt_at: _dt.datetime,
+        first_attempt_at: dt.datetime,
+        last_attempt_at: dt.datetime,
     ) -> bool:
         async with self._engine.connect() as raw:
             writer = await raw.execution_options(isolation_level="AUTOCOMMIT")
@@ -449,7 +449,7 @@ async def test_mark_pending_reschedules_on_token_match(contract: _Harness) -> No
     assert row["acquired_at"] is None
     assert row["attempts_count"] == 1
     next_attempt_at = row["next_attempt_at"]
-    assert isinstance(next_attempt_at, _dt.datetime)
+    assert isinstance(next_attempt_at, dt.datetime)
     assert next_attempt_at > utcnow()
 
 

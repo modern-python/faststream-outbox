@@ -11,27 +11,27 @@ can all import *from* it without a cycle. The single-publish real path computes
 use ``resolve_next_attempt_client_side`` — only the batch and fake paths do.
 """
 
-import datetime as _dt
+import datetime as dt
 
 
 def is_future_dated(
-    activate_in: _dt.timedelta | None,
-    activate_at: _dt.datetime | None,
-    now: _dt.datetime,
+    activate_in: dt.timedelta | None,
+    activate_at: dt.datetime | None,
+    now: dt.datetime,
 ) -> bool:
     """Whether a row is genuinely future-dated (so NOTIFY is skipped — polling fires it at the gate)."""
     if activate_in is not None:
-        return activate_in > _dt.timedelta(0)
+        return activate_in > dt.timedelta(0)
     if activate_at is not None:
         return activate_at > now
     return False
 
 
 def resolve_next_attempt_client_side(
-    activate_in: _dt.timedelta | None,
-    activate_at: _dt.datetime | None,
-    now: _dt.datetime,
-) -> _dt.datetime | None:
+    activate_in: dt.timedelta | None,
+    activate_at: dt.datetime | None,
+    now: dt.datetime,
+) -> dt.datetime | None:
     """Resolve activate_in / activate_at to a single ``next_attempt_at`` value (client clock)."""
     if activate_in is not None:
         return now + activate_in
@@ -40,8 +40,8 @@ def resolve_next_attempt_client_side(
 
 def validate_activate_args(
     method_name: str,
-    activate_in: _dt.timedelta | None,
-    activate_at: _dt.datetime | None,
+    activate_in: dt.timedelta | None,
+    activate_at: dt.datetime | None,
 ) -> None:
     """Mutex + tz-aware checks shared by the test fakes. Real broker delegates to ``OutboxPublishCommand``."""
     if activate_in is not None and activate_at is not None:
