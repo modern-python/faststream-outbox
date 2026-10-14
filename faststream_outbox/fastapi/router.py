@@ -63,7 +63,7 @@ class OutboxRouter(StreamRouter[OutboxInnerMessage]):
     """FastAPI router for the outbox transport."""
 
     broker_class = _OutboxBroker
-    broker: _OutboxBroker
+    broker: _OutboxBroker  # ty: ignore[invalid-mutable-override]
 
     def __init__(  # noqa: PLR0913
         self,

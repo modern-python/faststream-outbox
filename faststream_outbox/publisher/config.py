@@ -12,7 +12,7 @@ if typing.TYPE_CHECKING:
 
 @dataclass(kw_only=True)
 class OutboxPublisherConfig(PublisherUsecaseConfig):
-    _outer_config: "OutboxBrokerConfig"
+    _outer_config: "OutboxBrokerConfig"  # ty: ignore[invalid-mutable-override]
     queue: str
     headers: dict[str, str] | None = None
 

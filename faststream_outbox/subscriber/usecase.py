@@ -192,7 +192,7 @@ class OutboxSubscriberSpecification(SubscriberSpecification["OutboxBrokerConfig"
 
 
 class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
-    _outer_config: "OutboxBrokerConfig"
+    _outer_config: "OutboxBrokerConfig"  # ty: ignore[invalid-mutable-override]
 
     def __init__(
         self,
