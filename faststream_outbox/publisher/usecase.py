@@ -41,7 +41,7 @@ _REJECT_RELAY_MSG = (
 class OutboxPublisher(PublisherUsecase):
     """Queue-scoped publisher. Standalone use only — no relay decorator support."""
 
-    _outer_config: "OutboxBrokerConfig"
+    _outer_config: "OutboxBrokerConfig"  # ty: ignore[invalid-mutable-override]
 
     def __init__(
         self,

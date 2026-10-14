@@ -47,7 +47,7 @@ def _subscriber_warn(message: str) -> None:
 
 @dataclass(kw_only=True)
 class OutboxSubscriberConfig(SubscriberUsecaseConfig):
-    _outer_config: "OutboxBrokerConfig"
+    _outer_config: "OutboxBrokerConfig"  # ty: ignore[invalid-mutable-override]
     queues: list[str]
     max_workers: int
     retry_strategy: "RetryStrategyProto | None"

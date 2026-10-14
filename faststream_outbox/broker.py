@@ -124,7 +124,7 @@ class OutboxBroker(
 
     # P25: the runtime container is a WeakSet (set by the upstream Registrator), not a
     # list — annotate it accurately so the _subscribers/subscribers distinction is clear.
-    _subscribers: "WeakSet[OutboxSubscriber]"
+    _subscribers: "WeakSet[OutboxSubscriber]"  # ty: ignore[invalid-attribute-override]
 
     def __init__(  # noqa: PLR0913
         self,
