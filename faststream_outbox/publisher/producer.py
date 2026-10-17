@@ -1,23 +1,21 @@
-"""``OutboxProducer`` — the canonical insert path for outbox rows.
+"""``OutboxProducer``: the canonical publish path for outbox rows.
 
 Both ``OutboxBroker.publish`` / ``publish_batch`` and ``OutboxPublisher.publish``
 route through this producer via FastStream's ``_basic_publish(cmd, producer=...)``
-middleware stack, so encode → insert → NOTIFY semantics live in one place. The
-producer never opens its own session — every command carries the caller's
-``AsyncSession`` so the row commits atomically with the caller's domain writes.
+middleware stack, so encode → insert → ``published`` semantics live in one place. The
+insert itself (and its NOTIFY) belongs to the broker's client. The producer never opens
+its own session: every command carries the caller's ``AsyncSession`` so the row commits
+atomically with the caller's domain writes.
 """
 
 import time
 import typing
-from weakref import WeakKeyDictionary
 
 from faststream._internal.endpoint.utils import ParserComposition
 from faststream._internal.parser import DefaultCodec
-from sqlalchemy import Float, Table, bindparam, func, insert, literal, text
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import Table
 
-from faststream_outbox._scheduling import is_future_dated, resolve_next_attempt_client_side
-from faststream_outbox._time import utcnow
+from faststream_outbox.client import _OutboxInserter
 from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.metrics import MetricsRecorder, _noop_recorder, _safe_emit
 from faststream_outbox.parser.parser import OutboxParser
@@ -30,34 +28,13 @@ if typing.TYPE_CHECKING:
     from fast_depends.library.serializer import SerializerProto
     from faststream._internal.parser import CodecProto
     from faststream._internal.types import AsyncCallable, CustomCallable
-    from sqlalchemy import Insert
 
-
-def _build_insert_stmts(table: Table, channel: str) -> "dict[tuple[bool, bool, bool], Insert]":
-    """Build the single-row INSERT once per ``(timer_id set, activate_in set, notify)``; values arrive as parameters.
-
-    The notify variants call ``pg_notify`` in ``RETURNING``, so the NOTIFY costs no extra round trip and
-    fires only when a row actually landed (an ``ON CONFLICT DO NOTHING`` skip returns no row).
-    """
-    # Server-side compute keeps timing immune to worker/DB clock skew (mirrors
-    # client.mark_pending_with_lease).
-    activate_in = func.now() + func.make_interval(0, 0, 0, 0, 0, 0, bindparam("activate_in_seconds", type_=Float))
-    plain = insert(table)
-    timer = pg_insert(table).on_conflict_do_nothing(
-        index_elements=[table.c.queue, table.c.timer_id],
-        index_where=table.c.timer_id.is_not(None),
-    )
-    notify = func.pg_notify(literal(channel), table.c.queue)
-    stmts: dict[tuple[bool, bool, bool], Insert] = {}
-    for has_timer, base in ((False, plain), (True, timer)):
-        for has_activate_in, stmt in ((False, base), (True, base.values(next_attempt_at=activate_in))):
-            stmts[has_timer, has_activate_in, False] = stmt.returning(table.c.id)
-            stmts[has_timer, has_activate_in, True] = stmt.returning(table.c.id, notify)
-    return stmts
+    from faststream_outbox.client import AbstractOutboxClient
+    from faststream_outbox.configs import OutboxBrokerConfig
 
 
 class OutboxProducer:
-    """``ProducerProto[OutboxPublishCommand]`` — runs encode + insert + NOTIFY on caller's session."""
+    """``ProducerProto[OutboxPublishCommand]``: encodes, inserts through the broker's client, emits ``published``."""
 
     _parser: "AsyncCallable"
     _decoder: "AsyncCallable"
@@ -70,13 +47,8 @@ class OutboxProducer:
         decoder: typing.Optional["CustomCallable"],
         metrics_recorder: MetricsRecorder = _noop_recorder,
     ) -> None:
-        self._table = table
-        self._channel = f"outbox_{table.name}"
-        # Per-transaction NOTIFY dedup memo (see _notify). Keyed on the innermost active
-        # transaction object, weak-referenced so entries GC when the transaction ends -- no
-        # explicit reset, and a rolled-back savepoint cannot suppress a later real NOTIFY.
-        self._notified: WeakKeyDictionary[typing.Any, set[str]] = WeakKeyDictionary()
         self.serializer: SerializerProto | None = None
+        self.broker_config: OutboxBrokerConfig | None = None
         # ProducerProto[0.7] requires a `codec` attribute. The outbox owns its
         # own encoding pipeline (_encode_payload) and never reads this attribute
         # at runtime — it exists solely to satisfy the protocol.
@@ -85,7 +57,11 @@ class OutboxProducer:
         self._parser = ParserComposition(parser, default.parse_message)
         self._decoder = ParserComposition(decoder, default.decode_message)
         self._metrics_recorder = metrics_recorder
-        self._insert_stmts = _build_insert_stmts(table, self._channel)
+        self._engineless_inserter = _OutboxInserter(table)
+
+    def _client(self) -> "AbstractOutboxClient | _OutboxInserter":
+        client = None if self.broker_config is None else self.broker_config.client
+        return self._engineless_inserter if client is None else client
 
     def _emit_metric(self, event: str, tags: "Mapping[str, typing.Any]") -> None:
         # Delegate to the shared swallow-and-DEBUG-log helper so the recorder-isolation
@@ -106,7 +82,15 @@ class OutboxProducer:
                 serializer=self.serializer,
             )
             size_bytes = len(payload)
-            row_id = await self._do_publish(cmd, payload, hdrs)
+            row_id = await self._client().insert(
+                cmd.session,
+                queue=cmd.queue,
+                payload=payload,
+                headers=hdrs,
+                activate_in=cmd.activate_in,
+                activate_at=cmd.activate_at,
+                timer_id=cmd.timer_id,
+            )
         except Exception as exc:
             self._emit_metric(
                 "published",
@@ -133,61 +117,24 @@ class OutboxProducer:
         )
         return row_id
 
-    async def _do_publish(
-        self,
-        cmd: OutboxPublishCommand,
-        payload: bytes,
-        hdrs: dict[str, str] | None,
-    ) -> int | None:
-        params: dict[str, typing.Any] = {"queue": cmd.queue, "payload": payload, "headers": hdrs}
-        if cmd.activate_in is not None:
-            params["activate_in_seconds"] = cmd.activate_in.total_seconds()
-        elif cmd.activate_at is not None:
-            params["next_attempt_at"] = cmd.activate_at
-        if cmd.timer_id is not None:
-            params["timer_id"] = cmd.timer_id
-        # Skip NOTIFY only when the row is genuinely future-dated. A past activate_at
-        # (e.g. a recovered idempotency token) is immediately eligible — fire NOTIFY.
-        # Future-dated rows skip NOTIFY: listeners can't act before the gate opens, and
-        # polling fires them at the next tick.
-        emitted = self._notified_queues(cmd.session)
-        notify = not is_future_dated(cmd.activate_in, cmd.activate_at, utcnow()) and (
-            emitted is None or cmd.queue not in emitted
-        )
-        stmt = self._insert_stmts[cmd.timer_id is not None, cmd.activate_in is not None, notify]
-        result = await cmd.session.execute(stmt, params)
-        row_id: int | None = result.scalar()
-        if row_id is not None and notify:
-            # Re-read: under autobegin the transaction only exists once the INSERT has run.
-            emitted = self._notified_queues(cmd.session)
-            if emitted is not None:
-                emitted.add(cmd.queue)
-        return row_id
-
     async def publish_batch(self, cmd: OutboxPublishCommand) -> None:
-        bodies = cmd.batch_bodies
-        # Client-side time for batch: executemany doesn't compose cleanly with
-        # column-level SQL expressions, and a few-ms drift versus the DB is
-        # harmless for user-supplied scheduling. Retries still use server time.
-        now = utcnow()
-        next_at = resolve_next_attempt_client_side(cmd.activate_in, cmd.activate_at, now)
-        rows: list[dict[str, typing.Any]] = []
+        rows: list[tuple[bytes, dict[str, str] | None]] = []
         total_size = 0
         start_perf = time.perf_counter()
         try:
             # P3: encode inside the try so a serialization failure on any body still
             # emits the ``published`` error metric.
-            for body in bodies:
+            for body in cmd.batch_bodies:
                 payload, hdrs = _encode_payload(body, headers=cmd.headers, serializer=self.serializer)
                 total_size += len(payload)
-                row: dict[str, typing.Any] = {"queue": cmd.queue, "payload": payload, "headers": hdrs}
-                if next_at is not None:
-                    row["next_attempt_at"] = next_at
-                rows.append(row)
-            await cmd.session.execute(insert(self._table), rows)
-            # Skip NOTIFY only when genuinely future-dated; past times are eligible.
-            if not is_future_dated(cmd.activate_in, cmd.activate_at, now):
-                await self._notify(cmd.session, cmd.queue)
+                rows.append((payload, hdrs))
+            await self._client().insert_batch(
+                cmd.session,
+                queue=cmd.queue,
+                rows=rows,
+                activate_in=cmd.activate_in,
+                activate_at=cmd.activate_at,
+            )
         except Exception as exc:
             self._emit_metric(
                 "published",
@@ -214,39 +161,3 @@ class OutboxProducer:
 
     async def request(self, cmd: OutboxPublishCommand) -> typing.NoReturn:
         raise NotImplementedError(_REQUEST_UNSUPPORTED_MSG)
-
-    def _notified_queues(self, session: typing.Any) -> set[str] | None:
-        """Return the queues already notified in *session*'s innermost transaction, or None outside one."""
-        sync_session = session.sync_session
-        txn = sync_session.get_nested_transaction() or sync_session.get_transaction()
-        if txn is None:
-            return None
-        return self._notified.setdefault(txn, set())
-
-    async def _notify(self, session: typing.Any, queue: str) -> None:
-        # ``pg_notify(:channel, :payload)`` -- parameterized so channel and payload
-        # bind cleanly (raw NOTIFY accepts only literals -- injection-prone). Runs on
-        # the caller's session so NOTIFY commits with the row insert; rollback silently
-        # discards it. Non-Postgres dialects ignore it.
-        #
-        # Dedup: Postgres already coalesces identical (channel, payload) NOTIFYs per
-        # transaction at delivery, so a second pg_notify for the same queue in the same
-        # transaction only wastes a round-trip. Memoize emitted queues per innermost
-        # active transaction (get_nested_transaction() during a savepoint, else the outer
-        # transaction) -- each a distinct, weak-referenceable object that GCs when the
-        # transaction ends, so a rolled-back savepoint cannot suppress a later real NOTIFY.
-        # Key on the *sync* SessionTransaction, not the async AsyncSessionTransaction proxy:
-        # SQLAlchemy regenerates that proxy on every call and only weak-references it, so
-        # under autobegin (no explicit `session.begin()`) it would GC between publishes and
-        # defeat the memo. The Session holds the sync transaction strongly for its lifetime,
-        # so the key survives across publishes whether the caller uses `session.begin()` or
-        # autobegin. No active transaction -> emit unconditionally.
-        emitted = self._notified_queues(session)
-        if emitted is not None:
-            if queue in emitted:
-                return
-            emitted.add(queue)
-        await session.execute(
-            text("SELECT pg_notify(:channel, :payload)"),
-            {"channel": self._channel, "payload": queue},
-        )

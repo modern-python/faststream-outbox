@@ -131,6 +131,58 @@ class FakeOutboxClient(AbstractOutboxClient):
             msg = "feed() requires next_attempt_at to be timezone-aware"
             raise ValueError(msg)
         _validate_like_postgres(queue=queue, timer_id=timer_id, headers=headers)
+        row = self._store(
+            queue=queue, payload=payload, headers=headers, next_attempt_at=next_attempt_at, timer_id=timer_id
+        )
+        return None if row is None else row.id
+
+    async def insert(
+        self,
+        session: "AsyncSession",
+        *,
+        queue: str,
+        payload: bytes,
+        headers: dict[str, str] | None,
+        activate_in: dt.timedelta | None = None,
+        activate_at: dt.datetime | None = None,
+        timer_id: str | None = None,
+    ) -> int | None:
+        del session  # ignored (no real DB)
+        _validate_like_postgres(queue=queue, timer_id=timer_id, headers=headers)
+        row = self._store(
+            queue=queue,
+            payload=payload,
+            headers=headers,
+            next_attempt_at=resolve_next_attempt_client_side(activate_in, activate_at, utcnow()),
+            timer_id=timer_id,
+        )
+        return None if row is None else row.id
+
+    async def insert_batch(
+        self,
+        session: "AsyncSession",
+        *,
+        queue: str,
+        rows: "Sequence[tuple[bytes, dict[str, str] | None]]",
+        activate_in: dt.timedelta | None = None,
+        activate_at: dt.datetime | None = None,
+    ) -> None:
+        del session  # ignored (no real DB)
+        for _, headers in rows:
+            _validate_like_postgres(queue=queue, timer_id=None, headers=headers)
+        next_at = resolve_next_attempt_client_side(activate_in, activate_at, utcnow())
+        for payload, headers in rows:
+            self._store(queue=queue, payload=payload, headers=headers, next_attempt_at=next_at, timer_id=None)
+
+    def _store(
+        self,
+        *,
+        queue: str,
+        payload: bytes,
+        headers: dict[str, str] | None,
+        next_attempt_at: dt.datetime | None,
+        timer_id: str | None,
+    ) -> _FakeRow | None:
         # Mirror the real client's partial-unique-on-(queue, timer_id) behavior:
         # re-feeding a timer that already exists is a no-op.
         if timer_id is not None and any(r.queue == queue and r.timer_id == timer_id for r in self._rows):
@@ -148,7 +200,7 @@ class FakeOutboxClient(AbstractOutboxClient):
         )
         self._rows.append(row)
         self._next_id += 1
-        return row.id
+        return row
 
     @property
     def rows(self) -> list[_FakeRow]:

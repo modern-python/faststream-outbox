@@ -31,7 +31,7 @@ will **not** tell you:
   that — `tests/test_client_contract.py::test_delete_noop_on_token_mismatch` is the claim.
 - `client.py` and `testing.py` implement the same rules twice, in SQL and in Python, because one
   runs in the database and one in the process. They cannot share an implementation, so
-  `tests/test_client_contract.py` couples them by behaviour — a change to either adapter's fetch,
+  `tests/test_client_contract.py` couples them by behaviour — a change to either adapter's insert, fetch,
   terminal, or DLQ semantics belongs in that suite.
 - `schema.py` — the three partial indexes and the `<table>_lease_ck` CHECK are load-bearing, not
   decoration.

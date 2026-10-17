@@ -17,8 +17,10 @@ can no longer mutate that row.
 import abc
 import asyncio
 import datetime as dt
+import typing
 import uuid
 from typing import TYPE_CHECKING
+from weakref import WeakKeyDictionary
 
 from sqlalchemy import (
     ARRAY,
@@ -30,15 +32,19 @@ from sqlalchemy import (
     delete,
     func,
     insert,
+    literal,
     select,
     text,
     true,
     union_all,
     update,
 )
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from faststream_outbox import schema_validation
+from faststream_outbox._scheduling import is_future_dated, resolve_next_attempt_client_side
+from faststream_outbox._time import utcnow
 from faststream_outbox.message import OutboxInnerMessage
 from faststream_outbox.schema import (
     _DLQ_INJECTED_COLUMNS,
@@ -48,7 +54,6 @@ from faststream_outbox.schema import (
 
 
 if TYPE_CHECKING:
-    import typing
     from collections.abc import Mapping, Sequence
 
     from sqlalchemy import CTE, ColumnElement, Insert, Table, Update
@@ -81,6 +86,41 @@ class AbstractOutboxClient(abc.ABC):
     @property
     @abc.abstractmethod
     def table(self) -> "Table": ...
+
+    @abc.abstractmethod
+    async def insert(
+        self,
+        session: "AsyncSession",
+        *,
+        queue: str,
+        payload: bytes,
+        headers: dict[str, str] | None,
+        activate_in: dt.timedelta | None = None,
+        activate_at: dt.datetime | None = None,
+        timer_id: str | None = None,
+    ) -> int | None:
+        """Insert one encoded row on *session* and NOTIFY its queue if the row is eligible now.
+
+        Returns the row id, or ``None`` when a live row already holds *timer_id* on *queue*.
+        Application code should call ``broker.publish`` instead: this skips the publish
+        middlewares and the ``published`` metric.
+        """
+
+    @abc.abstractmethod
+    async def insert_batch(
+        self,
+        session: "AsyncSession",
+        *,
+        queue: str,
+        rows: "Sequence[tuple[bytes, dict[str, str] | None]]",
+        activate_in: dt.timedelta | None = None,
+        activate_at: dt.datetime | None = None,
+    ) -> None:
+        """Insert every ``(payload, headers)`` row on *session* in one statement, or none of them.
+
+        Application code should call ``broker.publish_batch`` instead, for the same reason as
+        :meth:`insert`.
+        """
 
     @abc.abstractmethod
     async def fetch(
@@ -205,6 +245,137 @@ def _build_dlq_cte(outbox: "Table", dlq: "Table") -> "Insert":
     return insert(dlq).from_select([*(col for _, col in _DLQ_PROJECTION), *_DLQ_INJECTED_COLUMNS], archived)
 
 
+def _build_insert_stmts(table: "Table", channel: str) -> "dict[tuple[bool, bool, bool], Insert]":
+    """Build the single-row INSERT once per ``(timer_id set, activate_in set, notify)``; values arrive as parameters.
+
+    The notify variants call ``pg_notify`` in ``RETURNING``, so the NOTIFY costs no extra round trip and
+    fires only when a row actually landed (an ``ON CONFLICT DO NOTHING`` skip returns no row).
+    """
+    # Server-side compute keeps timing immune to worker/DB clock skew (mirrors
+    # client.mark_pending_with_lease).
+    activate_in = func.now() + func.make_interval(0, 0, 0, 0, 0, 0, bindparam("activate_in_seconds", type_=Float))
+    plain = insert(table)
+    timer = pg_insert(table).on_conflict_do_nothing(
+        index_elements=[table.c.queue, table.c.timer_id],
+        index_where=table.c.timer_id.is_not(None),
+    )
+    notify = func.pg_notify(literal(channel), table.c.queue)
+    stmts: dict[tuple[bool, bool, bool], Insert] = {}
+    for has_timer, base in ((False, plain), (True, timer)):
+        for has_activate_in, stmt in ((False, base), (True, base.values(next_attempt_at=activate_in))):
+            stmts[has_timer, has_activate_in, False] = stmt.returning(table.c.id)
+            stmts[has_timer, has_activate_in, True] = stmt.returning(table.c.id, notify)
+    return stmts
+
+
+class _OutboxInserter:
+    """The outbox INSERT + NOTIFY on a caller's session; needs no engine, so an engine-less broker can publish."""
+
+    def __init__(self, table: "Table") -> None:
+        self._table = table
+        self._channel = f"outbox_{table.name}"
+        # Per-transaction NOTIFY dedup memo (see _notify). Keyed on the innermost active
+        # transaction object, weak-referenced so entries GC when the transaction ends -- no
+        # explicit reset, and a rolled-back savepoint cannot suppress a later real NOTIFY.
+        self._notified: WeakKeyDictionary[typing.Any, set[str]] = WeakKeyDictionary()
+        self._insert_stmts = _build_insert_stmts(table, self._channel)
+
+    async def insert(
+        self,
+        session: "AsyncSession",
+        *,
+        queue: str,
+        payload: bytes,
+        headers: dict[str, str] | None,
+        activate_in: dt.timedelta | None = None,
+        activate_at: dt.datetime | None = None,
+        timer_id: str | None = None,
+    ) -> int | None:
+        params: dict[str, typing.Any] = {"queue": queue, "payload": payload, "headers": headers}
+        if activate_in is not None:
+            params["activate_in_seconds"] = activate_in.total_seconds()
+        elif activate_at is not None:
+            params["next_attempt_at"] = activate_at
+        if timer_id is not None:
+            params["timer_id"] = timer_id
+        # Skip NOTIFY only when the row is genuinely future-dated. A past activate_at
+        # (e.g. a recovered idempotency token) is immediately eligible — fire NOTIFY.
+        # Future-dated rows skip NOTIFY: listeners can't act before the gate opens, and
+        # polling fires them at the next tick.
+        emitted = self._notified_queues(session)
+        notify = not is_future_dated(activate_in, activate_at, utcnow()) and (emitted is None or queue not in emitted)
+        stmt = self._insert_stmts[timer_id is not None, activate_in is not None, notify]
+        result = await session.execute(stmt, params)
+        row_id: int | None = result.scalar()
+        if row_id is not None and notify:
+            # Re-read: under autobegin the transaction only exists once the INSERT has run.
+            emitted = self._notified_queues(session)
+            if emitted is not None:
+                emitted.add(queue)
+        return row_id
+
+    async def insert_batch(
+        self,
+        session: "AsyncSession",
+        *,
+        queue: str,
+        rows: "Sequence[tuple[bytes, dict[str, str] | None]]",
+        activate_in: dt.timedelta | None = None,
+        activate_at: dt.datetime | None = None,
+    ) -> None:
+        # Client-side time for batch: executemany doesn't compose cleanly with
+        # column-level SQL expressions, and a few-ms drift versus the DB is
+        # harmless for user-supplied scheduling. Retries still use server time.
+        now = utcnow()
+        next_at = resolve_next_attempt_client_side(activate_in, activate_at, now)
+        values: list[dict[str, typing.Any]] = []
+        for payload, headers in rows:
+            row: dict[str, typing.Any] = {"queue": queue, "payload": payload, "headers": headers}
+            if next_at is not None:
+                row["next_attempt_at"] = next_at
+            values.append(row)
+        await session.execute(insert(self._table), values)
+        # Skip NOTIFY only when genuinely future-dated; past times are eligible.
+        if not is_future_dated(activate_in, activate_at, now):
+            await self._notify(session, queue)
+
+    def _notified_queues(self, session: "AsyncSession") -> set[str] | None:
+        """Return the queues already notified in *session*'s innermost transaction, or None outside one."""
+        sync_session = session.sync_session
+        txn = sync_session.get_nested_transaction() or sync_session.get_transaction()
+        if txn is None:
+            return None
+        return self._notified.setdefault(txn, set())
+
+    async def _notify(self, session: "AsyncSession", queue: str) -> None:
+        # ``pg_notify(:channel, :payload)`` -- parameterized so channel and payload
+        # bind cleanly (raw NOTIFY accepts only literals -- injection-prone). Runs on
+        # the caller's session so NOTIFY commits with the row insert; rollback silently
+        # discards it. Non-Postgres dialects ignore it.
+        #
+        # Dedup: Postgres already coalesces identical (channel, payload) NOTIFYs per
+        # transaction at delivery, so a second pg_notify for the same queue in the same
+        # transaction only wastes a round-trip. Memoize emitted queues per innermost
+        # active transaction (get_nested_transaction() during a savepoint, else the outer
+        # transaction) -- each a distinct, weak-referenceable object that GCs when the
+        # transaction ends, so a rolled-back savepoint cannot suppress a later real NOTIFY.
+        # Key on the *sync* SessionTransaction, not the async AsyncSessionTransaction proxy:
+        # SQLAlchemy regenerates that proxy on every call and only weak-references it, so
+        # under autobegin (no explicit `session.begin()`) it would GC between publishes and
+        # defeat the memo. The Session holds the sync transaction strongly for its lifetime,
+        # so the key survives across publishes whether the caller uses `session.begin()` or
+        # autobegin. No active transaction -> emit unconditionally.
+        emitted = self._notified_queues(session)
+        if emitted is not None:
+            if queue in emitted:
+                return
+            emitted.add(queue)
+        await session.execute(
+            text("SELECT pg_notify(:channel, :payload)"),
+            {"channel": self._channel, "payload": queue},
+        )
+
+
 class OutboxClient(AbstractOutboxClient):
     def __init__(
         self,
@@ -221,6 +392,7 @@ class OutboxClient(AbstractOutboxClient):
         self._table = outbox_table
         self._dlq_table = dlq_table
         self._fetch_stmt = _build_fetch_stmt(outbox_table)
+        self._inserter = _OutboxInserter(outbox_table)
         self._dlq_cte = None if dlq_table is None else _build_dlq_cte(outbox_table, dlq_table)
 
     @property
@@ -235,6 +407,40 @@ class OutboxClient(AbstractOutboxClient):
         drive ``LISTEN/NOTIFY``.
         """
         return self._engine
+
+    async def insert(
+        self,
+        session: "AsyncSession",
+        *,
+        queue: str,
+        payload: bytes,
+        headers: dict[str, str] | None,
+        activate_in: dt.timedelta | None = None,
+        activate_at: dt.datetime | None = None,
+        timer_id: str | None = None,
+    ) -> int | None:
+        return await self._inserter.insert(
+            session,
+            queue=queue,
+            payload=payload,
+            headers=headers,
+            activate_in=activate_in,
+            activate_at=activate_at,
+            timer_id=timer_id,
+        )
+
+    async def insert_batch(
+        self,
+        session: "AsyncSession",
+        *,
+        queue: str,
+        rows: "Sequence[tuple[bytes, dict[str, str] | None]]",
+        activate_in: dt.timedelta | None = None,
+        activate_at: dt.datetime | None = None,
+    ) -> None:
+        await self._inserter.insert_batch(
+            session, queue=queue, rows=rows, activate_in=activate_in, activate_at=activate_at
+        )
 
     async def fetch(
         self,
