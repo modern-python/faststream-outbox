@@ -134,7 +134,8 @@ registered handlers are not started, matching production.
   `run_loops=True` if you need scheduled delivery to actually wait.
 - `cancel_timer` and `fetch_unprocessed` run against the fake client
   (the test broker swaps its client in, so `broker.<method>` reaches it).
-  The `session` argument is still required but is ignored in tests.
+  The `session` argument must still be an `AsyncSession` or `AsyncConnection`
+  (`fake_session()` works), as in production, but the fake never touches it.
 - Publishing runs the production producer, so encoding, the `published`
   metric and publish middlewares (Prometheus, OpenTelemetry or your own
   `publish_scope`) behave as in production.
