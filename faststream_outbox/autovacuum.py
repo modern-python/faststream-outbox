@@ -2,11 +2,11 @@
 
 The outbox is a high-churn queue table: every message is one INSERT + one lease
 UPDATE + one terminal DELETE, so dead tuples accumulate at ~2x the message rate.
-Postgres' default ``autovacuum_vacuum_scale_factor = 0.2`` fires vacuum only after a
-*fraction of the table* is dead -- on a queue table that lets bloat accumulate, and
-if the table ever bloats the fraction is of the bloated size, so vacuum fires ever
-less often (a death spiral). Setting the scale factor to 0 disables that trigger so
-vacuum frequency tracks *churn* via a constant threshold, not table size.
+Postgres' default ``autovacuum_vacuum_scale_factor = 0.2`` fires vacuum only once dead
+tuples reach 20% of the table's *live* row count (``reltuples``). While the outbox holds
+a large backlog, that is a large number of dead tuples, so vacuum runs rarely exactly
+when churn is highest. Setting the scale factor to 0 disables that trigger so vacuum
+frequency tracks *churn* via a constant threshold, not table size.
 
 SQLAlchemy's ``Table`` cannot carry reloptions (the PG dialect accepts no such
 kwarg), so Alembic autogenerate can never emit them. These settings must be applied

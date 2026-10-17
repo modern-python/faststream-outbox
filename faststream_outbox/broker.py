@@ -368,6 +368,13 @@ class OutboxBroker(
 
     @override
     async def ping(self, timeout: float | None = None) -> bool:
+        """Return ``True`` when the database answers and every subscriber task is alive.
+
+        The database check takes a connection from the engine's pool, so a pool the
+        application's own sessions have exhausted fails it too, after up to 5 seconds or
+        *timeout*, whichever is shorter. That suits a readiness probe. Behind a liveness
+        probe, leave the pool room for the check, or a busy pod gets restarted.
+        """
         # ``move_on_after(None)`` is an unbounded scope, so threading the caller's
         # timeout keeps the historical "wait forever" default while honoring a bound
         # when given — a black-holed TCP or a stuck pool checkout can no longer hang
@@ -501,9 +508,11 @@ class OutboxBroker(
         Returns ``True`` if *this call* deleted the row. ``False`` means the row is no
         longer cancelable by you, which covers three cases:
 
-        1. The row's handler is already in flight (``acquired_token IS NOT NULL``). The
+        1. A worker has claimed the row (``acquired_token IS NOT NULL``). The
            ``acquired_token IS NULL`` guard prevents this call from clobbering the
-           in-flight lease; the delivery completes normally.
+           lease. Normally the delivery then completes. If that worker died, the lease
+           stays set until ``lease_ttl_seconds`` passes and the row is delivered again;
+           ``cancel_timer`` can't stop that redelivery.
         2. Another caller already canceled the same ``(queue, timer_id)`` in a concurrent
            transaction.
         3. No row exists with that ``(queue, timer_id)`` — either the timer was never
@@ -538,6 +547,9 @@ class OutboxBroker(
         does not OOM the process. Runs on the caller's session (same transactional
         contract as :meth:`publish`); does not acquire a lease and does not mutate
         row state, so it is safe to call alongside running subscribers.
+
+        No index covers the *queue* filter, so for a rare or empty queue Postgres reads
+        the whole table. Keep it for tests and occasional inspection, not a hot path.
         """
         return await self.client.fetch_unprocessed(session=session, queue=queue, limit=limit)
 
