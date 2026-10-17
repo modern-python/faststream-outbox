@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from typing import Any
 from unittest import mock
 
+import asyncpg
 import pytest
 from faststream import BaseMiddleware, Context, Depends
 from faststream.kafka import KafkaBroker, TestKafkaBroker
@@ -2529,6 +2530,16 @@ async def test_notify_dedup_spans_publish_batch_and_publish(pg_engine, outbox_ta
     assert count[0] == 1
 
 
+async def test_notify_dedup_spans_publish_and_publish_batch(pg_engine: AsyncEngine, outbox_table: Table) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    with _count_pg_notify(pg_engine) as count:
+        async with session_factory() as session, session.begin():
+            await broker.publish({"n": 1}, queue="orders", session=session)  # pg_notify in RETURNING
+            await broker.publish_batch({"n": 2}, {"n": 3}, queue="orders", session=session)  # deduped
+    assert count[0] == 1
+
+
 async def test_notify_still_skipped_for_future_dated(pg_engine, outbox_table) -> None:
     broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
     session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
@@ -2536,6 +2547,57 @@ async def test_notify_still_skipped_for_future_dated(pg_engine, outbox_table) ->
         async with session_factory() as session, session.begin():
             await broker.publish({"n": 1}, queue="orders", session=session, activate_in=dt.timedelta(minutes=5))
     assert count[0] == 0  # future-dated -> no NOTIFY (unchanged), dedup did not break the skip
+
+
+async def test_publish_notifies_in_the_insert_round_trip(pg_engine: AsyncEngine, outbox_table: Table) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    statements: list[str] = []
+
+    def _listener(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ARG001
+        statements.append(statement)
+
+    async with session_factory() as session, session.begin():
+        await session.connection()
+        event.listen(pg_engine.sync_engine, "before_cursor_execute", _listener)
+        try:
+            await broker.publish({"n": 1}, queue="orders", session=session)
+            await broker.publish({"n": 2}, queue="orders", session=session)
+        finally:
+            event.remove(pg_engine.sync_engine, "before_cursor_execute", _listener)
+
+    assert len(statements) == 2
+    assert "pg_notify" in statements[0].lower()
+    assert "pg_notify" not in statements[1].lower()
+
+
+async def test_notify_sent_after_a_timer_conflict_in_the_same_transaction(
+    pg_engine: AsyncEngine, outbox_table: Table
+) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with session_factory() as session, session.begin():
+        await broker.publish({"n": 0}, queue="orders", session=session, timer_id="t-1")
+
+    payloads: list[str] = []
+    received = asyncio.Event()
+    dsn = pg_engine.url.set(drivername="postgresql").render_as_string(hide_password=False)
+    listener = await asyncpg.connect(dsn)
+    try:
+
+        def _cb(_conn, _pid, _channel, payload) -> None:
+            payloads.append(payload)
+            received.set()
+
+        await listener.add_listener(f"outbox_{outbox_table.name}", _cb)
+        async with session_factory() as session, session.begin():
+            assert await broker.publish({"n": 1}, queue="orders", session=session, timer_id="t-1") is None
+            assert await broker.publish({"n": 2}, queue="orders", session=session) is not None
+        await asyncio.wait_for(received.wait(), timeout=2.0)
+    finally:
+        await listener.close()
+
+    assert payloads == ["orders"]
 
 
 async def test_notify_deduped_in_autobegin_transaction(pg_engine, outbox_table) -> None:

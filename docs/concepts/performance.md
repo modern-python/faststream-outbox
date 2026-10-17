@@ -45,7 +45,8 @@ why).
 | Need more parallel handler capacity | `max_workers` / `fetch_batch_size` | More concurrency, but mind the [connection budget](../usage/subscriber.md#connection-budget). |
 
 Single-publish-per-transaction workloads see no change from NOTIFY dedup (one row
-still emits one NOTIFY), and the batched-flush win is largest at low `max_workers`
+still emits one NOTIFY), but that NOTIFY rides in the INSERT's `RETURNING`, so it
+adds no round trip of its own. The batched-flush win is largest at low `max_workers`
 (where per-row deletes serialise) and narrows as worker parallelism rises.
 
 ## The three levers
@@ -53,8 +54,9 @@ still emits one NOTIFY), and the batched-flush win is largest at low `max_worker
 ### Producer: NOTIFY dedup (automatic)
 
 `broker.publish` / `publish_batch` emit one `pg_notify` per (transaction,
-queue), so N publishes to the same queue in one transaction cost one NOTIFY
-round-trip. Postgres already coalesces identical notifications per transaction
+queue), so N publishes to the same queue in one transaction cost at most one
+NOTIFY. A single `publish` puts it in the INSERT's `RETURNING`, so it costs no
+round trip; `publish_batch` sends it as one extra statement. Postgres already coalesces identical notifications per transaction
 at delivery, so extra NOTIFYs would be pure waste. It is default-on, has no knob, and is
 behavior-preserving: the subscriber still gets its wake, fired inline at the first
 publish. See
