@@ -156,7 +156,7 @@ class FakeOutboxClient(AbstractOutboxClient):
         if not queues:
             return []
         now = utcnow()
-        lease_cutoff = now - dt.timedelta(seconds=max(0.0, lease_ttl_seconds))
+        lease_cutoff = now - dt.timedelta(seconds=lease_ttl_seconds)
         token = uuid.uuid4()
         out: list[OutboxInnerMessage] = []
         eligible = sorted(
@@ -484,13 +484,6 @@ class FakeOutboxProducer:
 
     async def request(self, cmd: OutboxPublishCommand) -> typing.NoReturn:
         raise NotImplementedError(_REQUEST_UNSUPPORTED_MSG)
-
-    def connect(self, connection: typing.Any = None, serializer: typing.Any = None) -> None:  # noqa: ARG002
-        if serializer is not None:
-            self._serializer = serializer
-
-    def disconnect(self) -> None:
-        pass
 
 
 def _build_fake_publish(

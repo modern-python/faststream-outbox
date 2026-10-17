@@ -30,6 +30,7 @@ from sqlalchemy import (
     cast,
     delete,
     func,
+    insert,
     or_,
     select,
     text,
@@ -50,7 +51,7 @@ if TYPE_CHECKING:
     import typing
     from collections.abc import Mapping, Sequence
 
-    from sqlalchemy import Table
+    from sqlalchemy import Insert, Table
     from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 
@@ -140,6 +141,21 @@ class AbstractOutboxClient(abc.ABC):
     async def ping(self) -> bool: ...
 
 
+def _build_dlq_cte(outbox: "Table", dlq: "Table") -> "Insert":
+    """Build the DELETE-then-archive CTE once; the row id, lease token and failure context are bind parameters."""
+    deleted = (
+        delete(outbox)
+        .where(outbox.c.id == bindparam("message_id"), outbox.c.acquired_token == bindparam("acquired_token"))
+        .returning(*(outbox.c[col] for col, _ in _DLQ_PROJECTION))
+        .cte("deleted")
+    )
+    archived = select(
+        *(deleted.c[col] for col, _ in _DLQ_PROJECTION),
+        *(bindparam(col, type_=dlq.c[col].type) for col in _DLQ_INJECTED_COLUMNS),
+    )
+    return insert(dlq).from_select([*(col for _, col in _DLQ_PROJECTION), *_DLQ_INJECTED_COLUMNS], archived)
+
+
 class OutboxClient(AbstractOutboxClient):
     def __init__(
         self,
@@ -155,6 +171,7 @@ class OutboxClient(AbstractOutboxClient):
         self._engine = engine
         self._table = outbox_table
         self._dlq_table = dlq_table
+        self._dlq_cte = None if dlq_table is None else _build_dlq_cte(outbox_table, dlq_table)
 
     @property
     def table(self) -> "Table":
@@ -238,7 +255,7 @@ class OutboxClient(AbstractOutboxClient):
             .returning(*t.c)
         )
         async with conn.begin():
-            result = await conn.execute(stmt, {"lease_ttl": max(0.0, lease_ttl_seconds)})
+            result = await conn.execute(stmt, {"lease_ttl": lease_ttl_seconds})
             rows = result.mappings().all()
         return [_row_to_message(dict(row)) for row in rows]
 
@@ -287,7 +304,7 @@ class OutboxClient(AbstractOutboxClient):
             msg = "OutboxClient.delete_with_lease requires a live AsyncConnection (got None)"
             raise TypeError(msg)
         if dlq_payload is not None:
-            if self._dlq_table is None:
+            if self._dlq_cte is None:
                 # P10: a dlq_payload with no dlq_table would silently degrade to a plain
                 # DELETE — losing the audit row. If the broker/client wiring ever desyncs,
                 # fail loudly rather than drop forensics.
@@ -296,71 +313,18 @@ class OutboxClient(AbstractOutboxClient):
                     "refusing to drop the audit row silently"
                 )
                 raise RuntimeError(msg)
-            stmt, params = self._build_dlq_cte_stmt(message_id, acquired_token, dlq_payload)
-            result = await conn.execute(stmt, params)
+            params = {
+                "message_id": message_id,
+                "acquired_token": acquired_token,
+                "failure_reason": dlq_payload["failure_reason"],
+                "last_exception": dlq_payload["last_exception"],
+            }
+            result = await conn.execute(self._dlq_cte, params)
             return (result.rowcount or 0) > 0
         t = self._table
         del_stmt = delete(t).where(t.c.id == message_id, t.c.acquired_token == acquired_token)
         result = await conn.execute(del_stmt)
         return (result.rowcount or 0) > 0
-
-    def _build_dlq_cte_stmt(
-        self,
-        message_id: int,
-        acquired_token: uuid.UUID,
-        dlq_payload: "Mapping[str, typing.Any]",
-    ) -> "tuple[typing.Any, dict[str, typing.Any]]":
-        """Compose the single-statement DLQ CTE plus the parameter dict.
-
-        Identifiers are quoted via the dialect's identifier preparer so reserved words
-        and odd characters survive interpolation. The outbox/DLQ table names are
-        application-controlled (from the user's ``MetaData``), not request-derived
-        input, so the quoting is a robustness/correctness safeguard not a security
-        boundary.
-        """
-        # ``self._dlq_table`` is guaranteed non-None at the only call site (the guard
-        # in ``delete_with_lease``); local alias narrows the type for the formatting.
-        dlq_table = self._dlq_table
-        assert dlq_table is not None  # noqa: S101
-        preparer = self._engine.dialect.identifier_preparer
-        # ``format_table`` renders the schema-qualified, quoted name (``"app"."outbox"``)
-        # when the Table carries a non-default ``schema=``. ``quote(table.name)`` dropped
-        # the schema, so a ``MetaData(schema="app")`` deployment hit ``UndefinedTable`` on
-        # every terminal failure (poison rows retry forever, the outbox grows) or silently
-        # wrote to a same-named search_path table (B10).
-        outbox_name = preparer.format_table(self._table)
-        dlq_name = preparer.format_table(dlq_table)
-        # Column lists derive from _DLQ_PROJECTION (projected pairs first, then the
-        # injected failure-context columns) so the real CTE and the fake stay in lockstep
-        # off one source. INSERT and SELECT share the same order, so the named columns map
-        # positionally.
-        returning_cols = ", ".join(out for out, _ in _DLQ_PROJECTION)
-        insert_cols = ", ".join([dlq for _, dlq in _DLQ_PROJECTION] + list(_DLQ_INJECTED_COLUMNS))
-        select_exprs = ", ".join(
-            [out for out, _ in _DLQ_PROJECTION] + [f":{col}" for col in _DLQ_INJECTED_COLUMNS],
-        )
-        # S608: outbox_name / dlq_name come from application-defined SQLAlchemy Table
-        # objects (not request input) and are quoted via the dialect's identifier preparer;
-        # the column names come from _DLQ_PROJECTION constants. Values flow through
-        # :bindparam placeholders.
-        cte_sql = (
-            f"WITH deleted AS ("  # noqa: S608
-            f"DELETE FROM {outbox_name} "
-            f"WHERE id = :message_id AND acquired_token = :acquired_token "
-            f"RETURNING {returning_cols}"
-            f") "
-            f"INSERT INTO {dlq_name} ({insert_cols}) "
-            f"SELECT {select_exprs} "
-            f"FROM deleted"
-        )
-        sql = text(cte_sql)
-        params = {
-            "message_id": message_id,
-            "acquired_token": acquired_token,
-            "failure_reason": dlq_payload["failure_reason"],
-            "last_exception": dlq_payload["last_exception"],
-        }
-        return sql, params
 
     async def delete_batch_with_lease(
         self,

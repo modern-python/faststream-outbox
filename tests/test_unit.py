@@ -617,9 +617,8 @@ async def test_broker_publish_executes_insert_then_pg_notify_on_session() -> Non
     await broker.publish({"order_id": 1}, queue="orders", session=session)
     # Two execute calls: the INSERT, then SELECT pg_notify(...).
     assert session.execute.await_count == 2
-    insert_stmt = session.execute.await_args_list[0].args[0]
+    insert_stmt, params = session.execute.await_args_list[0].args
     assert "INSERT INTO" in str(insert_stmt)
-    params = insert_stmt.compile().params
     assert params["queue"] == "orders"
     assert json.loads(params["payload"]) == {"order_id": 1}
     assert params["headers"]["content-type"] == "application/json"
@@ -634,8 +633,7 @@ async def test_broker_publish_encodes_pydantic_model() -> None:
     session = _make_session_mock()
     body = _PydanticBody(order_id=7, name="alpha")
     await broker.publish(body, queue="orders", session=session)
-    insert_stmt = session.execute.await_args_list[0].args[0]
-    params = insert_stmt.compile().params
+    _, params = session.execute.await_args_list[0].args
     assert json.loads(params["payload"]) == body.model_dump()
     assert params["headers"]["content-type"] == "application/json"
 
@@ -998,7 +996,7 @@ async def test_broker_publish_with_activate_at_skips_notify() -> None:
     fire = dt.datetime.now(tz=dt.UTC) + dt.timedelta(minutes=5)
     await broker.publish(b"x", queue="orders", session=session, activate_at=fire)
     assert session.execute.await_count == 1
-    params = session.execute.await_args_list[0].args[0].compile().params
+    _, params = session.execute.await_args_list[0].args
     assert params["next_attempt_at"] == fire
 
 
@@ -1036,13 +1034,12 @@ async def test_broker_publish_with_timer_id_uses_on_conflict() -> None:
     broker = _make_broker()
     session = _make_session_mock()
     await broker.publish(b"x", queue="orders", session=session, timer_id="email-123")
-    insert_stmt = session.execute.await_args_list[0].args[0]
-    compiled = insert_stmt.compile(dialect=postgresql.dialect())
-    sql = str(compiled)
+    insert_stmt, params = session.execute.await_args_list[0].args
+    sql = str(insert_stmt.compile(dialect=postgresql.dialect(), column_keys=list(params)))
     assert "INSERT INTO" in sql
     assert "ON CONFLICT" in sql
     assert "DO NOTHING" in sql
-    assert compiled.params["timer_id"] == "email-123"
+    assert params["timer_id"] == "email-123"
 
 
 async def test_broker_publish_returns_none_on_timer_id_conflict() -> None:
@@ -1255,14 +1252,6 @@ async def test_outbox_producer_request_raises_not_implemented() -> None:
         await producer.request(cmd)
 
 
-def test_outbox_producer_connect_disconnect_noop() -> None:
-    metadata = MetaData()
-    t = make_outbox_table(metadata)
-    producer = OutboxProducer(table=t, parser=None, decoder=None)
-    producer.connect()  # must not raise
-    producer.disconnect()  # must not raise
-
-
 def test_broker_exposes_outbox_producer() -> None:
     broker = _make_broker()
     producer = broker.config.broker_config.producer
@@ -1391,20 +1380,6 @@ async def test_fake_outbox_producer_request_raises() -> None:
     cmd = OutboxPublishCommand(b"x", queue="orders", session=_make_session_mock())
     with pytest.raises(NotImplementedError, match="request-reply"):
         await producer.request(cmd)
-
-
-def test_fake_outbox_producer_connect_sets_serializer() -> None:
-    broker = _make_broker()
-    producer = FakeOutboxProducer(FakeOutboxClient(), broker, serializer=None, run_loops=False)
-    sentinel = object()
-    producer.connect(serializer=sentinel)
-    assert producer._serializer is sentinel  # noqa: SLF001
-
-
-def test_fake_outbox_producer_disconnect_is_noop() -> None:
-    broker = _make_broker()
-    producer = FakeOutboxProducer(FakeOutboxClient(), broker, serializer=None, run_loops=False)
-    producer.disconnect()  # must not raise
 
 
 def test_broker_client_property_raises_without_engine() -> None:
@@ -3691,6 +3666,11 @@ async def test_producer_emit_metric_swallows_recorder_exceptions(caplog: pytest.
 # --- make_dlq_table -----------------------------------------------------------
 
 
+def _dlq_cte_sql(client: OutboxClient, engine: typing.Any) -> str:
+    assert client._dlq_cte is not None  # noqa: SLF001
+    return str(client._dlq_cte.compile(engine))  # noqa: SLF001
+
+
 async def test_dlq_cte_uses_schema_qualified_table_names() -> None:
     """B10: the DLQ CTE must render schema-qualified names when the tables carry a non-default schema."""
     engine = create_async_engine("postgresql+asyncpg://u:p@localhost/db")  # constructed, never connected
@@ -3699,14 +3679,8 @@ async def test_dlq_cte_uses_schema_qualified_table_names() -> None:
         outbox = make_outbox_table(metadata)
         dlq = make_dlq_table(metadata)
         client = OutboxClient(engine, outbox, dlq_table=dlq)
-        stmt, _params = client._build_dlq_cte_stmt(  # noqa: SLF001
-            1,
-            uuid.uuid4(),
-            {"failure_reason": "rejected", "last_exception": None},
-        )
-        sql = str(stmt)
-        # The buggy quote(table.name) rendered bare "outbox" / "outbox_dlq"; format_table
-        # carries the schema → "app.outbox" / "app.outbox_dlq" (B10).
+        sql = _dlq_cte_sql(client, engine)
+        # A bare table name would resolve through search_path instead of the "app" schema (B10).
         assert "DELETE FROM app.outbox " in sql
         assert "INSERT INTO app.outbox_dlq " in sql
     finally:
@@ -3714,22 +3688,16 @@ async def test_dlq_cte_uses_schema_qualified_table_names() -> None:
 
 
 async def test_dlq_cte_quotes_adversarial_table_names() -> None:
-    """F3-05: the DLQ CTE is the one raw-SQL identifier site — assert adversarial names stay quoted/escaped."""
+    """F3-05: adversarial table names in the DLQ CTE stay quoted/escaped."""
     engine = create_async_engine("postgresql+asyncpg://u:p@localhost/db")  # constructed, never connected
     try:
         metadata = MetaData()
         outbox = make_outbox_table(metadata, table_name='ob"x')
         dlq = make_dlq_table(metadata, table_name="dlq;drop")
         client = OutboxClient(engine, outbox, dlq_table=dlq)
-        stmt, _params = client._build_dlq_cte_stmt(  # noqa: SLF001
-            1,
-            uuid.uuid4(),
-            {"failure_reason": "rejected", "last_exception": None},
-        )
-        sql = str(stmt)
+        sql = _dlq_cte_sql(client, engine)
         # The embedded double-quote is doubled (escaped) and the ';' name stays wrapped in
-        # quotes — the identifier cannot break out of its quoting into injectable SQL. A
-        # refactor dropping ``format_table`` for bare ``table.name`` would fail here.
+        # quotes — the identifier cannot break out of its quoting into injectable SQL.
         assert '"ob""x"' in sql
         assert '"dlq;drop"' in sql
     finally:
@@ -4168,8 +4136,8 @@ def test_default_retry_strategy_pins_documented_parameters() -> None:
 async def test_dlq_cte_insert_columns_match_make_dlq_table() -> None:
     """INVARIANT: the DLQ CTE's INSERT column list matches ``make_dlq_table`` minus ``id`` and ``failed_at``.
 
-    ``_build_dlq_cte_stmt`` renders the column list as an f-string with nothing linking it to the
-    table definition. A NOT-NULL-without-default column added to ``make_dlq_table`` would make every
+    ``_build_dlq_cte`` takes the column list from ``_DLQ_PROJECTION``, not from the table
+    definition. A NOT-NULL-without-default column added to ``make_dlq_table`` would make every
     terminal DLQ write fail -- poison rows that retry forever -- and a nullable one would silently
     drop audit data. The two omitted columns are deliberate: ``id`` autoincrements and ``failed_at``
     rides its server default.
@@ -4180,12 +4148,7 @@ async def test_dlq_cte_insert_columns_match_make_dlq_table() -> None:
     engine = create_async_engine("postgresql+asyncpg://u:p@localhost/db")  # never connected
     try:
         client = OutboxClient(engine, outbox, dlq_table=dlq)
-        stmt, _ = client._build_dlq_cte_stmt(  # noqa: SLF001
-            1,
-            uuid.uuid4(),
-            {"failure_reason": "x", "last_exception": "y"},
-        )
-        sql = str(stmt)
+        sql = _dlq_cte_sql(client, engine)
     finally:
         await engine.dispose()
 
