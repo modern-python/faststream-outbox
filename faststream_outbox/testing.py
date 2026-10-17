@@ -25,7 +25,7 @@ from faststream._internal.testing.broker import TestBroker, patch_broker_calls
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from faststream_outbox._scheduling import resolve_next_attempt_client_side
-from faststream_outbox._session import SessionOrConnection
+from faststream_outbox._session import SessionOrConnection, require_session_or_connection
 from faststream_outbox._time import utcnow
 from faststream_outbox.broker import OutboxBroker
 from faststream_outbox.client import _NO_DLQ_TABLE_MSG, AbstractOutboxClient
@@ -344,7 +344,7 @@ class FakeOutboxClient(AbstractOutboxClient):
 
     async def cancel_timer(self, *, queue: str, timer_id: str, session: SessionOrConnection) -> bool:
         """Mirror :meth:`OutboxBroker.cancel_timer` — drop a not-yet-leased timer row."""
-        del session  # ignored (no real DB), matching the fake publish contract
+        require_session_or_connection(session, "FakeOutboxClient.cancel_timer")
         for i, row in enumerate(self._rows):
             if row.queue == queue and row.timer_id == timer_id and row.acquired_token is None:
                 del self._rows[i]
@@ -359,7 +359,7 @@ class FakeOutboxClient(AbstractOutboxClient):
         limit: int = 1000,
     ) -> list[OutboxInnerMessage]:
         """Mirror :meth:`OutboxBroker.fetch_unprocessed` — read rows from the in-memory store."""
-        del session  # ignored (no real DB), matching the fake publish contract
+        require_session_or_connection(session, "FakeOutboxClient.fetch_unprocessed")
         if limit < 1:
             # Mirror the real client's validation so a non-positive limit can't
             # silently mis-slice (rows[:-1]) under the test broker (F4-04).

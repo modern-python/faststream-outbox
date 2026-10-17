@@ -9,9 +9,9 @@ fake (everywhere) and real Postgres (auto-skipped when unreachable).
 
 Scope is exactly the shared ``AbstractOutboxClient`` surface: ``insert`` /
 ``insert_batch`` (+ ``timer_id`` dedup and headers JSONB rejects), ``fetch``,
-``delete_with_lease``, ``mark_pending_with_lease`` (+ the DLQ side-effect).
-``cancel_timer`` lives on the broker, so it is covered by ``test_integration.py`` /
-``test_fake.py``, not here.
+``delete_with_lease``, ``mark_pending_with_lease`` (+ the DLQ side-effect), and the
+session type check on ``cancel_timer`` / ``fetch_unprocessed``. Their row behaviour
+is covered through the broker in ``test_integration.py`` / ``test_fake.py``.
 
 A per-adapter harness hides the substrate differences (how a row is seeded, which
 connection a terminal write needs) so the scenarios read adapter-agnostically.
@@ -169,6 +169,9 @@ class _FakeHarness:
     async def dlq_rows(self) -> list[dict[str, object]]:
         return [dict(r) for r in self._client.dlq_rows]
 
+    async def call(self, method: str, **kwargs: object) -> object:
+        return await getattr(self._client, method)(**kwargs)
+
 
 class _RealHarness:
     """Adapter-agnostic harness backed by a real ``OutboxClient`` against Postgres."""
@@ -307,6 +310,9 @@ class _RealHarness:
             row["payload"] = bytes(row["payload"])
         return rows
 
+    async def call(self, method: str, **kwargs: object) -> object:
+        return await getattr(self._client, method)(**kwargs)
+
 
 _Harness = _FakeHarness | _RealHarness
 
@@ -349,6 +355,30 @@ async def contract_without_dlq(request: pytest.FixtureRequest) -> AsyncIterator[
     """Like ``contract``, but the client has no DLQ table."""
     async with _harness(request.param, with_dlq=False) as harness:
         yield harness
+
+
+# --- session type check ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("method", "kwargs"),
+    [
+        ("cancel_timer", {"queue": "q", "timer_id": "t"}),
+        ("fetch_unprocessed", {}),
+    ],
+)
+@pytest.mark.parametrize("session", [None, object()])
+async def test_session_methods_reject_a_non_session(
+    contract: _Harness,
+    method: str,
+    kwargs: dict[str, object],
+    session: object,
+) -> None:
+    with pytest.raises(
+        TypeError,
+        match=rf"OutboxClient\.{method} requires an sqlalchemy\.ext\.asyncio\.AsyncSession or AsyncConnection",
+    ):
+        await contract.call(method, session=session, **kwargs)
 
 
 # --- insert ----------------------------------------------------------------
