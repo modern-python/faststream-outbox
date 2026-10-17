@@ -282,7 +282,7 @@ def _run_validate(
     # domain tables (in their own MetaData) don't show up in the diff. Carry the
     # user's schema onto the canonical copy so the autogenerate diff compares
     # ``app.outbox`` against ``app.outbox`` rather than the default search_path —
-    # matching the schema-qualified DLQ CTE in ``_build_dlq_cte_stmt`` (B10).
+    # matching the schema-qualified DLQ CTE in ``client._build_dlq_cte`` (B10).
     canonical_metadata = MetaData(schema=table.schema)
     canonical_factory(canonical_metadata, table.name)
 

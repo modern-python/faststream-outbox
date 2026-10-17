@@ -158,7 +158,7 @@ def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table
 
 # Outbox-row columns copied verbatim into the DLQ archive row on terminal failure, as
 # ``(outbox_column, dlq_column)`` pairs. The single source both the real client's DLQ
-# CTE (``OutboxClient._build_dlq_cte_stmt``) and the fake (``FakeOutboxClient.delete_with_lease``)
+# CTE (``client._build_dlq_cte``) and the fake (``FakeOutboxClient.delete_with_lease``)
 # build from, so a DLQ column change is one edit here instead of hand-kept parity in two
 # substrates. ``failed_at`` is not listed — it rides the DLQ column's ``server_default``.
 _DLQ_PROJECTION: tuple[tuple[str, str], ...] = (

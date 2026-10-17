@@ -30,6 +30,25 @@ if typing.TYPE_CHECKING:
     from fast_depends.library.serializer import SerializerProto
     from faststream._internal.parser import CodecProto
     from faststream._internal.types import AsyncCallable, CustomCallable
+    from sqlalchemy import Insert
+
+
+def _build_insert_stmts(table: Table) -> "dict[tuple[bool, bool], Insert]":
+    """Build the single-row INSERT once per ``(timer_id set, activate_in set)``; values arrive as parameters."""
+    # Server-side compute keeps timing immune to worker/DB clock skew (mirrors
+    # client.mark_pending_with_lease).
+    activate_in = func.now() + func.make_interval(0, 0, 0, 0, 0, 0, bindparam("activate_in_seconds", type_=Float))
+    plain = insert(table)
+    timer = pg_insert(table).on_conflict_do_nothing(
+        index_elements=[table.c.queue, table.c.timer_id],
+        index_where=table.c.timer_id.is_not(None),
+    )
+    return {
+        (False, False): plain.returning(table.c.id),
+        (False, True): plain.values(next_attempt_at=activate_in).returning(table.c.id),
+        (True, False): timer.returning(table.c.id),
+        (True, True): timer.values(next_attempt_at=activate_in).returning(table.c.id),
+    }
 
 
 class OutboxProducer:
@@ -61,23 +80,13 @@ class OutboxProducer:
         self._parser = ParserComposition(parser, default.parse_message)
         self._decoder = ParserComposition(decoder, default.decode_message)
         self._metrics_recorder = metrics_recorder
+        self._insert_stmts = _build_insert_stmts(table)
 
     def _emit_metric(self, event: str, tags: "Mapping[str, typing.Any]") -> None:
         # Delegate to the shared swallow-and-DEBUG-log helper so the recorder-isolation
         # contract lives in exactly one place (the subscriber's _emit_metric is the one
         # deliberate exception — it routes through self._log for handler-scoped context).
         _safe_emit(self._metrics_recorder, event, tags)
-
-    def connect(
-        self,
-        connection: typing.Any = None,  # noqa: ARG002
-        serializer: typing.Optional["SerializerProto"] = None,
-    ) -> None:
-        self.serializer = serializer
-
-    def disconnect(self) -> None:
-        # Caller owns the engine — never dispose anything here.
-        pass
 
     async def publish(self, cmd: OutboxPublishCommand) -> int | None:
         start_perf = time.perf_counter()
@@ -125,37 +134,20 @@ class OutboxProducer:
         payload: bytes,
         hdrs: dict[str, str] | None,
     ) -> int | None:
-        t = self._table
-        values: dict[str, typing.Any] = {"queue": cmd.queue, "payload": payload, "headers": hdrs}
-        # Server-side compute keeps timing immune to worker/DB clock skew (mirrors
-        # client.mark_pending_with_lease).
+        params: dict[str, typing.Any] = {"queue": cmd.queue, "payload": payload, "headers": hdrs}
         if cmd.activate_in is not None:
-            values["next_attempt_at"] = func.now() + func.make_interval(
-                0, 0, 0, 0, 0, 0, bindparam("activate_in_seconds", cmd.activate_in.total_seconds(), type_=Float)
-            )
+            params["activate_in_seconds"] = cmd.activate_in.total_seconds()
         elif cmd.activate_at is not None:
-            values["next_attempt_at"] = cmd.activate_at
+            params["next_attempt_at"] = cmd.activate_at
         if cmd.timer_id is not None:
-            values["timer_id"] = cmd.timer_id
+            params["timer_id"] = cmd.timer_id
         # Skip NOTIFY only when the row is genuinely future-dated. A past activate_at
         # (e.g. a recovered idempotency token) is immediately eligible — fire NOTIFY.
         now = utcnow()
         is_future = is_future_dated(cmd.activate_in, cmd.activate_at, now)
 
-        if cmd.timer_id is not None:
-            stmt = (
-                pg_insert(t)
-                .values(**values)
-                .on_conflict_do_nothing(
-                    index_elements=[t.c.queue, t.c.timer_id],
-                    index_where=t.c.timer_id.is_not(None),
-                )
-                .returning(t.c.id)
-            )
-        else:
-            stmt = insert(t).values(**values).returning(t.c.id)
-
-        result = await cmd.session.execute(stmt)
+        stmt = self._insert_stmts[cmd.timer_id is not None, cmd.activate_in is not None]
+        result = await cmd.session.execute(stmt, params)
         row_id: int | None = result.scalar()
         # Skip NOTIFY for future-dated rows (listeners can't act before the gate
         # opens — polling fires them at next tick) and on conflict (no row landed).
