@@ -35,9 +35,9 @@ op.create_table(
     sa.PrimaryKeyConstraint("id"),
 )
 op.create_index(
-    "outbox_lease_idx",
+    "outbox_leased_idx",
     "outbox",
-    ["queue", "acquired_at"],
+    ["queue", "next_attempt_at", "id"],
     unique=False,
     postgresql_where=sa.text("acquired_token IS NOT NULL"),
 )
@@ -62,9 +62,11 @@ The three indexes carry load-bearing partial predicates:
   rows published in one transaction share `next_attempt_at`; without it a
   fetch reads the whole tie group. Drop the predicate and the planner falls
   back to a seq-scan as the table grows.
-- `outbox_lease_idx`: `(queue, acquired_at) WHERE acquired_token IS NOT NULL`.
-  The fetch's expired-lease branch is served by this index. Here too, the
-  predicate is load-bearing for fetch performance.
+- `outbox_leased_idx`: `(queue, next_attempt_at, id) WHERE acquired_token IS NOT NULL`.
+  The fetch's expired-lease branch reads this index in the same order and
+  skips leases that haven't expired yet, so its cost doesn't grow with the
+  number of hung handlers. Here too, the predicate is load-bearing for
+  fetch performance.
 - `outbox_timer_id_uq`: unique `(queue, timer_id) WHERE timer_id IS NOT NULL`.
   Backs the `timer_id` dedup contract via
   `pg_insert(...).on_conflict_do_nothing(...)`. Without the partial
@@ -146,6 +148,57 @@ Don't apply what `alembic revision --autogenerate` produces for this
 change. It drops and recreates the index in one transaction without
 `CONCURRENTLY`, which blocks every publish and fetch on the table for the
 whole build.
+
+## Upgrading to 0.17: replace `outbox_lease_idx` { #upgrading-to-017 }
+
+0.17 reclaims expired leases with an ordered scan of a new index,
+`outbox_leased_idx` on `(queue, next_attempt_at, id) WHERE acquired_token
+IS NOT NULL`. It replaces `outbox_lease_idx` on `(queue, acquired_at)`, which
+made a fetch read and sort every expired lease on the queue: about 10 ms
+per fetch at 50,000 expired leases in a million rows, against 1.4 ms with
+the new index.
+`validate_schema()` reports a table without `outbox_leased_idx` as drift.
+
+Build the new index and drop the old one without blocking writes, and run
+the migration **before** deploying 0.17. Earlier versions fetch the same
+rows with either index, so the order is safe.
+
+```python
+import sqlalchemy as sa
+from alembic import op
+
+
+def upgrade() -> None:
+    with op.get_context().autocommit_block():
+        op.create_index(
+            "outbox_leased_idx",
+            "outbox",
+            ["queue", "next_attempt_at", "id"],
+            postgresql_where=sa.text("acquired_token IS NOT NULL"),
+            postgresql_concurrently=True,
+        )
+        op.drop_index("outbox_lease_idx", table_name="outbox", postgresql_concurrently=True)
+
+
+def downgrade() -> None:
+    with op.get_context().autocommit_block():
+        op.create_index(
+            "outbox_lease_idx",
+            "outbox",
+            ["queue", "acquired_at"],
+            postgresql_where=sa.text("acquired_token IS NOT NULL"),
+            postgresql_concurrently=True,
+        )
+        op.drop_index("outbox_leased_idx", table_name="outbox", postgresql_concurrently=True)
+```
+
+If a health probe runs `validate_schema()` on 0.16, it reports
+`outbox_lease_idx` missing once the old index is dropped. In that case put
+the `drop_index` in a second migration and run it after 0.17 is deployed;
+0.17 ignores the extra index. As with the 0.15 rebuild, pass `schema=` for a
+table in a non-default schema, drop an `INVALID` index left by a failed
+concurrent build before retrying, and don't apply what
+`alembic revision --autogenerate` produces for this change.
 
 ## Adding the DLQ after the fact
 
@@ -352,7 +405,7 @@ three indexes and their expected shape:
 | Index | Columns | Unique | `postgresql_where` |
 | --- | --- | --- | --- |
 | `outbox_pending_idx` | `queue, next_attempt_at, id` | no | `acquired_token IS NULL` |
-| `outbox_lease_idx` | `queue, acquired_at` | no | `acquired_token IS NOT NULL` |
+| `outbox_leased_idx` | `queue, next_attempt_at, id` | no | `acquired_token IS NOT NULL` |
 | `outbox_timer_id_uq` | `queue, timer_id` | yes | `timer_id IS NOT NULL` |
 
 ```python
@@ -367,7 +420,7 @@ op.create_index(
 ```
 
 Substitute the columns / `unique` / predicate from the table above for
-`outbox_pending_idx` and `outbox_lease_idx`.
+`outbox_pending_idx` and `outbox_leased_idx`.
 
 The recipes pass literal names (`'outbox_lease_ck'`, `'outbox_timer_id_uq'`),
 which are the exact names the package emits when no `naming_convention` is set.

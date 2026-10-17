@@ -187,8 +187,8 @@ You should see:
  timer_id         | character varying(255)   |           |          |
 Indexes:
     "outbox_pkey" PRIMARY KEY, btree (id)
-    "outbox_lease_idx" btree (queue, acquired_at) WHERE acquired_token IS NOT NULL
-    "outbox_pending_idx" btree (queue, next_attempt_at) WHERE acquired_token IS NULL
+    "outbox_leased_idx" btree (queue, next_attempt_at, id) WHERE acquired_token IS NOT NULL
+    "outbox_pending_idx" btree (queue, next_attempt_at, id) WHERE acquired_token IS NULL
     "outbox_timer_id_uq" UNIQUE, btree (queue, timer_id) WHERE timer_id IS NOT NULL
 Check constraints:
     "outbox_lease_ck" CHECK ((acquired_token IS NULL) = (acquired_at IS NULL))

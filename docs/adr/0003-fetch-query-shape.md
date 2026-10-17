@@ -14,5 +14,11 @@ about 200 ms per fetch at a million ready rows, against 0.1 ms for this shape, o
 and without it a fetch reads the entire tie group. The costs accepted are a statement that is harder
 to read, up to `2 × n` rows per queue locked briefly while only `n` are claimed (other fetchers skip
 them until the claim commits, which affects fairness, not correctness), and a concurrent index
-rebuild when upgrading from 0.14. The expired-lease branch still sorts every expired lease of its
-queue; an index for it was left out until it is measured against a realistic number of hung handlers.
+rebuild when upgrading from 0.14. The expired-lease branch reads `<table>_leased_idx`, keyed
+the same way over leased rows, and filters out leases that haven't expired. Its first index,
+`(queue, acquired_at)`, made the branch read and sort every expired lease of its queue: with 50,000
+of them in a million rows a fetch took about 10 ms on PostgreSQL 17 and 15 ms on 13, against 1.4 ms
+with the ordered index. It replaced that index rather than joining it, because a second index on
+leased rows would add a write to every claim. Leases that are still held sit in the ordered index
+too and the scan steps over them; with 20,000 in flight at the head of the queue a fetch still took
+about 1.5 ms.
