@@ -890,6 +890,22 @@ def test_publish_command_rejects_oversize_queue() -> None:
         OutboxPublishCommand(b"x", queue="q" * 256, session=_make_session_mock())
 
 
+def test_publish_command_rejects_oversize_timer_id() -> None:
+    """timer_id over the String(255) column limit is rejected before SQLAlchemy can truncate it."""
+    with pytest.raises(ValueError, match="timer_id must be at most 255 characters"):
+        OutboxPublishCommand(b"x", queue="q", session=_make_session_mock(), timer_id="t" * 256)
+
+
+def test_publish_command_accepts_timer_id_at_the_column_limit() -> None:
+    cmd = OutboxPublishCommand(b"x", queue="q", session=_make_session_mock(), timer_id="t" * 255)
+    assert cmd.timer_id == "t" * 255
+
+
+def test_outbox_response_rejects_oversize_timer_id() -> None:
+    with pytest.raises(ValueError, match="timer_id must be at most 255 characters"):
+        OutboxResponse(b"x", queue="q", session=_make_session_mock(), timer_id="t" * 256)
+
+
 def test_publish_command_rejects_timer_id_for_batch() -> None:
     """P4: timer_id is meaningless for a batch (multiple bodies) — reject, don't silently drop."""
     with pytest.raises(ValueError, match="batch"):

@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from faststream_outbox.message import CORRELATION_ID_HEADER
 
 
-# Matches the ``queue`` column width in ``make_outbox_table`` (``String(255)``).
+# Matches the ``queue`` and ``timer_id`` column width in ``make_outbox_table`` (``String(255)``).
 _MAX_QUEUE_LENGTH = 255
 
 # Single source for the ``request()`` rejection message, shared by the broker, producer,
@@ -37,6 +37,7 @@ def _validate_publish_args(
     session: object,
     activate_in: dt.timedelta | None,
     activate_at: dt.datetime | None,
+    timer_id: str | None = None,
 ) -> None:
     """Fail-fast validation shared by every real outbox publish entry point.
 
@@ -67,6 +68,9 @@ def _validate_publish_args(
         raise ValueError(msg)
     if len(queue) > _MAX_QUEUE_LENGTH:
         msg = f"queue must be at most {_MAX_QUEUE_LENGTH} characters (got {len(queue)})"
+        raise ValueError(msg)
+    if timer_id is not None and len(timer_id) > _MAX_QUEUE_LENGTH:
+        msg = f"timer_id must be at most {_MAX_QUEUE_LENGTH} characters (got {len(timer_id)})"
         raise ValueError(msg)
 
 
@@ -101,6 +105,7 @@ class OutboxPublishCommand(BatchPublishCommand):
             session=session,
             activate_in=activate_in,
             activate_at=activate_at,
+            timer_id=timer_id,
         )
         # P4: timer_id / correlation_id are per-row single-publish concepts the batch
         # path silently drops (each batched row gets its own auto correlation_id and
@@ -203,6 +208,7 @@ class OutboxResponse(Response):
             session=session,
             activate_in=activate_in,
             activate_at=activate_at,
+            timer_id=timer_id,
         )
         if correlation_id is None and headers:
             correlation_id = headers.get(CORRELATION_ID_HEADER)

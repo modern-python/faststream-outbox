@@ -2482,6 +2482,20 @@ async def test_broker_without_engine_publishes_on_the_callers_session(
         assert len(result.scalars().all()) == 3
 
 
+async def test_publish_rejects_an_oversize_timer_id_without_storing_a_row(
+    pg_engine: AsyncEngine, outbox_table: Table
+) -> None:
+    """SQLAlchemy 2.0.x binds String(255) as ``$1::VARCHAR(255)``, which Postgres truncates instead of rejecting."""
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with session_factory() as session, session.begin():
+        with pytest.raises(ValueError, match="timer_id must be at most 255 characters"):
+            await broker.publish({"n": 1}, queue="orders", session=session, timer_id="t" * 256)
+    async with pg_engine.connect() as conn:
+        result = await conn.execute(select(outbox_table.c.id))
+        assert result.scalars().all() == []
+
+
 async def test_notify_deduped_within_transaction_same_queue(pg_engine, outbox_table) -> None:
     broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
     session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
