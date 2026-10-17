@@ -187,6 +187,7 @@ class OutboxBroker(
         # Serializer lives on fd_config — wire it onto the producer so encoded
         # bodies use the same path as the broker's own publish flow.
         producer.serializer = fd_config._serializer  # noqa: SLF001
+        producer.broker_config = broker_config
         specification = BrokerSpec(
             url=_spec_url(engine, outbox_table),
             protocol="postgresql",

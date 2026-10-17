@@ -59,7 +59,7 @@ for user-supplied scheduling.
 ## Deduplication with `timer_id`
 
 `timer_id` flows into a `String(255)` column with a partial unique index
-on `(queue, timer_id) WHERE timer_id IS NOT NULL`. The producer switches
+on `(queue, timer_id) WHERE timer_id IS NOT NULL`. The insert switches
 to `pg_insert(...).on_conflict_do_nothing(...)` so re-publishing the same
 id is a silent no-op (returns `None`):
 

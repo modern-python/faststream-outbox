@@ -7,10 +7,10 @@ equivalents in Python. Those implementations cannot share code, so this module p
 them to one behavioural contract instead. Every scenario runs against **both** the
 fake (everywhere) and real Postgres (auto-skipped when unreachable).
 
-Scope is exactly the shared ``AbstractOutboxClient`` surface: ``fetch``,
+Scope is exactly the shared ``AbstractOutboxClient`` surface: ``insert`` /
+``insert_batch`` (+ ``timer_id`` dedup and headers JSONB rejects), ``fetch``,
 ``delete_with_lease``, ``mark_pending_with_lease`` (+ the DLQ side-effect).
-``cancel_timer`` and ``timer_id`` insert-dedup live on the broker / producer, not on
-the client interface, so they are covered by ``test_integration.py`` /
+``cancel_timer`` lives on the broker, so it is covered by ``test_integration.py`` /
 ``test_fake.py``, not here.
 
 A per-adapter harness hides the substrate differences (how a row is seeded, which
@@ -29,11 +29,13 @@ import contextlib
 import datetime as dt
 import os
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import MetaData, Table, insert, select, text
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.exc import StatementError
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from faststream_outbox import make_dlq_table, make_outbox_table
 from faststream_outbox._time import utcnow
@@ -51,9 +53,42 @@ class _FakeHarness:
     """Adapter-agnostic harness backed by an in-memory ``FakeOutboxClient``."""
 
     kind = "fake"
+    rejects: type[Exception] = ValueError
 
     def __init__(self, *, with_dlq: bool = True) -> None:
         self._client = FakeOutboxClient(dlq_enabled=with_dlq)
+
+    async def insert(
+        self,
+        *,
+        queue: str = "q",
+        payload: bytes = b"x",
+        headers: dict[str, str] | None = None,
+        activate_in: dt.timedelta | None = None,
+        activate_at: dt.datetime | None = None,
+        timer_id: str | None = None,
+    ) -> int | None:
+        return await self._client.insert(
+            AsyncMock(spec=AsyncSession),
+            queue=queue,
+            payload=payload,
+            headers=headers,
+            activate_in=activate_in,
+            activate_at=activate_at,
+            timer_id=timer_id,
+        )
+
+    async def insert_batch(
+        self,
+        rows: Sequence[tuple[bytes, dict[str, str] | None]],
+        *,
+        queue: str = "q",
+        activate_in: dt.timedelta | None = None,
+    ) -> None:
+        await self._client.insert_batch(AsyncMock(spec=AsyncSession), queue=queue, rows=rows, activate_in=activate_in)
+
+    async def queue_ids(self, queue: str) -> list[int]:
+        return sorted(r.id for r in self._client.rows if r.queue == queue)
 
     async def seed(
         self,
@@ -139,12 +174,50 @@ class _RealHarness:
     """Adapter-agnostic harness backed by a real ``OutboxClient`` against Postgres."""
 
     kind = "real"
+    rejects: type[Exception] = StatementError
 
     def __init__(self, engine: AsyncEngine, table: Table, dlq: Table, *, with_dlq: bool = True) -> None:
         self._engine = engine
         self._table = table
         self._dlq = dlq
         self._client = OutboxClient(engine, table, dlq_table=dlq if with_dlq else None)
+        self._sessions = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def insert(
+        self,
+        *,
+        queue: str = "q",
+        payload: bytes = b"x",
+        headers: dict[str, str] | None = None,
+        activate_in: dt.timedelta | None = None,
+        activate_at: dt.datetime | None = None,
+        timer_id: str | None = None,
+    ) -> int | None:
+        async with self._sessions() as session, session.begin():
+            return await self._client.insert(
+                session,
+                queue=queue,
+                payload=payload,
+                headers=headers,
+                activate_in=activate_in,
+                activate_at=activate_at,
+                timer_id=timer_id,
+            )
+
+    async def insert_batch(
+        self,
+        rows: Sequence[tuple[bytes, dict[str, str] | None]],
+        *,
+        queue: str = "q",
+        activate_in: dt.timedelta | None = None,
+    ) -> None:
+        async with self._sessions() as session, session.begin():
+            await self._client.insert_batch(session, queue=queue, rows=rows, activate_in=activate_in)
+
+    async def queue_ids(self, queue: str) -> list[int]:
+        async with self._engine.connect() as conn:
+            result = await conn.execute(select(self._table.c.id).where(self._table.c.queue == queue))
+            return sorted(result.scalars().all())
 
     async def seed(
         self,
@@ -276,6 +349,94 @@ async def contract_without_dlq(request: pytest.FixtureRequest) -> AsyncIterator[
     """Like ``contract``, but the client has no DLQ table."""
     async with _harness(request.param, with_dlq=False) as harness:
         yield harness
+
+
+# --- insert ----------------------------------------------------------------
+
+
+async def test_insert_stores_an_eligible_row(contract: _Harness) -> None:
+    rid = await contract.insert(queue="orders", payload=b"a", headers={"k": "v"})
+    assert rid is not None
+    row = await contract.get_row(rid)
+    assert row is not None
+    assert (row["queue"], row["payload"], row["timer_id"]) == ("orders", b"a", None)
+    msgs = await contract.fetch(["orders"], limit=10, lease_ttl_seconds=60.0)
+    assert [(m.id, m.headers) for m in msgs] == [(rid, {"k": "v"})]
+
+
+async def test_insert_returns_none_on_live_timer_conflict(contract: _Harness) -> None:
+    first = await contract.insert(queue="orders", timer_id="t1")
+    assert first is not None
+    assert await contract.insert(queue="orders", timer_id="t1") is None
+    assert await contract.queue_ids("orders") == [first]
+
+
+async def test_insert_same_timer_id_on_another_queue_lands(contract: _Harness) -> None:
+    assert await contract.insert(queue="orders", timer_id="t1") is not None
+    assert await contract.insert(queue="audit", timer_id="t1") is not None
+
+
+async def test_insert_reuses_timer_id_after_delivery(contract: _Harness) -> None:
+    first = await contract.insert(queue="orders", timer_id="t1")
+    assert first is not None
+    [msg] = await contract.fetch(["orders"], limit=10, lease_ttl_seconds=60.0)
+    assert msg.acquired_token is not None
+    assert await contract.delete(msg.id, msg.acquired_token)
+    second = await contract.insert(queue="orders", timer_id="t1")
+    assert second is not None
+    assert second != first
+
+
+async def test_insert_activate_in_gates_the_row(contract: _Harness) -> None:
+    before = utcnow()
+    rid = await contract.insert(queue="orders", activate_in=dt.timedelta(hours=1))
+    assert rid is not None
+    assert await contract.fetch(["orders"], limit=10, lease_ttl_seconds=60.0) == []
+    row = await contract.get_row(rid)
+    assert row is not None
+    next_at = row["next_attempt_at"]
+    assert isinstance(next_at, dt.datetime)
+    assert before + dt.timedelta(minutes=59) < next_at < before + dt.timedelta(minutes=61)
+
+
+async def test_insert_activate_at_stores_that_time(contract: _Harness) -> None:
+    at = utcnow() + dt.timedelta(hours=2)
+    rid = await contract.insert(queue="orders", activate_at=at)
+    assert rid is not None
+    row = await contract.get_row(rid)
+    assert row is not None
+    assert row["next_attempt_at"] == at
+
+
+async def test_insert_past_activate_at_is_eligible(contract: _Harness) -> None:
+    rid = await contract.insert(queue="orders", activate_at=utcnow() - dt.timedelta(minutes=5))
+    msgs = await contract.fetch(["orders"], limit=10, lease_ttl_seconds=60.0)
+    assert [m.id for m in msgs] == [rid]
+
+
+async def test_insert_rejects_headers_jsonb_cannot_hold(contract: _Harness) -> None:
+    with pytest.raises(contract.rejects):
+        await contract.insert(queue="orders", headers={"k": object()})  # ty: ignore[invalid-argument-type]
+    assert await contract.queue_ids("orders") == []
+
+
+async def test_insert_batch_stores_every_row_in_order(contract: _Harness) -> None:
+    await contract.insert_batch([(b"a", None), (b"b", {"k": "v"})], queue="orders")
+    msgs = await contract.fetch(["orders"], limit=10, lease_ttl_seconds=60.0)
+    assert [(m.payload, m.headers) for m in sorted(msgs, key=lambda m: m.id)] == [(b"a", None), (b"b", {"k": "v"})]
+
+
+async def test_insert_batch_activate_in_gates_every_row(contract: _Harness) -> None:
+    await contract.insert_batch([(b"a", None), (b"b", None)], queue="orders", activate_in=dt.timedelta(hours=1))
+    assert len(await contract.queue_ids("orders")) == 2
+    assert await contract.fetch(["orders"], limit=10, lease_ttl_seconds=60.0) == []
+
+
+async def test_insert_batch_with_one_rejected_row_stores_nothing(contract: _Harness) -> None:
+    rows = [(b"a", None), (b"b", {"k": object()})]
+    with pytest.raises(contract.rejects):
+        await contract.insert_batch(rows, queue="orders")  # ty: ignore[invalid-argument-type]
+    assert await contract.queue_ids("orders") == []
 
 
 # --- fetch -----------------------------------------------------------------

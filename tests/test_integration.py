@@ -2466,6 +2466,22 @@ def _count_pg_notify(engine: AsyncEngine):
         event.remove(engine.sync_engine, "before_cursor_execute", _listener)
 
 
+async def test_broker_without_engine_publishes_on_the_callers_session(
+    pg_engine: AsyncEngine, outbox_table: Table
+) -> None:
+    broker = OutboxBroker(outbox_table=outbox_table)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    with _count_pg_notify(pg_engine) as count:
+        async with session_factory() as session, session.begin():
+            rid = await broker.publish({"n": 1}, queue="orders", session=session)
+            await broker.publish_batch({"n": 2}, {"n": 3}, queue="orders", session=session)
+    assert rid is not None
+    assert count[0] == 1
+    async with pg_engine.connect() as conn:
+        result = await conn.execute(select(outbox_table.c.id).where(outbox_table.c.queue == "orders"))
+        assert len(result.scalars().all()) == 3
+
+
 async def test_notify_deduped_within_transaction_same_queue(pg_engine, outbox_table) -> None:
     broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
     session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
