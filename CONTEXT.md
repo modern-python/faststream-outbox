@@ -11,7 +11,7 @@ docs must agree on it. General programming vocabulary does not belong here, howe
 project uses it.
 
 **Row**:
-One outbox record — the unit the transport moves. There is no `state` column: a row exists until it
+One outbox record: the unit the transport moves. There is no `state` column: a row exists until it
 is delivered or terminally fails.
 _Avoid_: job, task, event
 
@@ -33,7 +33,7 @@ statement matches nothing.
 _Avoid_: lease id, owner id
 
 **Claim**:
-Acquiring a lease on a row via the fetch CTE. Increments `deliveries_count` — including on an
+Acquiring a lease on a row via the fetch CTE. Increments `deliveries_count`, including on an
 expired-lease reclaim.
 _Avoid_: fetch (that is the loop and the client method), dequeue
 
@@ -50,7 +50,7 @@ The bounded wait on stop for in-flight rows to reach a terminal write.
 _Avoid_: graceful shutdown (that names the whole phase, not this wait)
 
 **Outcome**:
-The single disjoint result `dispatch_one` matches on — `Ack`, `Retry(delay_seconds)`, or
+The single disjoint result `dispatch_one` matches on: `Ack`, `Retry(delay_seconds)`, or
 `Terminal(reason)`.
 _Avoid_: status, result, state
 
@@ -64,7 +64,7 @@ _Avoid_: schedule, delayed message
 
 **`timer_id`**:
 The dedup key for at most one *live* row per `(queue, timer_id)`. It is not a global once-ever
-idempotency key — a delivered row's id is reusable.
+idempotency key; a delivered row's id is reusable.
 _Avoid_: idempotency key, message key
 
 **Relay**:
@@ -73,7 +73,7 @@ _Avoid_: bridge, forwarder
 
 **DLQ**:
 The opt-in sibling audit table terminal failures are archived to. Off by default.
-_Avoid_: dead-letter queue as a transport — nothing consumes it
+_Avoid_: dead-letter queue as a transport (nothing consumes it)
 
 **Recorder seam**:
 The `MetricsRecorder` callable the library invokes for events outside the FastStream bus.
