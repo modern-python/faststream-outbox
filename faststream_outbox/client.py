@@ -27,6 +27,7 @@ from sqlalchemy import (
     and_,
     any_,
     bindparam,
+    cast,
     delete,
     func,
     or_,
@@ -381,10 +382,11 @@ class OutboxClient(AbstractOutboxClient):
         if not pairs:
             return set()
         t = self._table
+        ids_type, tokens_type = ARRAY(t.c.id.type), ARRAY(t.c.acquired_token.type)
         wanted = (
             func.unnest(
-                bindparam("ids", [pid for pid, _ in pairs], type_=ARRAY(t.c.id.type)),
-                bindparam("tokens", [ptok for _, ptok in pairs], type_=ARRAY(t.c.acquired_token.type)),
+                cast(bindparam("ids", [pid for pid, _ in pairs], type_=ids_type), ids_type),
+                cast(bindparam("tokens", [ptok for _, ptok in pairs], type_=tokens_type), tokens_type),
             )
             .table_valued("id", "token")
             .render_derived(name="wanted")
