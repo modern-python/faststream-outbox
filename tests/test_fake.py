@@ -2149,3 +2149,171 @@ async def test_handler_system_exit_stops_subscriber_and_exits_app() -> None:
 
     app_exit.assert_called_once_with()
     assert len(test_broker.fake_client.rows) == 1
+
+
+async def test_loop_mode_handler_stop_consume_stops_without_waiting_out_the_drain() -> None:
+    """INVARIANT: ``StopConsume`` raised by a handler on a worker writes the row's outcome and stops promptly.
+
+    ``stop()`` waits for every in-flight row to reach its terminal write. Calling it inline from
+    the worker that is still holding a row makes it wait on itself until ``graceful_timeout``, then
+    cancel and gather the very task it runs in. The stop has to run outside the worker.
+    """
+    events: list[str] = []
+    broker = OutboxBroker(
+        outbox_table=make_outbox_table(MetaData()),
+        graceful_timeout=3.0,
+        metrics_recorder=lambda event, _tags: events.append(event),
+    )
+    sub = broker.subscriber("orders", min_fetch_interval=30.0, max_fetch_interval=30.0)
+
+    @sub
+    async def handle(body: str) -> None:
+        del body
+        raise StopConsume
+
+    test_broker = TestOutboxBroker(broker, run_loops=True)
+    async with test_broker:
+        await asyncio.sleep(0.05)
+        payload, hdrs = encode_payload("x")
+        test_broker.feed("orders", payload, headers=hdrs)
+        await _wait_until(lambda: not sub.running, timeout=1.0)
+        await _wait_until(lambda: not sub.tasks, timeout=1.0)
+
+    assert "drain_timeout" not in events
+    [row] = test_broker.fake_client.rows
+    assert row.acquired_token is None
+
+
+async def test_stop_waits_for_a_claim_in_progress_before_draining() -> None:
+    """INVARIANT: ``stop()`` lets a claim that is already running finish and drains the rows it claimed.
+
+    The fetch loop only checks for a stop between claims. If ``stop()`` drains while a claim is
+    still running and then cancels the fetch loop, the claimed rows never reach a worker: they sit
+    leased until ``lease_ttl`` with ``deliveries_count`` bumped and no handler run.
+    """
+    broker = _make_broker()
+    handled: list[str] = []
+    sub = broker.subscriber("orders", min_fetch_interval=30.0, max_fetch_interval=30.0)
+
+    @sub
+    async def handle(body: str) -> None:
+        handled.append(body)
+
+    test_broker = TestOutboxBroker(broker, run_loops=True)
+    claiming = asyncio.Event()
+    fake = test_broker.fake_client
+    original_fetch = fake.fetch
+
+    async def slow_fetch(*args: typing.Any, **kwargs: typing.Any) -> typing.Any:
+        rows = await original_fetch(*args, **kwargs)
+        if rows:
+            claiming.set()
+            await asyncio.sleep(0.2)
+        return rows
+
+    with patch.object(fake, "fetch", slow_fetch):
+        async with test_broker:
+            await asyncio.sleep(0.05)
+            payload, hdrs = encode_payload("x")
+            test_broker.feed("orders", payload, headers=hdrs)
+            await asyncio.wait_for(claiming.wait(), timeout=1.0)
+            await sub.stop()
+
+    assert handled == ["x"]
+    assert fake.rows == []
+
+
+async def test_stop_discards_rows_left_in_memory_after_a_drain_timeout() -> None:
+    """INVARIANT: after ``stop()`` returns, no claimed row is left waiting in the subscriber's memory.
+
+    When the drain times out, rows still queued in memory keep their leases, and another replica
+    may reclaim them. A later ``start()`` that dispatches them anyway runs a duplicate under a stale
+    lease, and their unfinished count makes the next drain wait for rows that no worker holds.
+    """
+    graceful_timeout = 0.2
+    broker = OutboxBroker(outbox_table=make_outbox_table(MetaData()), graceful_timeout=graceful_timeout)
+    started = asyncio.Event()
+    sub = broker.subscriber("orders", fetch_batch_size=4, min_fetch_interval=30.0, max_fetch_interval=30.0)
+
+    @sub
+    async def handle(body: str) -> None:
+        del body
+        started.set()
+        await asyncio.sleep(60.0)
+
+    test_broker = TestOutboxBroker(broker, run_loops=True)
+    async with test_broker:
+        await asyncio.sleep(0.05)
+        for i in range(3):
+            payload, hdrs = encode_payload(f"m{i}")
+            test_broker.feed("orders", payload, headers=hdrs)
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        await sub.stop()
+        assert sub._inflight.empty()  # noqa: SLF001
+        await asyncio.wait_for(sub._inflight.join(), timeout=0.1)  # noqa: SLF001
+
+
+async def test_loop_mode_reentered_context_does_not_dispatch_the_previous_contexts_rows() -> None:
+    """INVARIANT: leaving a loop-mode ``TestOutboxBroker`` context drops the rows its subscribers had claimed.
+
+    Module-level brokers are reused across tests. Rows a closed context left in memory would be
+    handed to the next test's handler even though they are not in that test's fake client.
+    """
+    broker = _make_broker()
+    handled: list[str] = []
+    gate = asyncio.Event()
+    started = asyncio.Event()
+
+    @broker.subscriber("orders", fetch_batch_size=4, min_fetch_interval=30.0, max_fetch_interval=30.0)
+    async def handle(body: str) -> None:
+        handled.append(body)
+        started.set()
+        await gate.wait()
+
+    first = TestOutboxBroker(broker, run_loops=True)
+    async with first:
+        await asyncio.sleep(0.05)
+        for i in range(3):
+            payload, hdrs = encode_payload(f"old{i}")
+            first.feed("orders", payload, headers=hdrs)
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    handled.clear()
+    gate.set()
+    second = TestOutboxBroker(broker, run_loops=True)
+    async with second:
+        await asyncio.sleep(0.05)
+        payload, hdrs = encode_payload("fresh")
+        second.feed("orders", payload, headers=hdrs)
+        await _wait_until(lambda: "fresh" in handled)
+        await asyncio.sleep(0.05)
+
+    assert handled == ["fresh"]
+
+
+async def test_loop_mode_consumes_after_an_earlier_stop_consume_on_the_same_broker() -> None:
+    """INVARIANT: a ``TestOutboxBroker`` context starts its subscribers fresh, even after one stopped.
+
+    ``start()`` clears the stop flag so a stopped subscriber fetches again. The test broker replaces
+    ``start()``; if it doesn't clear the flag too, the fetch loop exits at once and a later loop-mode
+    test on the same broker silently consumes nothing.
+    """
+    broker = _make_broker()
+    handled: list[str] = []
+
+    @broker.subscriber("orders", min_fetch_interval=30.0, max_fetch_interval=30.0)
+    async def handle(body: str) -> None:
+        handled.append(body)
+        if body == "stop":
+            raise StopConsume
+
+    async with TestOutboxBroker(broker):
+        await broker.publish("stop", queue="orders")  # ty: ignore[missing-argument]
+
+    handled.clear()
+    test_broker = TestOutboxBroker(broker, run_loops=True)
+    async with test_broker:
+        await asyncio.sleep(0.05)
+        payload, hdrs = encode_payload("again")
+        test_broker.feed("orders", payload, headers=hdrs)
+        await _wait_until(lambda: handled == ["again"])

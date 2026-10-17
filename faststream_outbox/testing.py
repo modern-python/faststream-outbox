@@ -683,6 +683,7 @@ class TestOutboxBroker(TestBroker[OutboxBroker, OutboxBroker], broker=OutboxBrok
         # call models build (matches what TestBroker._fake_start does last).
         patch_broker_calls(broker)
         for subscriber in broker.subscribers:
+            typing.cast("OutboxSubscriber", subscriber)._stopping = False  # noqa: SLF001
             subscriber._post_start()  # noqa: SLF001
         broker._warn_on_unstarted_foreign_publishers()  # noqa: SLF001
         # In sync mode, publish drives dispatch directly — don't spawn the loops.
@@ -720,6 +721,7 @@ class TestOutboxBroker(TestBroker[OutboxBroker, OutboxBroker], broker=OutboxBrok
                     if not task.done():
                         task.cancel()
                 sub.tasks.clear()
+                sub._reset_inflight()  # noqa: SLF001
             self._loops_spawned = False
         super()._fake_close(broker, *args, **kwargs)
 
