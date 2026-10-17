@@ -209,6 +209,9 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         self._inflight: asyncio.Queue[OutboxInnerMessage] = asyncio.Queue(
             maxsize=config.fetch_batch_size,
         )
+        # Held for a whole claim (fetch plus enqueue), so stop() can wait out one that is running.
+        self._claim_lock = asyncio.Lock()
+        self._stop_task: asyncio.Task[None] | None = None
         # Frozen set of served queues for the O(1) NOTIFY-payload filter (P14); the
         # queue list is fixed per subscriber, so caching it here clarifies intent.
         self._served_queues: frozenset[str] = frozenset(config.queues)
@@ -307,6 +310,8 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         if drain_timeout is None:
             drain_timeout = _DEFAULT_DRAIN_TIMEOUT_SECONDS
         with anyio.move_on_after(drain_timeout) as drain_scope:
+            async with self._claim_lock:
+                pass
             await self._inflight.join()
         if drain_scope.cancelled_caught:
             # F1-04: the drain timed out — in-flight rows are abandoned to lease-expiry
@@ -331,6 +336,20 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         # engine.dispose() races the teardown. return_exceptions swallows CancelledError.
         await asyncio.gather(*tasks, return_exceptions=True)
         self.tasks.clear()
+        self._reset_inflight()
+
+    def _reset_inflight(self) -> None:
+        """Drop rows still queued in memory; their leases expire and another fetch reclaims them."""
+        self._inflight = asyncio.Queue(maxsize=self._config.fetch_batch_size)
+
+    async def _stop_from_handler(self, *, exit_app: bool) -> None:
+        if asyncio.current_task() in self.tasks:
+            # stop() drains in-flight rows, including the one this worker still holds.
+            self._stop_task = asyncio.create_task(self._stop_from_handler(exit_app=exit_app))
+            return
+        await self.stop()
+        if exit_app and (app := self._outer_config.fd_config.context.get("app")):
+            app.exit()
 
     @property
     def _notify_channel(self) -> str:
@@ -405,15 +424,20 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                 continue
             # A NOTIFY that lands after this clear is served by this fetch or wakes the next wait.
             self._notify_event.clear()
-            # fetch_conn is None only in the test-broker path against FakeOutboxClient
-            # (which ignores conn); the real OutboxClient raises if conn is None. The
-            # AbstractOutboxClient surface admits None so both implementations type-check.
-            rows = await self._client.fetch(
-                fetch_conn,
-                self._queues,
-                limit=free,
-                lease_ttl_seconds=self._config.lease_ttl_seconds,
-            )
+            async with self._claim_lock:
+                if self._stopping:
+                    return
+                # fetch_conn is None only in the test-broker path against FakeOutboxClient
+                # (which ignores conn); the real OutboxClient raises if conn is None. The
+                # AbstractOutboxClient surface admits None so both implementations type-check.
+                rows = await self._client.fetch(
+                    fetch_conn,
+                    self._queues,
+                    limit=free,
+                    lease_ttl_seconds=self._config.lease_ttl_seconds,
+                )
+                for row in rows:
+                    self._inflight.put_nowait(row)
             # Emit a fetched event per tick (count=0 on idle), tagged by the first
             # configured queue. Subscribers may listen to multiple queues; for the
             # tag we surface the primary one rather than fan out a tag-per-queue
@@ -425,8 +449,6 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             )
             if rows:
                 idle_count = 0
-                for row in rows:
-                    await self._inflight.put(row)
             else:
                 idle_count = min(idle_count + 1, _BACKOFF_EXP_CAP)
                 await self._wait_for_notify_or_timeout(_compute_backoff(idle_count, max_idle, base=base))
@@ -977,11 +999,9 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         except _OutboxConfigError:
             raise
         except StopConsume:
-            await self.stop()
+            await self._stop_from_handler(exit_app=False)
         except SystemExit:
-            await self.stop()
-            if app := self._outer_config.fd_config.context.get("app"):
-                app.exit()
+            await self._stop_from_handler(exit_app=True)
         except Exception:  # noqa: BLE001, S110
             # All other exceptions were logged by CriticalLogMiddleware
             pass
