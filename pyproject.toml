@@ -149,9 +149,8 @@ Changelog = "https://github.com/modern-python/faststream-outbox/releases"
 
 [tool.coverage.run]
 omit = ["benchmarks/*"]
-# The C tracer intermittently drops executed lines in async tests; 3.11 falls back to it.
-core = "sysmon"
-disable_warnings = ["no-sysmon"]
+# SQLAlchemy's async layer runs statements in greenlets; untracked switches drop executed lines.
+concurrency = ["greenlet", "thread"]
 
 [tool.coverage.report]
 fail_under = 100
