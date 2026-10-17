@@ -88,41 +88,6 @@ jobs:
           PYTHONUNBUFFERED: 1
           POSTGRES_DSN: postgresql+asyncpg://outbox:outbox@127.0.0.1:5432/outbox
 
-  pytest-pg13:
-    # PostgreSQL 13 is the documented floor: outbox_autovacuum_ddl sets the insert-triggered
-    # reloptions that 13 introduced. One interpreter is enough, since this leg asks about the
-    # server, and --no-cov keeps the coverage gate on the main `pytest` matrix.
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:13
-        env:
-          POSTGRES_USER: outbox
-          POSTGRES_PASSWORD: outbox
-          POSTGRES_DB: outbox
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U outbox"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    steps:
-      - uses: actions/checkout@v6
-      - uses: extractions/setup-just@v4
-      - uses: astral-sh/setup-uv@v8.2.0
-        with:
-          enable-cache: true
-          cache-dependency-glob: "**/pyproject.toml"
-      - run: uv python install 3.13
-      - run: uv python pin 3.13
-      - run: just install
-      - run: uv run --no-sync pytest . --no-cov
-        env:
-          PYTHONDONTWRITEBYTECODE: 1
-          PYTHONUNBUFFERED: 1
-          POSTGRES_DSN: postgresql+asyncpg://outbox:outbox@127.0.0.1:5432/outbox
-
   floors:
     # The declared floors are part of what we ship, and nothing else in CI installs
     # them: `pytest` and `scheduled-dep-check` both resolve highest. That is how
@@ -132,6 +97,8 @@ jobs:
     # the same versions can still disagree on whether those versions install.
     # 3.14t is out: the dev group's `faststream[kafka]` pulls aiokafka, which ships no cp314t
     # wheel, so under --no-build this leg would measure upstream's gap rather than a floor.
+    # PostgreSQL 13 is the server floor: outbox_autovacuum_ddl sets the insert-triggered
+    # reloptions that 13 introduced.
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     strategy:
@@ -144,7 +111,7 @@ jobs:
           - "3.14"
     services:
       postgres:
-        image: postgres:17
+        image: postgres:13
         env:
           POSTGRES_USER: outbox
           POSTGRES_PASSWORD: outbox
