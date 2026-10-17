@@ -23,17 +23,17 @@ from typing import TYPE_CHECKING
 from sqlalchemy import (
     ARRAY,
     Float,
+    Integer,
     String,
-    and_,
-    any_,
     bindparam,
     cast,
     delete,
     func,
     insert,
-    or_,
     select,
     text,
+    true,
+    union_all,
     update,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     import typing
     from collections.abc import Mapping, Sequence
 
-    from sqlalchemy import Insert, Table
+    from sqlalchemy import CTE, ColumnElement, Insert, Table, Update
     from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 
@@ -141,6 +141,50 @@ class AbstractOutboxClient(abc.ABC):
     async def ping(self) -> bool: ...
 
 
+def _build_fetch_stmt(outbox: "Table") -> "Update":
+    """Build the claim statement once; queues, limit, lease TTL and the new token are bind parameters.
+
+    Each queue gets two ``LATERAL`` branches, unleased rows and expired leases, and each branch is an
+    ordered ``LIMIT n FOR UPDATE SKIP LOCKED`` scan, so Postgres stops after ``n`` unlocked rows instead of
+    sorting the whole backlog. See ADR 0003 for why the query has this shape.
+    """
+    t = outbox
+    limit = bindparam("limit", type_=Integer)
+    # ``make_interval(secs => :lease_ttl)`` keeps the cutoff server-side, immune to worker/DB clock skew.
+    lease_cutoff = func.now() - func.make_interval(0, 0, 0, 0, 0, 0, bindparam("lease_ttl", type_=Float))
+    queue_array = ARRAY(String)
+    queue_name = func.unnest(cast(bindparam("queues", type_=queue_array), queue_array)).label("name")
+    queues = select(queue_name).distinct().cte("queues")
+
+    def branch(name: str, *lease_state: "ColumnElement[bool]") -> "CTE":
+        per_queue = (
+            select(t.c.id, t.c.next_attempt_at)
+            .where(t.c.queue == queues.c.name, t.c.next_attempt_at <= func.now(), *lease_state)
+            .order_by(t.c.next_attempt_at, t.c.id)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+            .lateral(f"{name}_rows")
+        )
+        return select(per_queue.c.id, per_queue.c.next_attempt_at).select_from(queues.join(per_queue, true())).cte(name)
+
+    pending = branch("pending", t.c.acquired_token.is_(None))
+    expired = branch("expired", t.c.acquired_token.is_not(None), t.c.acquired_at < lease_cutoff)
+    candidates = union_all(
+        select(pending.c.id, pending.c.next_attempt_at), select(expired.c.id, expired.c.next_attempt_at)
+    ).subquery("candidates")
+    ready = select(candidates.c.id).order_by(candidates.c.next_attempt_at, candidates.c.id).limit(limit).cte("ready")
+    return (
+        update(t)
+        .where(t.c.id.in_(select(ready.c.id)))
+        .values(
+            acquired_at=func.now(),
+            acquired_token=bindparam("token", type_=t.c.acquired_token.type),
+            deliveries_count=t.c.deliveries_count + 1,
+        )
+        .returning(*t.c)
+    )
+
+
 def _build_dlq_cte(outbox: "Table", dlq: "Table") -> "Insert":
     """Build the DELETE-then-archive CTE once; the row id, lease token and failure context are bind parameters."""
     deleted = (
@@ -171,6 +215,7 @@ class OutboxClient(AbstractOutboxClient):
         self._engine = engine
         self._table = outbox_table
         self._dlq_table = dlq_table
+        self._fetch_stmt = _build_fetch_stmt(outbox_table)
         self._dlq_cte = None if dlq_table is None else _build_dlq_cte(outbox_table, dlq_table)
 
     @property
@@ -212,50 +257,9 @@ class OutboxClient(AbstractOutboxClient):
             raise TypeError(msg)
         if not queues:
             return []
-        token = uuid.uuid4()
-        t = self._table
-
-        # ``make_interval(secs => :lease_ttl)`` keeps the cutoff computation server-side
-        # so lease expiry is immune to clock skew between worker and DB hosts.
-        lease_cutoff = func.now() - func.make_interval(0, 0, 0, 0, 0, 0, bindparam("lease_ttl", type_=Float))
-        ready = (
-            select(t.c.id)
-            .where(
-                t.c.next_attempt_at <= func.now(),
-                # P11: ``queue = ANY(:queues)`` binds a single array param, so the SQL
-                # text is stable regardless of the number of queues — asyncpg can reuse
-                # the prepared statement across ticks instead of recompiling an
-                # OR-of-N-equalities whose text changes with the queue count.
-                t.c.queue == any_(bindparam("queues", list(queues), type_=ARRAY(String))),
-                # The OR is split into two index-implying disjuncts so Postgres'
-                # partial-index inference picks up both `_pending_idx` (Branch A,
-                # `acquired_token IS NULL`) and `_lease_idx` (Branch B,
-                # `acquired_token IS NOT NULL AND acquired_at < lease_cutoff`) and
-                # combines them via BitmapOr. The naive form `acquired_at < lease_cutoff`
-                # alone does not imply `acquired_token IS NOT NULL`, so the planner
-                # cannot prove `_lease_idx` applies and falls back to a seq-scan.
-                or_(
-                    t.c.acquired_token.is_(None),
-                    and_(t.c.acquired_token.is_not(None), t.c.acquired_at < lease_cutoff),
-                ),
-            )
-            .order_by(t.c.next_attempt_at, t.c.id)
-            .limit(limit)
-            .with_for_update(skip_locked=True)
-            .cte("ready")
-        )
-        stmt = (
-            update(t)
-            .where(t.c.id.in_(select(ready.c.id)))
-            .values(
-                acquired_at=func.now(),
-                acquired_token=token,
-                deliveries_count=t.c.deliveries_count + 1,
-            )
-            .returning(*t.c)
-        )
+        params = {"queues": list(queues), "limit": limit, "lease_ttl": lease_ttl_seconds, "token": uuid.uuid4()}
         async with conn.begin():
-            result = await conn.execute(stmt, {"lease_ttl": lease_ttl_seconds})
+            result = await conn.execute(self._fetch_stmt, params)
             rows = result.mappings().all()
         return [_row_to_message(dict(row)) for row in rows]
 

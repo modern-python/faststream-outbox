@@ -63,37 +63,43 @@ bulk publish costs one NOTIFY, not one per row.
 
 Per subscriber, two loops run concurrently:
 
-The fetch loop owns a long-lived `AsyncConnection` for the fetch CTE and
-a separate raw asyncpg connection for `LISTEN outbox_<table>`. A single CTE
+The fetch loop owns a long-lived `AsyncConnection` for the fetch query and
+a separate raw asyncpg connection for `LISTEN outbox_<table>`. One statement
 claims rows:
 
 ```sql
-WITH claimed AS (
-    SELECT id FROM outbox
-    WHERE queue = :queue
-      AND next_attempt_at <= now()
-      AND (
-        acquired_token IS NULL
-        OR acquired_at < now() - make_interval(secs => :lease_ttl)
-      )
-    ORDER BY next_attempt_at, id
-    LIMIT :batch
-    FOR UPDATE SKIP LOCKED
+WITH queues AS (SELECT DISTINCT unnest(:queues) AS name),
+pending AS (
+    SELECT p.id, p.next_attempt_at FROM queues JOIN LATERAL (
+        SELECT id, next_attempt_at FROM outbox
+        WHERE queue = queues.name AND next_attempt_at <= now()
+          AND acquired_token IS NULL
+        ORDER BY next_attempt_at, id LIMIT :batch
+        FOR UPDATE SKIP LOCKED
+    ) p ON true
+),
+expired AS (
+    -- the same per-queue scan for leases older than :lease_ttl
+),
+ready AS (
+    SELECT id FROM (SELECT * FROM pending UNION ALL SELECT * FROM expired) c
+    ORDER BY next_attempt_at, id LIMIT :batch
 )
 UPDATE outbox
 SET acquired_token = :uuid, acquired_at = now(),
     deliveries_count = deliveries_count + 1
-WHERE id IN (SELECT id FROM claimed)
+WHERE id IN (SELECT id FROM ready)
 RETURNING *
 ```
 
-This is simplified for illustration. The real query writes each `OR`
-disjunct with its own partial-index predicate spelled out as a conjunct, so
-Postgres can use the `outbox_pending_idx` / `outbox_lease_idx` partial
-indexes instead of a seq-scan. The naive `OR` above is the exact shape the
-code avoids.
+Each queue gets its own ordered scan of `outbox_pending_idx`, which stops
+after `:batch` unlocked rows, so a fetch costs the same with ten ready rows
+or a million. A single `WHERE ... OR ...` over `queue = ANY(:queues)` would
+claim the same rows, but Postgres would have to read and sort the whole
+backlog first. [ADR 0003](https://github.com/modern-python/faststream-outbox/blob/main/docs/adr/0003-fetch-query-shape.md)
+records why the query has this shape.
 
-The CTE reclaims both unleased rows AND rows whose lease has expired
+The query reclaims both unleased rows AND rows whose lease has expired
 (`acquired_at < now() - lease_ttl_seconds`), so there is no separate stuck-row
 reaper. The idle-sleep is short-circuited by NOTIFY via an `asyncio.Event`, so
 idle dispatch latency drops from up to `max_fetch_interval` (default 10s) to

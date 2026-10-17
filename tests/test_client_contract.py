@@ -316,6 +316,25 @@ async def test_fetch_selects_oldest_under_limit(contract: _Harness) -> None:
     assert rid_a not in {m.id for m in msgs}
 
 
+async def test_fetch_selects_oldest_across_queues_under_limit(contract: _Harness) -> None:
+    rid_a_old = await contract.seed(queue="a", next_attempt_offset=-30.0)
+    rid_b_mid = await contract.seed(queue="b", next_attempt_offset=-20.0)
+    await contract.seed(queue="a", next_attempt_offset=-10.0)
+    await contract.seed(queue="b", next_attempt_offset=-5.0)
+    msgs = await contract.fetch(["a", "b"], limit=2, lease_ttl_seconds=60.0)
+    assert {m.id for m in msgs} == {rid_a_old, rid_b_mid}
+
+
+async def test_fetch_selects_oldest_across_pending_and_expired_leases(contract: _Harness) -> None:
+    rid_expired = await contract.seed(
+        queue="orders", next_attempt_offset=-30.0, leased_token=uuid.uuid4(), acquired_age=120.0, deliveries_count=1
+    )
+    rid_pending = await contract.seed(queue="orders", next_attempt_offset=-20.0)
+    await contract.seed(queue="orders", next_attempt_offset=-10.0)
+    msgs = await contract.fetch(["orders"], limit=2, lease_ttl_seconds=60.0)
+    assert {m.id for m in msgs} == {rid_expired, rid_pending}
+
+
 async def test_fetch_respects_limit(contract: _Harness) -> None:
     for _ in range(3):
         await contract.seed(queue="orders")

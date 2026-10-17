@@ -3789,14 +3789,14 @@ async def test_delete_with_lease_raises_when_dlq_payload_but_no_dlq_table() -> N
         await engine.dispose()
 
 
-async def test_fetch_cte_carries_partial_index_predicates_as_conjuncts() -> None:
-    """INVARIANT: each OR arm of the fetch WHERE carries its partial-index predicate as a conjunct.
+async def test_fetch_branches_carry_partial_index_predicates_and_one_queue_array() -> None:
+    """INVARIANT: each fetch branch carries its partial-index predicate, and the queues bind as one array.
 
-    Branch A is ``acquired_token IS NULL``; Branch B is ``acquired_token IS NOT NULL AND acquired_at
-    < cutoff``. The naive single-OR form (``acquired_at < cutoff`` without the ``IS NOT NULL``
-    conjunct) returns the same rows -- the fake/real parity suite cannot tell them apart -- but
-    Postgres only uses a partial index when the query implies the index's own WHERE clause, so the
-    naive form silently seq-scans. This compiles the real statement and pins the shape.
+    The unleased branch filters ``acquired_token IS NULL`` and the expired-lease branch ``acquired_token IS
+    NOT NULL AND acquired_at < cutoff``. Dropping the ``IS NOT NULL`` conjunct returns the same rows, so the
+    fake/real parity suite can't tell, but Postgres only uses a partial index when the query implies its
+    WHERE clause. Binding the queues as one ``unnest``-ed array keeps the SQL text the same for any number
+    of queues, so asyncpg reuses one prepared statement instead of recompiling per queue count.
     """
     engine = create_async_engine("postgresql+asyncpg://u:p@localhost/db")
     try:
@@ -3821,11 +3821,10 @@ async def test_fetch_cte_carries_partial_index_predicates_as_conjuncts() -> None
 
         await client.fetch(_CapturingConn(), ["orders"], limit=10, lease_ttl_seconds=60.0)  # ty: ignore[invalid-argument-type]
         sql = str(captured["stmt"].compile(dialect=postgresql.dialect())).lower()
-        assert "acquired_token is null" in sql  # Branch A predicate
-        assert "acquired_token is not null" in sql  # Branch B conjunct (the naive form drops this)
-        # P11: queues bound as a single ANY(:queues) array (stable SQL across queue counts),
-        # not an OR-of-N-equalities.
-        assert "= any (" in sql  # ANY(:queues) array, not OR-of-equalities
+        assert "acquired_token is null" in sql
+        assert "acquired_token is not null" in sql
+        assert sql.count("unnest(") == 1
+        assert sql.count("join lateral") == 2
     finally:
         await engine.dispose()
 
