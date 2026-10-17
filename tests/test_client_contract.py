@@ -91,7 +91,7 @@ class _FakeHarness:
     ) -> bool:
         return await self._client.delete_with_lease(None, message_id, token, dlq_payload=dlq_payload)
 
-    async def delete_batch(self, pairs: list[tuple[int, uuid.UUID]]) -> set[int]:
+    async def delete_batch(self, pairs: list[tuple[int, uuid.UUID]]) -> set[tuple[int, uuid.UUID]]:
         return await self._client.delete_batch_with_lease(None, pairs)
 
     async def mark_pending(
@@ -188,7 +188,7 @@ class _RealHarness:
             writer = await raw.execution_options(isolation_level="AUTOCOMMIT")
             return await self._client.delete_with_lease(writer, message_id, token, dlq_payload=dlq_payload)
 
-    async def delete_batch(self, pairs: list[tuple[int, uuid.UUID]]) -> set[int]:
+    async def delete_batch(self, pairs: list[tuple[int, uuid.UUID]]) -> set[tuple[int, uuid.UUID]]:
         async with self._engine.connect() as raw:
             writer = await raw.execution_options(isolation_level="AUTOCOMMIT")
             return await self._client.delete_batch_with_lease(writer, pairs)
@@ -410,10 +410,24 @@ async def test_delete_batch_deletes_only_token_matches(contract: _Harness) -> No
     # a and b with correct tokens; c with a wrong token -> only a and b delete.
     wrong = uuid.uuid4()
     deleted = await contract.delete_batch([(a, tokens[a]), (b, tokens[b]), (c, wrong)])
-    assert deleted == {a, b}
+    assert deleted == {(a, tokens[a]), (b, tokens[b])}
     assert await contract.get_row(a) is None
     assert await contract.get_row(b) is None
     assert await contract.get_row(c) is not None
+
+
+async def test_delete_batch_returns_only_the_pair_holding_the_lease(contract: _Harness) -> None:
+    """INVARIANT: the batched delete reports deleted rows as ``(id, token)`` pairs, in both adapters.
+
+    One flush can carry a stale and a live copy of the same id. Returning bare ids would let the
+    caller ack the stale copy too, because its id matches a row that really was deleted.
+    """
+    a = await contract.seed(queue="q")
+    [leased] = await contract.fetch(["q"], limit=10, lease_ttl_seconds=60.0)
+    assert leased.acquired_token is not None
+    deleted = await contract.delete_batch([(a, uuid.uuid4()), (a, leased.acquired_token)])
+    assert deleted == {(a, leased.acquired_token)}
+    assert await contract.get_row(a) is None
 
 
 async def test_delete_batch_empty_is_noop(contract: _Harness) -> None:

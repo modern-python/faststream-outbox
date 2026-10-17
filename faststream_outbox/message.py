@@ -10,6 +10,7 @@ so a re-claimed row's lease holder is the only writer.
 
 import datetime as dt
 import logging
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -107,6 +108,8 @@ class OutboxInnerMessage:
     # ``allow_delivery``. ``None`` until intent is recorded. The three properties below
     # derive the legacy views the worker loop and metrics read.
     outcome: "Outcome | None" = field(default=None, init=False)
+    # Built right after the claim, so this bounds how long a buffered delete may wait.
+    claimed_at_monotonic: float = field(default_factory=time.monotonic, init=False, repr=False, compare=False)
 
     @property
     def state_set(self) -> bool:

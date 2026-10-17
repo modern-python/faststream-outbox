@@ -8,7 +8,7 @@ import time
 import typing
 import uuid
 import warnings
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -2479,7 +2479,7 @@ async def test_flush_buffer_db_error_task_dones_each_row_and_reraises() -> None:
     """
 
     class RaisingFake(FakeOutboxClient):
-        async def delete_batch_with_lease(self, *args: object, **kwargs: object) -> set[int]:  # noqa: ARG002
+        async def delete_batch_with_lease(self, *args: object, **kwargs: object) -> set[tuple[int, uuid.UUID]]:  # noqa: ARG002
             msg = "batch delete poisoned"
             raise RuntimeError(msg)
 
@@ -2506,8 +2506,12 @@ async def test_flush_buffer_emits_lease_lost_for_ids_absent_from_returning_set()
     events, recorder = _events_recorder()
 
     class PartialDeleteFake(FakeOutboxClient):
-        async def delete_batch_with_lease(self, conn: object, pairs: object) -> set[int]:  # noqa: ARG002
-            return {1}  # only row 1 still held its lease; row 2 was reclaimed and is absent
+        async def delete_batch_with_lease(
+            self,
+            conn: object,  # noqa: ARG002
+            pairs: Sequence[tuple[int, uuid.UUID]],
+        ) -> set[tuple[int, uuid.UUID]]:
+            return {pair for pair in pairs if pair[0] == 1}  # row 2 was reclaimed and is absent
 
     broker = _make_broker_with_recorder(recorder)
     test_broker = TestOutboxBroker(broker)
@@ -2530,6 +2534,36 @@ async def test_flush_buffer_emits_lease_lost_for_ids_absent_from_returning_set()
     assert len(lease_lost) == 1, "the reclaimed row emits exactly one lease_lost"
     assert lease_lost[0]["phase"] == "terminal"
     assert lease_lost[0]["row_id"] == 2
+
+
+async def test_flush_buffer_matches_deleted_rows_on_id_and_lease_token() -> None:
+    """INVARIANT: a buffered row counts as deleted only if its own lease token came back from the delete.
+
+    A row whose lease expired while it sat in the buffer can be reclaimed, handled again and buffered
+    a second time, so one flush may carry a stale and a live copy of the same id. Matching on the id
+    alone acks both and never reports the stale copy's ``lease_lost``.
+    """
+    events, recorder = _events_recorder()
+    broker = _make_broker_with_recorder(recorder)
+    test_broker = TestOutboxBroker(broker)
+    fake = test_broker.fake_client
+    async with test_broker:
+        payload, hdrs = _encode_payload("x")
+        test_broker.feed("orders", payload, headers=hdrs)
+        [live] = await fake.fetch(None, ["orders"], limit=1, lease_ttl_seconds=60.0)
+        stale = _make_msg(id=live.id, queue="orders", acquired_token=uuid.uuid4())
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        sub._inflight.put_nowait(stale)  # noqa: SLF001
+        sub._inflight.put_nowait(live)  # noqa: SLF001
+        buffer = [
+            _PendingFlush(row=stale, event="acked", tags={"copy": "stale"}),
+            _PendingFlush(row=live, event="acked", tags={"copy": "live"}),
+        ]
+        await sub._flush_buffer(buffer, writer_conn=None)  # noqa: SLF001
+
+    assert [t["copy"] for e, t in events if e == "acked"] == ["live"]
+    assert [e for e, _ in events].count("lease_lost") == 1
+    assert fake.rows == []
 
 
 async def test_worker_inner_flushes_partial_buffer_on_loop_exit() -> None:
@@ -2587,7 +2621,7 @@ async def test_worker_inner_exit_flush_is_timeout_bounded_when_delete_hangs() ->
             super().__init__()
             self.delete_completed = False
 
-        async def delete_batch_with_lease(self, *args: object, **kwargs: object) -> set[int]:  # noqa: ARG002
+        async def delete_batch_with_lease(self, *args: object, **kwargs: object) -> set[tuple[int, uuid.UUID]]:  # noqa: ARG002
             await asyncio.sleep(5.0)  # far past the patched exit-flush budget; must be cancelled
             self.delete_completed = True  # pragma: no cover  # unreachable: the sleep is cancelled first
             return set()  # pragma: no cover  # unreachable: the sleep is cancelled first
@@ -2641,7 +2675,7 @@ async def test_worker_inner_exit_flush_timeout_still_task_dones_the_buffer() -> 
     """
 
     class HangingDeleteFake(FakeOutboxClient):
-        async def delete_batch_with_lease(self, *args: object, **kwargs: object) -> set[int]:  # noqa: ARG002
+        async def delete_batch_with_lease(self, *args: object, **kwargs: object) -> set[tuple[int, uuid.UUID]]:  # noqa: ARG002
             await asyncio.sleep(5.0)  # far past the patched exit-flush budget; must be cancelled
             return set()  # pragma: no cover  # unreachable: the sleep is cancelled first
 

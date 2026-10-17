@@ -32,7 +32,6 @@ from sqlalchemy import (
     or_,
     select,
     text,
-    tuple_,
     update,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -106,7 +105,7 @@ class AbstractOutboxClient(abc.ABC):
         self,
         conn: "AsyncConnection | None",
         pairs: "Sequence[tuple[int, uuid.UUID]]",
-    ) -> set[int]: ...
+    ) -> set[tuple[int, uuid.UUID]]: ...
 
     @abc.abstractmethod
     async def mark_pending_with_lease(
@@ -366,14 +365,14 @@ class OutboxClient(AbstractOutboxClient):
         self,
         conn: "AsyncConnection | None",
         pairs: "Sequence[tuple[int, uuid.UUID]]",
-    ) -> set[int]:
+    ) -> set[tuple[int, uuid.UUID]]:
         """Delete every ``(id, acquired_token)`` pair that still holds its lease in one statement.
 
-        Returns the set of ids actually deleted. A row whose lease was reclaimed by a newer
-        fetch is absent from ``pairs``' matches and thus absent from the returned set -- the
-        caller treats it as ``lease_lost``. One round-trip on *conn* (production writer is
-        AUTOCOMMIT), atomic: all matching rows delete or the statement fails wholesale. Used
-        only by the batched terminal-flush path; the DLQ and per-row paths keep
+        Returns the ``(id, acquired_token)`` pairs actually deleted. A pair whose lease was
+        reclaimed by a newer fetch matches nothing and is absent from the returned set -- the
+        caller treats it as ``lease_lost``. The SQL text doesn't depend on ``len(pairs)``. One
+        round-trip on *conn* (production writer is AUTOCOMMIT), atomic: all matching rows delete
+        or the statement fails wholesale. Used only by the batched terminal-flush path; the DLQ and per-row paths keep
         :meth:`delete_with_lease`. See :meth:`fetch` for why *conn* is ``AsyncConnection | None``.
         """
         if conn is None:
@@ -382,13 +381,21 @@ class OutboxClient(AbstractOutboxClient):
         if not pairs:
             return set()
         t = self._table
+        wanted = (
+            func.unnest(
+                bindparam("ids", [pid for pid, _ in pairs], type_=ARRAY(t.c.id.type)),
+                bindparam("tokens", [ptok for _, ptok in pairs], type_=ARRAY(t.c.acquired_token.type)),
+            )
+            .table_valued("id", "token")
+            .render_derived(name="wanted")
+        )
         stmt = (
             delete(t)
-            .where(tuple_(t.c.id, t.c.acquired_token).in_([(pid, ptok) for pid, ptok in pairs]))
-            .returning(t.c.id)
+            .where(t.c.id == wanted.c.id, t.c.acquired_token == wanted.c.token)
+            .returning(t.c.id, t.c.acquired_token)
         )
         result = await conn.execute(stmt)
-        return {row_id for (row_id,) in result.all()}
+        return {(row_id, token) for row_id, token in result.all()}
 
     async def mark_pending_with_lease(
         self,
