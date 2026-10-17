@@ -47,11 +47,13 @@ async with session_factory() as session, session.begin():
 `publish_batch(*bodies, queue, session, ...)` does the same with a single
 round-trip for many rows.
 
-The producer also emits `SELECT pg_notify('outbox_<table>', queue)` on the
-caller's session right after the INSERT, except when the row is
-genuinely future-dated (a future `activate_in` / `activate_at`; a *past*
-`activate_at`, e.g. a recovered idempotency token, still notifies) or a
-`timer_id` conflict made the insert a no-op. NOTIFY is transactional, so listeners only see it
+A single `publish` also sends `pg_notify('outbox_<table>', queue)` in the
+INSERT's `RETURNING` clause, so the wakeup costs no extra round trip.
+`publish_batch` sends a separate `SELECT pg_notify(...)` after its INSERT.
+Neither notifies when the row is genuinely future-dated (a future
+`activate_in` / `activate_at`; a *past* `activate_at`, e.g. a recovered
+idempotency token, still notifies), and a `timer_id` conflict returns no
+row, so it sends no NOTIFY either. NOTIFY is transactional, so listeners only see it
 after the user's transaction commits, so atomicity with the row insert is
 automatic.
 

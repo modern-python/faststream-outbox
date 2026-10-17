@@ -612,21 +612,19 @@ async def test_broker_publish_rejects_non_async_session() -> None:
         await broker.publish(b"x", queue="orders", session=object())  # ty: ignore[invalid-argument-type]
 
 
-async def test_broker_publish_executes_insert_then_pg_notify_on_session() -> None:
+async def test_broker_publish_executes_one_insert_that_notifies() -> None:
     broker = _make_broker()
     session = _make_session_mock()
     await broker.publish({"order_id": 1}, queue="orders", session=session)
-    # Two execute calls: the INSERT, then SELECT pg_notify(...).
-    assert session.execute.await_count == 2
+    assert session.execute.await_count == 1
     insert_stmt, params = session.execute.await_args_list[0].args
-    assert "INSERT INTO" in str(insert_stmt)
+    compiled = insert_stmt.compile(dialect=postgresql.dialect())
+    assert "INSERT INTO" in str(compiled)
+    assert "pg_notify(%(param_1)s::VARCHAR, outbox.queue)" in str(compiled)
+    assert compiled.params["param_1"] == "outbox_outbox"
     assert params["queue"] == "orders"
     assert json.loads(params["payload"]) == {"order_id": 1}
     assert params["headers"]["content-type"] == "application/json"
-    notify_stmt, notify_params = session.execute.await_args_list[1].args
-    assert "pg_notify" in str(notify_stmt)
-    assert notify_params["channel"] == "outbox_outbox"
-    assert notify_params["payload"] == "orders"
 
 
 async def test_broker_publish_encodes_pydantic_model() -> None:
@@ -989,6 +987,7 @@ async def test_broker_publish_with_activate_in_skips_notify() -> None:
     insert_stmt = session.execute.await_args_list[0].args[0]
     assert "INSERT INTO" in str(insert_stmt)
     assert "next_attempt_at" in str(insert_stmt)
+    assert "pg_notify" not in str(insert_stmt)
 
 
 async def test_broker_publish_with_activate_at_skips_notify() -> None:
@@ -997,8 +996,9 @@ async def test_broker_publish_with_activate_at_skips_notify() -> None:
     fire = dt.datetime.now(tz=dt.UTC) + dt.timedelta(minutes=5)
     await broker.publish(b"x", queue="orders", session=session, activate_at=fire)
     assert session.execute.await_count == 1
-    _, params = session.execute.await_args_list[0].args
+    insert_stmt, params = session.execute.await_args_list[0].args
     assert params["next_attempt_at"] == fire
+    assert "pg_notify" not in str(insert_stmt)
 
 
 async def test_broker_publish_emits_notify_when_activate_at_is_past() -> None:
@@ -1008,19 +1008,18 @@ async def test_broker_publish_emits_notify_when_activate_at_is_past() -> None:
     session = _make_session_mock()
     past = dt.datetime.now(tz=dt.UTC) - dt.timedelta(seconds=5)
     await broker.publish(b"x", queue="orders", session=session, activate_at=past)
-    assert session.execute.await_count == 2
-    notify_stmt, notify_params = session.execute.await_args_list[1].args
-    assert "pg_notify" in str(notify_stmt)
-    assert notify_params["payload"] == "orders"
+    assert session.execute.await_count == 1
+    insert_stmt, _params = session.execute.await_args_list[0].args
+    assert "pg_notify" in str(insert_stmt)
 
 
 async def test_broker_publish_emits_notify_when_activate_in_is_zero() -> None:
     broker = _make_broker()
     session = _make_session_mock()
     await broker.publish(b"x", queue="orders", session=session, activate_in=dt.timedelta(0))
-    assert session.execute.await_count == 2
-    notify_stmt, _params = session.execute.await_args_list[1].args
-    assert "pg_notify" in str(notify_stmt)
+    assert session.execute.await_count == 1
+    insert_stmt, _params = session.execute.await_args_list[0].args
+    assert "pg_notify" in str(insert_stmt)
 
 
 async def test_broker_publish_rejects_naive_activate_at() -> None:
@@ -3669,7 +3668,7 @@ def _make_producer(recorder: typing.Any) -> OutboxProducer:
 async def test_producer_publish_emits_error_event_and_reraises_on_sql_failure() -> None:
     events, recorder = _events_recorder()
     producer = _make_producer(recorder)
-    session = AsyncMock(spec=AsyncSession)
+    session = _make_session_mock()
     session.execute.side_effect = RuntimeError("forced INSERT failure")
     cmd = OutboxPublishCommand({"x": 1}, queue="orders", session=session)
 

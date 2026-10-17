@@ -13,7 +13,7 @@ from weakref import WeakKeyDictionary
 
 from faststream._internal.endpoint.utils import ParserComposition
 from faststream._internal.parser import DefaultCodec
-from sqlalchemy import Float, Table, bindparam, func, insert, text
+from sqlalchemy import Float, Table, bindparam, func, insert, literal, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from faststream_outbox._scheduling import is_future_dated, resolve_next_attempt_client_side
@@ -33,8 +33,12 @@ if typing.TYPE_CHECKING:
     from sqlalchemy import Insert
 
 
-def _build_insert_stmts(table: Table) -> "dict[tuple[bool, bool], Insert]":
-    """Build the single-row INSERT once per ``(timer_id set, activate_in set)``; values arrive as parameters."""
+def _build_insert_stmts(table: Table, channel: str) -> "dict[tuple[bool, bool, bool], Insert]":
+    """Build the single-row INSERT once per ``(timer_id set, activate_in set, notify)``; values arrive as parameters.
+
+    The notify variants call ``pg_notify`` in ``RETURNING``, so the NOTIFY costs no extra round trip and
+    fires only when a row actually landed (an ``ON CONFLICT DO NOTHING`` skip returns no row).
+    """
     # Server-side compute keeps timing immune to worker/DB clock skew (mirrors
     # client.mark_pending_with_lease).
     activate_in = func.now() + func.make_interval(0, 0, 0, 0, 0, 0, bindparam("activate_in_seconds", type_=Float))
@@ -43,12 +47,13 @@ def _build_insert_stmts(table: Table) -> "dict[tuple[bool, bool], Insert]":
         index_elements=[table.c.queue, table.c.timer_id],
         index_where=table.c.timer_id.is_not(None),
     )
-    return {
-        (False, False): plain.returning(table.c.id),
-        (False, True): plain.values(next_attempt_at=activate_in).returning(table.c.id),
-        (True, False): timer.returning(table.c.id),
-        (True, True): timer.values(next_attempt_at=activate_in).returning(table.c.id),
-    }
+    notify = func.pg_notify(literal(channel), table.c.queue)
+    stmts: dict[tuple[bool, bool, bool], Insert] = {}
+    for has_timer, base in ((False, plain), (True, timer)):
+        for has_activate_in, stmt in ((False, base), (True, base.values(next_attempt_at=activate_in))):
+            stmts[has_timer, has_activate_in, False] = stmt.returning(table.c.id)
+            stmts[has_timer, has_activate_in, True] = stmt.returning(table.c.id, notify)
+    return stmts
 
 
 class OutboxProducer:
@@ -80,7 +85,7 @@ class OutboxProducer:
         self._parser = ParserComposition(parser, default.parse_message)
         self._decoder = ParserComposition(decoder, default.decode_message)
         self._metrics_recorder = metrics_recorder
-        self._insert_stmts = _build_insert_stmts(table)
+        self._insert_stmts = _build_insert_stmts(table, self._channel)
 
     def _emit_metric(self, event: str, tags: "Mapping[str, typing.Any]") -> None:
         # Delegate to the shared swallow-and-DEBUG-log helper so the recorder-isolation
@@ -143,16 +148,20 @@ class OutboxProducer:
             params["timer_id"] = cmd.timer_id
         # Skip NOTIFY only when the row is genuinely future-dated. A past activate_at
         # (e.g. a recovered idempotency token) is immediately eligible — fire NOTIFY.
-        now = utcnow()
-        is_future = is_future_dated(cmd.activate_in, cmd.activate_at, now)
-
-        stmt = self._insert_stmts[cmd.timer_id is not None, cmd.activate_in is not None]
+        # Future-dated rows skip NOTIFY: listeners can't act before the gate opens, and
+        # polling fires them at the next tick.
+        emitted = self._notified_queues(cmd.session)
+        notify = not is_future_dated(cmd.activate_in, cmd.activate_at, utcnow()) and (
+            emitted is None or cmd.queue not in emitted
+        )
+        stmt = self._insert_stmts[cmd.timer_id is not None, cmd.activate_in is not None, notify]
         result = await cmd.session.execute(stmt, params)
         row_id: int | None = result.scalar()
-        # Skip NOTIFY for future-dated rows (listeners can't act before the gate
-        # opens — polling fires them at next tick) and on conflict (no row landed).
-        if row_id is not None and not is_future:
-            await self._notify(cmd.session, cmd.queue)
+        if row_id is not None and notify:
+            # Re-read: under autobegin the transaction only exists once the INSERT has run.
+            emitted = self._notified_queues(cmd.session)
+            if emitted is not None:
+                emitted.add(cmd.queue)
         return row_id
 
     async def publish_batch(self, cmd: OutboxPublishCommand) -> None:
@@ -206,6 +215,14 @@ class OutboxProducer:
     async def request(self, cmd: OutboxPublishCommand) -> typing.NoReturn:
         raise NotImplementedError(_REQUEST_UNSUPPORTED_MSG)
 
+    def _notified_queues(self, session: typing.Any) -> set[str] | None:
+        """Return the queues already notified in *session*'s innermost transaction, or None outside one."""
+        sync_session = session.sync_session
+        txn = sync_session.get_nested_transaction() or sync_session.get_transaction()
+        if txn is None:
+            return None
+        return self._notified.setdefault(txn, set())
+
     async def _notify(self, session: typing.Any, queue: str) -> None:
         # ``pg_notify(:channel, :payload)`` -- parameterized so channel and payload
         # bind cleanly (raw NOTIFY accepts only literals -- injection-prone). Runs on
@@ -224,10 +241,8 @@ class OutboxProducer:
         # defeat the memo. The Session holds the sync transaction strongly for its lifetime,
         # so the key survives across publishes whether the caller uses `session.begin()` or
         # autobegin. No active transaction -> emit unconditionally.
-        sync_session = session.sync_session
-        txn = sync_session.get_nested_transaction() or sync_session.get_transaction()
-        if txn is not None:
-            emitted = self._notified.setdefault(txn, set())
+        emitted = self._notified_queues(session)
+        if emitted is not None:
             if queue in emitted:
                 return
             emitted.add(queue)
