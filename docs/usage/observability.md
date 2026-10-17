@@ -158,9 +158,9 @@ publish-scope metrics do not fire in test mode. Middleware
 consume-scope metrics still fire, because handlers are still consumed
 through the normal middleware stack.
 
-The recorder-seam `published` event provides synthetic publish-side
-coverage in test mode via `FakeOutboxProducer`. The synthetic events use
-`duration_seconds=0.0` since the in-memory client has no real write to
-time.
+The recorder-seam `published` event still fires in test mode, with the
+same tags as in production: `status="error"` and `exception_type` when
+encoding fails, and a measured `duration_seconds` for the in-memory
+insert.
 
 `TestKafkaBroker` and `TestRabbitBroker` behave the same way, for the same reason.

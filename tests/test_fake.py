@@ -1282,6 +1282,86 @@ def test_fake_client_feed_rejects_naive_next_attempt_at() -> None:
         fake.feed(queue="q", payload=b"x", next_attempt_at=dt.datetime.now())  # noqa: DTZ005  # naive on purpose
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "error"),
+    [
+        ({"queue": "q" * 256}, "queue"),
+        ({"queue": "q", "timer_id": "t" * 256}, "timer_id"),
+        ({"queue": "q", "headers": {"k": object()}}, "headers"),
+    ],
+)
+def test_fake_client_feed_rejects_rows_postgres_would_reject(kwargs: dict[str, typing.Any], error: str) -> None:
+    fake = FakeOutboxClient()
+    with pytest.raises(ValueError, match=error):
+        fake.feed(payload=b"x", **kwargs)
+    assert fake.rows == []
+
+
+@pytest.mark.parametrize("batch", [False, True])
+async def test_fake_publish_emits_published_error_on_encode_failure(batch: bool) -> None:
+    events: list[tuple[str, dict[str, typing.Any]]] = []
+
+    def recorder(event: str, tags: Mapping[str, typing.Any]) -> None:
+        events.append((event, dict(tags)))
+
+    broker = OutboxBroker(outbox_table=make_outbox_table(MetaData()), metrics_recorder=recorder)
+    unencodable = object()
+    async with TestOutboxBroker(broker):
+        publish = (
+            broker.publish_batch("ok", unencodable, queue="orders")  # ty: ignore[missing-argument]
+            if batch
+            else broker.publish(unencodable, queue="orders")  # ty: ignore[missing-argument]
+        )
+        with pytest.raises(Exception):  # noqa: B017, PT011  # whatever the serializer raises, the metric must record it
+            await publish
+
+    published = [tags for event, tags in events if event == "published"]
+    assert len(published) == 1
+    assert published[0]["status"] == "error"
+    assert published[0]["count"] == 0
+    assert "exception_type" in published[0]
+
+
+async def test_fake_publish_reports_a_measured_duration() -> None:
+    durations: list[float] = []
+
+    def recorder(event: str, tags: Mapping[str, typing.Any]) -> None:
+        if event == "published":
+            durations.append(tags["duration_seconds"])
+
+    broker = OutboxBroker(outbox_table=make_outbox_table(MetaData()), metrics_recorder=recorder)
+    async with TestOutboxBroker(broker):
+        await broker.publish("one", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish_batch("a", "b", queue="orders")  # ty: ignore[missing-argument]
+
+    assert len(durations) == 2
+    assert all(d > 0.0 for d in durations)
+
+
+async def test_test_broker_fake_client_matches_the_broker_dlq_config() -> None:
+    without_dlq = OutboxBroker(outbox_table=make_outbox_table(MetaData()))
+    with_dlq = OutboxBroker(
+        outbox_table=make_outbox_table(MetaData()),
+        dlq_table=make_dlq_table(MetaData()),
+    )
+    token = uuid.uuid4()
+    payload = {"failure_reason": "boom", "last_exception": None}
+
+    no_dlq_client = TestOutboxBroker(without_dlq).fake_client
+    rid = no_dlq_client.feed(queue="q", payload=b"x")
+    assert rid is not None
+    no_dlq_client.rows[0].acquired_token = token
+    with pytest.raises(RuntimeError, match="no dlq_table"):
+        await no_dlq_client.delete_with_lease(None, rid, token, dlq_payload=payload)
+
+    dlq_client = TestOutboxBroker(with_dlq).fake_client
+    rid = dlq_client.feed(queue="q", payload=b"x")
+    assert rid is not None
+    dlq_client.rows[0].acquired_token = token
+    assert await dlq_client.delete_with_lease(None, rid, token, dlq_payload=payload)
+    assert len(dlq_client.dlq_rows) == 1
+
+
 async def test_fake_headers_not_shared_by_reference() -> None:
     """P32: the fake must copy headers at its boundaries so handler/caller mutation can't corrupt rows."""
     fake = FakeOutboxClient()

@@ -12,6 +12,8 @@ or scheduled delivery actually waiting. ``feed()`` simulates a row insert.
 """
 
 import datetime as dt
+import json
+import time
 import typing
 import uuid
 from contextlib import contextmanager
@@ -23,11 +25,11 @@ from faststream._internal.testing.broker import TestBroker, patch_broker_calls
 from faststream_outbox._scheduling import resolve_next_attempt_client_side, validate_activate_args
 from faststream_outbox._time import utcnow
 from faststream_outbox.broker import OutboxBroker
-from faststream_outbox.client import AbstractOutboxClient
+from faststream_outbox.client import _NO_DLQ_TABLE_MSG, AbstractOutboxClient
 from faststream_outbox.envelope import _encode_payload
 from faststream_outbox.message import OutboxInnerMessage
 from faststream_outbox.metrics import _safe_emit
-from faststream_outbox.response import _REQUEST_UNSUPPORTED_MSG, OutboxPublishCommand
+from faststream_outbox.response import _MAX_QUEUE_LENGTH, _REQUEST_UNSUPPORTED_MSG, OutboxPublishCommand
 from faststream_outbox.schema import _DLQ_INJECTED_COLUMNS, _DLQ_PROJECTION
 
 
@@ -82,10 +84,30 @@ def _lease_token_matches(row_token: "uuid.UUID | None", claim_token: "uuid.UUID 
     return claim_token is not None and row_token == claim_token
 
 
-class FakeOutboxClient(AbstractOutboxClient):
-    """In-memory ``OutboxClient`` substitute. Same surface, list-of-rows storage."""
+def _validate_like_postgres(*, queue: str, timer_id: str | None, headers: dict[str, str] | None) -> None:
+    """Reject what the INSERT would fail on: over-long ``String(255)`` values and headers JSONB can't hold."""
+    if len(queue) > _MAX_QUEUE_LENGTH:
+        msg = f"queue must be at most {_MAX_QUEUE_LENGTH} characters (got {len(queue)})"
+        raise ValueError(msg)
+    if timer_id is not None and len(timer_id) > _MAX_QUEUE_LENGTH:
+        msg = f"timer_id must be at most {_MAX_QUEUE_LENGTH} characters (got {len(timer_id)})"
+        raise ValueError(msg)
+    try:
+        json.dumps(headers)
+    except (TypeError, ValueError) as exc:
+        msg = f"headers must be JSON-serializable: {exc}"
+        raise ValueError(msg) from exc
 
-    def __init__(self) -> None:
+
+class FakeOutboxClient(AbstractOutboxClient):
+    """In-memory ``OutboxClient`` substitute. Same surface, list-of-rows storage.
+
+    ``dlq_enabled=False`` mirrors an ``OutboxClient`` built without a ``dlq_table``: a
+    ``dlq_payload`` is refused instead of producing an audit row.
+    """
+
+    def __init__(self, *, dlq_enabled: bool = True) -> None:
+        self._dlq_enabled = dlq_enabled
         self._rows: list[_FakeRow] = []
         self._next_id = 1
         # Populated when ``delete_with_lease`` receives a ``dlq_payload``. Mirrors
@@ -108,6 +130,7 @@ class FakeOutboxClient(AbstractOutboxClient):
         if next_attempt_at is not None and next_attempt_at.tzinfo is None:
             msg = "feed() requires next_attempt_at to be timezone-aware"
             raise ValueError(msg)
+        _validate_like_postgres(queue=queue, timer_id=timer_id, headers=headers)
         # Mirror the real client's partial-unique-on-(queue, timer_id) behavior:
         # re-feeding a timer that already exists is a no-op.
         if timer_id is not None and any(r.queue == queue and r.timer_id == timer_id for r in self._rows):
@@ -185,6 +208,8 @@ class FakeOutboxClient(AbstractOutboxClient):
         for i, row in enumerate(self._rows):
             if row.id == message_id and _lease_token_matches(row.acquired_token, acquired_token):
                 if dlq_payload is not None:
+                    if not self._dlq_enabled:
+                        raise RuntimeError(_NO_DLQ_TABLE_MSG)
                     # Mirror the real CTE side-effect: DLQ row materializes in the same
                     # call as the DELETE, before the row is removed. Built from the shared
                     # _DLQ_PROJECTION so the fake can't drift from the real CTE; failed_at
@@ -336,19 +361,26 @@ async def _sync_dispatch(fake_client: FakeOutboxClient, broker: OutboxBroker, qu
     await subscriber.dispatch_one(_to_inner(fake_row))
 
 
-def _emit_published(broker: OutboxBroker, queue: str, *, count: int, size_bytes: int) -> None:
-    """Emit the producer-side ``published`` metric on the broker's recorder (test-broker parity)."""
-    _safe_emit(
-        broker.config.broker_config.metrics_recorder,
-        "published",
-        {
-            "queue": queue,
-            "status": "success",
-            "count": count,
-            "size_bytes": size_bytes,
-            "duration_seconds": 0.0,
-        },
-    )
+def _emit_published(
+    broker: OutboxBroker,
+    queue: str,
+    *,
+    count: int,
+    size_bytes: int,
+    start_perf: float,
+    exc: Exception | None = None,
+) -> None:
+    """Emit the producer-side ``published`` metric with the same tags as ``OutboxProducer``."""
+    tags: dict[str, typing.Any] = {
+        "queue": queue,
+        "status": "success" if exc is None else "error",
+        "count": count,
+        "size_bytes": size_bytes,
+        "duration_seconds": time.perf_counter() - start_perf,
+    }
+    if exc is not None:
+        tags["exception_type"] = type(exc).__name__
+    _safe_emit(broker.config.broker_config.metrics_recorder, "published", tags)
 
 
 def _notify_subscriber(broker: OutboxBroker, queue: str) -> None:
@@ -376,9 +408,18 @@ async def _fake_publish_one(
     run_loops: bool,
 ) -> int | None:
     """Shared single-row insert for ``FakeOutboxProducer.publish`` and the ``broker.publish`` patch (P29)."""
-    payload, hdrs = _encode_payload(body, headers=headers, correlation_id=correlation_id, serializer=serializer)
-    row_id = fake_client.feed(queue=queue, payload=payload, headers=hdrs, next_attempt_at=next_at, timer_id=timer_id)
-    _emit_published(broker, queue, count=0 if row_id is None else 1, size_bytes=len(payload))
+    start_perf = time.perf_counter()
+    size_bytes = 0
+    try:
+        payload, hdrs = _encode_payload(body, headers=headers, correlation_id=correlation_id, serializer=serializer)
+        size_bytes = len(payload)
+        row_id = fake_client.feed(
+            queue=queue, payload=payload, headers=hdrs, next_attempt_at=next_at, timer_id=timer_id
+        )
+    except Exception as exc:
+        _emit_published(broker, queue, count=0, size_bytes=size_bytes, start_perf=start_perf, exc=exc)
+        raise
+    _emit_published(broker, queue, count=0 if row_id is None else 1, size_bytes=size_bytes, start_perf=start_perf)
     if run_loops:
         _notify_subscriber(broker, queue)  # P30: the loops own dispatch; just wake them
     elif row_id is not None:
@@ -405,15 +446,24 @@ async def _fake_publish_many(
     (atomic batch INSERT -> published -> subscriber fetch), so a handler never observes a
     half-inserted batch and the event order isn't inverted.
     """
+    start_perf = time.perf_counter()
     total_size = 0
+    encoded: list[tuple[bytes, dict[str, str] | None]] = []
+    try:
+        for body in bodies:
+            payload, hdrs = _encode_payload(body, headers=headers, serializer=serializer)
+            total_size += len(payload)
+            _validate_like_postgres(queue=queue, timer_id=None, headers=hdrs)
+            encoded.append((payload, hdrs))
+    except Exception as exc:
+        _emit_published(broker, queue, count=0, size_bytes=total_size, start_perf=start_perf, exc=exc)
+        raise
     landed_ids: list[int] = []
-    for body in bodies:
-        payload, hdrs = _encode_payload(body, headers=headers, serializer=serializer)
-        total_size += len(payload)
+    for payload, hdrs in encoded:
         row_id = fake_client.feed(queue=queue, payload=payload, headers=hdrs, next_attempt_at=next_at)
         if row_id is not None:
             landed_ids.append(row_id)
-    _emit_published(broker, queue, count=len(landed_ids), size_bytes=total_size)
+    _emit_published(broker, queue, count=len(landed_ids), size_bytes=total_size, start_perf=start_perf)
     if run_loops:
         _notify_subscriber(broker, queue)
     else:
@@ -583,7 +633,7 @@ class TestOutboxBroker(TestBroker[OutboxBroker, OutboxBroker], broker=OutboxBrok
 
     def __init__(self, broker: OutboxBroker, *, run_loops: bool = False, **kwargs: typing.Any) -> None:
         super().__init__(broker, **kwargs)
-        self.fake_client = FakeOutboxClient()
+        self.fake_client = FakeOutboxClient(dlq_enabled=broker.config.broker_config.dlq_table is not None)
         self.fake_producer = None  # set when the producer slot is swapped (see _patch_producer)
         self.run_loops = run_loops
         self._outbox_broker = broker  # for feed()'s P30 wakeup

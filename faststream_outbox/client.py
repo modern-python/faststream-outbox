@@ -141,6 +141,11 @@ class AbstractOutboxClient(abc.ABC):
     async def ping(self) -> bool: ...
 
 
+_NO_DLQ_TABLE_MSG = (
+    "delete_with_lease received a dlq_payload but the client has no dlq_table; refusing to drop the audit row silently"
+)
+
+
 def _build_fetch_stmt(outbox: "Table") -> "Update":
     """Build the claim statement once; queues, limit, lease TTL and the new token are bind parameters.
 
@@ -261,7 +266,8 @@ class OutboxClient(AbstractOutboxClient):
         async with conn.begin():
             result = await conn.execute(self._fetch_stmt, params)
             rows = result.mappings().all()
-        return [_row_to_message(dict(row)) for row in rows]
+        # UPDATE ... RETURNING has no ORDER BY, so the claimed rows come back in arbitrary order.
+        return sorted((_row_to_message(dict(row)) for row in rows), key=lambda m: (m.next_attempt_at, m.id))
 
     async def delete_with_lease(
         self,
@@ -312,10 +318,7 @@ class OutboxClient(AbstractOutboxClient):
                 # P10: a dlq_payload with no dlq_table would silently degrade to a plain
                 # DELETE — losing the audit row. If the broker/client wiring ever desyncs,
                 # fail loudly rather than drop forensics.
-                msg = (
-                    "delete_with_lease received a dlq_payload but the client has no dlq_table; "
-                    "refusing to drop the audit row silently"
-                )
+                msg = _NO_DLQ_TABLE_MSG
                 raise RuntimeError(msg)
             params = {
                 "message_id": message_id,

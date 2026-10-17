@@ -25,10 +25,11 @@ DB-vs-worker clock skew, so the real client's server-side ``make_interval`` cloc
 authority stays a documented invariant (AGENTS.md), not an assertion here.
 """
 
+import contextlib
 import datetime as dt
 import os
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 
 import pytest
 from sqlalchemy import MetaData, Table, insert, select, text
@@ -51,8 +52,8 @@ class _FakeHarness:
 
     kind = "fake"
 
-    def __init__(self) -> None:
-        self._client = FakeOutboxClient()
+    def __init__(self, *, with_dlq: bool = True) -> None:
+        self._client = FakeOutboxClient(dlq_enabled=with_dlq)
 
     async def seed(
         self,
@@ -139,11 +140,11 @@ class _RealHarness:
 
     kind = "real"
 
-    def __init__(self, engine: AsyncEngine, table: Table, dlq: Table) -> None:
+    def __init__(self, engine: AsyncEngine, table: Table, dlq: Table, *, with_dlq: bool = True) -> None:
         self._engine = engine
         self._table = table
         self._dlq = dlq
-        self._client = OutboxClient(engine, table, dlq_table=dlq)
+        self._client = OutboxClient(engine, table, dlq_table=dlq if with_dlq else None)
 
     async def seed(
         self,
@@ -237,11 +238,10 @@ class _RealHarness:
 _Harness = _FakeHarness | _RealHarness
 
 
-@pytest.fixture(params=["fake", "real"])
-async def contract(request: pytest.FixtureRequest) -> AsyncIterator[_Harness]:
-    """Yield a harness over each adapter. The ``real`` param auto-skips without Postgres."""
-    if request.param == "fake":
-        yield _FakeHarness()
+@contextlib.asynccontextmanager
+async def _harness(kind: str, *, with_dlq: bool) -> AsyncGenerator[_Harness]:
+    if kind == "fake":
+        yield _FakeHarness(with_dlq=with_dlq)
         return
     engine = create_async_engine(PG_DSN, future=True)
     try:
@@ -257,11 +257,25 @@ async def contract(request: pytest.FixtureRequest) -> AsyncIterator[_Harness]:
     async with engine.begin() as conn:
         await conn.run_sync(metadata.create_all)
     try:
-        yield _RealHarness(engine, table, dlq)
+        yield _RealHarness(engine, table, dlq, with_dlq=with_dlq)
     finally:
         async with engine.begin() as conn:
             await conn.run_sync(metadata.drop_all)
         await engine.dispose()
+
+
+@pytest.fixture(params=["fake", "real"])
+async def contract(request: pytest.FixtureRequest) -> AsyncIterator[_Harness]:
+    """Yield a harness over each adapter. The ``real`` param auto-skips without Postgres."""
+    async with _harness(request.param, with_dlq=True) as harness:
+        yield harness
+
+
+@pytest.fixture(params=["fake", "real"])
+async def contract_without_dlq(request: pytest.FixtureRequest) -> AsyncIterator[_Harness]:
+    """Like ``contract``, but the client has no DLQ table."""
+    async with _harness(request.param, with_dlq=False) as harness:
+        yield harness
 
 
 # --- fetch -----------------------------------------------------------------
@@ -304,10 +318,20 @@ async def test_fetch_skips_fresh_lease(contract: _Harness) -> None:
     assert msgs == []
 
 
+async def test_fetch_returns_rows_oldest_first(contract: _Harness) -> None:
+    rids = [await contract.seed(queue="orders", next_attempt_offset=-float(i)) for i in range(1, 21)]
+    rids += [await contract.seed(queue="audit", next_attempt_offset=-float(i) - 0.5) for i in range(1, 21)]
+    rids.append(
+        await contract.seed(
+            queue="orders", next_attempt_offset=-0.25, leased_token=uuid.uuid4(), acquired_age=120.0, deliveries_count=1
+        )
+    )
+    msgs = await contract.fetch(["orders", "audit"], limit=41, lease_ttl_seconds=60.0)
+    assert sorted(m.id for m in msgs) == sorted(rids)
+    assert msgs == sorted(msgs, key=lambda m: (m.next_attempt_at, m.id))
+
+
 async def test_fetch_selects_oldest_under_limit(contract: _Harness) -> None:
-    # FIFO *selection* under contention is the contract; within-batch *return order*
-    # is unspecified for the real client (F2-09 — the outer UPDATE…RETURNING is
-    # unordered), so assert on the chosen set, not its order.
     rid_a = await contract.seed(queue="orders", next_attempt_offset=-10.0)
     rid_b = await contract.seed(queue="orders", next_attempt_offset=-20.0)
     rid_c = await contract.seed(queue="orders", next_attempt_offset=-30.0)
@@ -384,6 +408,15 @@ async def test_delete_noop_on_unleased_row(contract: _Harness) -> None:
     rid = await contract.seed()
     assert await contract.delete(rid, uuid.uuid4()) is False
     assert await contract.get_row(rid) is not None
+
+
+async def test_delete_with_dlq_payload_but_no_dlq_table_refuses(contract_without_dlq: _Harness) -> None:
+    token = uuid.uuid4()
+    rid = await contract_without_dlq.seed(queue="orders", leased_token=token, acquired_age=1.0, deliveries_count=1)
+    with pytest.raises(RuntimeError, match="no dlq_table"):
+        await contract_without_dlq.delete(rid, token, dlq_payload={"failure_reason": "boom", "last_exception": None})
+    assert await contract_without_dlq.get_row(rid) is not None
+    assert await contract_without_dlq.dlq_rows() == []
 
 
 async def test_delete_with_dlq_materializes_audit_row(contract: _Harness) -> None:
