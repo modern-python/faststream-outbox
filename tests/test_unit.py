@@ -53,8 +53,8 @@ from faststream_outbox.publisher.config import OutboxPublisherSpecificationConfi
 from faststream_outbox.publisher.fake import OutboxFakePublisher
 from faststream_outbox.publisher.producer import OutboxProducer
 from faststream_outbox.publisher.specification import OutboxPublisherSpecification
-from faststream_outbox.registrator import _default_retry_strategy
 from faststream_outbox.response import OutboxPublishCommand
+from faststream_outbox.retry import _default_retry_strategy
 from faststream_outbox.router import OutboxRoute
 from faststream_outbox.schema_validation import (
     _AUTOGEN_BLIND_HINT,
@@ -3289,7 +3289,7 @@ def test_subscriber_warns_on_nack_with_no_retry() -> None:
 
 def test_subscriber_warns_on_max_deliveries_with_no_retry() -> None:
     broker = _make_broker()
-    with pytest.warns(UserWarning, match="max_deliveries is set but no retry_strategy"):
+    with pytest.warns(UserWarning, match=r"max_deliveries is set but retry_strategy=NoRetry\(\)"):
         _register_subscriber(broker, max_deliveries=5, retry_strategy=NoRetry())
 
 
@@ -3315,6 +3315,73 @@ def test_subscriber_reject_on_error_with_no_retry_is_silent() -> None:
         # REJECT_ON_ERROR + NoRetry: the same effective behavior. We only warn about
         # REJECT + an *active* retry strategy, not REJECT + NoRetry.
         _register_subscriber(broker, ack_policy=AckPolicy.REJECT_ON_ERROR, retry_strategy=NoRetry())
+
+
+@pytest.mark.parametrize("max_deliveries", [0, -1])
+def test_subscriber_rejects_max_deliveries_below_one(max_deliveries: int) -> None:
+    """INVARIANT: ``max_deliveries`` below 1 is refused at registration.
+
+    Every row has ``deliveries_count >= 1`` by the time it is checked, so a cap of 0 or less marks
+    every row over the limit and deletes the queue (or sends it to the DLQ) without the handler ever
+    running. Someone reading 0 as "unlimited" would lose the whole queue.
+    """
+    with pytest.raises(ValueError, match="max_deliveries must be >= 1"):
+        _register_subscriber(_make_broker(), max_deliveries=max_deliveries)
+
+
+@pytest.mark.parametrize("field", ["min_fetch_interval", "max_fetch_interval", "lease_ttl_seconds"])
+@pytest.mark.parametrize("value", [math.nan, math.inf])
+def test_subscriber_rejects_non_finite_intervals(field: str, value: float) -> None:
+    with pytest.raises(ValueError, match=f"{field} must be a finite number"):
+        _register_subscriber(_make_broker(), **{field: value})
+
+
+@pytest.mark.parametrize("field", ["max_workers", "fetch_batch_size", "terminal_flush_batch_size", "max_deliveries"])
+def test_subscriber_rejects_bool_for_integer_settings(field: str) -> None:
+    with pytest.raises(TypeError, match=f"{field} must be an int"):
+        _register_subscriber(_make_broker(), **{field: True})
+
+
+@pytest.mark.parametrize(
+    ("queues", "match"),
+    [
+        ("", "queue must be a non-empty string"),
+        ("q" * 256, "queue must be at most 255 characters"),
+        (["orders", "orders"], "duplicate queue"),
+    ],
+)
+def test_subscriber_rejects_queues_that_can_never_match(queues: str | list[str], match: str) -> None:
+    with pytest.raises(ValueError, match=match):
+        _make_broker().subscriber(queues)
+
+
+def test_subscriber_rejects_a_non_string_queue() -> None:
+    with pytest.raises(TypeError, match="queue must be a str"):
+        _make_broker().subscriber([1])  # ty: ignore[invalid-argument-type]
+
+
+def test_include_router_rejects_a_prefix() -> None:
+    broker = _make_broker()
+    router = OutboxRouter()
+
+    @router.subscriber("orders")
+    async def handle(body: dict) -> None: ...
+
+    with pytest.raises(ValueError, match="prefix"):
+        broker.include_router(router, prefix="billing.")
+
+
+def test_subscriber_reject_on_error_without_retry_strategy_is_silent() -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        _register_subscriber(_make_broker(), ack_policy=AckPolicy.REJECT_ON_ERROR)
+
+
+def test_subscriber_max_deliveries_with_the_default_retry_strategy_is_silent() -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        sub = _make_broker().subscriber("orders", max_deliveries=5)
+    assert isinstance(sub._config.retry_strategy, ExponentialRetry)  # noqa: SLF001
 
 
 # --- MetricsRecorder seam ------------------------------------------------------------

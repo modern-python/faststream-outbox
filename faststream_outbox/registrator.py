@@ -10,32 +10,15 @@ from typing_extensions import override
 from faststream_outbox.message import OutboxInnerMessage
 from faststream_outbox.publisher.factory import create_publisher
 from faststream_outbox.publisher.usecase import OutboxPublisher
-from faststream_outbox.retry import ExponentialRetry
 from faststream_outbox.subscriber.factory import create_subscriber
 
 
 if TYPE_CHECKING:
     from fast_depends.dependencies import Dependant
+    from faststream._internal.types import BrokerMiddleware
 
     from faststream_outbox.retry import RetryStrategyProto
     from faststream_outbox.subscriber.usecase import OutboxSubscriber
-
-
-def _default_retry_strategy() -> "RetryStrategyProto":
-    """Fallback retry policy when the user passes nothing.
-
-    An outbox is a reliability primitive; defaulting to "delete on first error" turns
-    every transient handler failure into silent data loss. Defaulting to a bounded
-    exponential retry keeps the contract intuitive — users who actually want
-    delete-on-error opt in explicitly with ``NoRetry()``.
-    """
-    return ExponentialRetry(
-        initial_delay_seconds=1.0,
-        multiplier=2.0,
-        max_delay_seconds=300.0,
-        max_attempts=10,
-        jitter_factor=0.2,
-    )
 
 
 class OutboxRegistrator(Registrator[OutboxInnerMessage, "OutboxBrokerConfig"]):  # ty: ignore[unresolved-reference]
@@ -65,11 +48,10 @@ class OutboxRegistrator(Registrator[OutboxInnerMessage, "OutboxBrokerConfig"]): 
         if not queue_list:
             msg = "subscriber() requires at least one queue name"
             raise ValueError(msg)
-        resolved_retry_strategy = retry_strategy if retry_strategy is not None else _default_retry_strategy()
         subscriber = create_subscriber(
             queues=queue_list,
             max_workers=max_workers,
-            retry_strategy=resolved_retry_strategy,
+            retry_strategy=retry_strategy,
             fetch_batch_size=fetch_batch_size,
             min_fetch_interval=min_fetch_interval,
             max_fetch_interval=max_fetch_interval,
@@ -97,6 +79,30 @@ class OutboxRegistrator(Registrator[OutboxInnerMessage, "OutboxBrokerConfig"]): 
             parser_=parser or self._parser,
             decoder_=decoder or self._decoder,
             dependencies_=dependencies,
+        )
+
+    @override
+    def include_router(
+        self,
+        router: "Registrator[OutboxInnerMessage, Any]",
+        *,
+        prefix: str = "",
+        dependencies: Sequence["Dependant"] = (),
+        middlewares: Sequence["BrokerMiddleware[OutboxInnerMessage]"] = (),
+        include_in_schema: bool | None = None,
+    ) -> None:
+        if prefix:
+            msg = (
+                f"include_router(prefix={prefix!r}) is not supported: outbox queues are matched by their "
+                "literal name, so a prefixed subscriber would never receive a row. Put the namespace "
+                "in the queue names instead."
+            )
+            raise ValueError(msg)
+        super().include_router(
+            router,
+            dependencies=dependencies,
+            middlewares=middlewares,
+            include_in_schema=include_in_schema,
         )
 
     @override
