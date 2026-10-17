@@ -117,11 +117,11 @@ See [How it works](https://faststream-outbox.modern-python.org/introduction/how-
 
 The architecture of this package is heavily informed by Arseniy Popov's [PR #2704](https://github.com/ag2ai/faststream/pull/2704) (`feat: add sqla broker`) on upstream FastStream. The FastStream broker/registrator/subscriber wiring, the `SELECT … FOR UPDATE SKIP LOCKED` fetch-and-claim CTE, the retry strategy hierarchy, and the in-transaction publish contract all originate from there. This package is a Postgres-only reimplementation. It differs in storage model (lease tokens in place of an explicit state column, and an opt-in archive table), loop structure (two loops where the PR has four), and wake-up mechanism (`LISTEN/NOTIFY`), and it adds timer mechanics. Credit for the original design belongs to Arseniy.
 
-## 📚 [Documentation](https://faststream-outbox.modern-python.org)
+## Links
 
-## 📦 [PyPI](https://pypi.org/project/faststream-outbox)
-
-## 📝 [License](https://github.com/modern-python/faststream-outbox/blob/main/LICENSE)
+- [Documentation](https://faststream-outbox.modern-python.org)
+- [PyPI](https://pypi.org/project/faststream-outbox)
+- [License](https://github.com/modern-python/faststream-outbox/blob/main/LICENSE)
 
 ## Part of `modern-python`
 
