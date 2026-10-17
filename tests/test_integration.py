@@ -115,7 +115,7 @@ async def test_validate_schema_reports_the_pre_0_15_pending_index_shape(
             text(f'CREATE INDEX "{idx}" ON {outbox_table.name} (queue, next_attempt_at) WHERE acquired_token IS NULL'),
         )
     client = OutboxClient(pg_engine, outbox_table)
-    with pytest.raises(RuntimeError, match="pending_idx"):
+    with pytest.raises(RuntimeError, match=r"pending_idx.*operations/alembic/#upgrading-to-015"):
         await client.validate_schema()
 
 

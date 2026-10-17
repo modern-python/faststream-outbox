@@ -230,6 +230,9 @@ _AUTOGEN_BLIND_HINT = (
 )
 
 
+_PENDING_IDX_UPGRADE_URL = "https://faststream-outbox.modern-python.org/operations/alembic/#upgrading-to-015"
+
+
 def _compose_schema_mismatch_message(errors: list[str], *, has_blind_drift: bool) -> str:
     """Build the validate_schema RuntimeError text; append the remediation pointer for Alembic-blind drift."""
     msg = _SCHEMA_MISMATCH_PREFIX + "; ".join(errors)
@@ -377,5 +380,8 @@ def _drift_entry_to_error(entry: "tuple[typing.Any, ...]", table_name: str) -> s
     if op == "add_index":
         idx = entry[1]
         cols = [c.name for c in idx.columns]
-        return f"table '{table_name}' missing index over {cols} (name={idx.name!r}, unique={bool(idx.unique)})"
+        error = f"table '{table_name}' missing index over {cols} (name={idx.name!r}, unique={bool(idx.unique)})"
+        if idx.name.endswith(_PENDING_IDX_SUFFIX):
+            error += f"; a table created before 0.15 needs this index rebuilt: {_PENDING_IDX_UPGRADE_URL}"
+        return error
     return None
