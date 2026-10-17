@@ -279,6 +279,19 @@ async def test_otel_e2e_handler_raises_with_noretry_stamps_terminal_reason_attr(
     assert attrs["messaging.outbox.status"] == "nacked"
 
 
+def test_otel_without_bus_metrics_records_only_outbox_instruments() -> None:
+    reader = InMemoryMetricReader()
+    rec = OpenTelemetryRecorder(
+        meter_provider=MeterProvider(metric_readers=[reader]),
+        include_messages_counters=True,
+        include_bus_metrics=False,
+    )
+    rec("acked", {"queue": "q", "subscriber": "h", "duration_seconds": 0.01})
+    rec("published", {"queue": "q", "status": "success", "count": 1, "duration_seconds": 0.01})
+    rec("fetched", {"queue": "q", "subscriber": "h", "count": 1})
+    assert set(_collect_metrics(reader)) == {"messaging.outbox.fetch.batches"}
+
+
 def test_otel_recorder_raises_friendly_error_when_extra_missing() -> None:
     """Emulating ``opentelemetry`` as not installed must surface the install-hint ImportError."""
     with (

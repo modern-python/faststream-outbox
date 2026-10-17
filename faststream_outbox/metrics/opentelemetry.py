@@ -12,7 +12,9 @@ span lifecycle. For span tracing, use the native middleware integration in
 registers via ``broker_middlewares=[...]`` and wraps ``consume_scope`` /
 ``publish_scope``. Both seams compose: pair this adapter (which covers
 outbox-internal events like ``fetched`` and ``lease_lost`` that have no
-message context) with the middleware (which covers spans + bus-scope metrics).
+message context) with the middleware (which covers spans + bus-scope metrics),
+and pass ``include_bus_metrics=False`` here so ``messaging.process.duration``
+and ``messaging.publish.duration`` are recorded once, by the middleware.
 
 Usage::
 
@@ -68,7 +70,7 @@ _ATTR_DLQ_REASON = "messaging.outbox.dlq_reason"
 
 
 class OpenTelemetryRecorder:
-    """Drop-in OpenTelemetry meter adapter for ``MetricsRecorder``.
+    """OpenTelemetry meter adapter for ``MetricsRecorder``.
 
     Args:
         meter_provider: optional. Defaults to the globally configured meter
@@ -78,6 +80,10 @@ class OpenTelemetryRecorder:
         include_messages_counters: if True, also create the optional
             ``messaging.process.messages`` / ``messaging.publish.messages``
             counters. Default False — matches upstream behaviour.
+        include_bus_metrics: if False, skip the ``messaging.process.*`` /
+            ``messaging.publish.*`` instruments that ``OutboxTelemetryMiddleware``
+            also records and keep only the ``messaging.outbox.*`` ones. Set it
+            when registering both.
 
     """
 
@@ -87,6 +93,7 @@ class OpenTelemetryRecorder:
         meter_provider: "ot_metrics.MeterProvider | None" = None,
         meter: "ot_metrics.Meter | None" = None,
         include_messages_counters: bool = False,
+        include_bus_metrics: bool = True,
     ) -> None:
         if not is_opentelemetry_installed:
             msg = (
@@ -104,19 +111,22 @@ class OpenTelemetryRecorder:
         self._include_messages_counters = include_messages_counters
 
         # Instrument names match TelemetryMiddleware._MetricsContainer verbatim.
-        self._process_duration = self._meter.create_histogram(
-            name="messaging.process.duration",
-            unit="s",
-            description="Measures the duration of process operation",
-        )
-        self._publish_duration = self._meter.create_histogram(
-            name="messaging.publish.duration",
-            unit="s",
-            description="Measures the duration of publish operation",
-        )
+        self._process_duration: ot_metrics.Histogram | None = None
+        self._publish_duration: ot_metrics.Histogram | None = None
+        if include_bus_metrics:
+            self._process_duration = self._meter.create_histogram(
+                name="messaging.process.duration",
+                unit="s",
+                description="Measures the duration of process operation",
+            )
+            self._publish_duration = self._meter.create_histogram(
+                name="messaging.publish.duration",
+                unit="s",
+                description="Measures the duration of publish operation",
+            )
         self._process_messages: ot_metrics.Counter | None = None
         self._publish_messages: ot_metrics.Counter | None = None
-        if include_messages_counters:
+        if include_bus_metrics and include_messages_counters:
             self._process_messages = self._meter.create_counter(
                 name="messaging.process.messages",
                 unit="message",
@@ -176,6 +186,8 @@ class OpenTelemetryRecorder:
             return
 
         if event in {"acked", "nacked_retried", "nacked_terminal"}:
+            if self._process_duration is None:
+                return
             status = "acked" if event == "acked" else "nacked"
             attrs = self._attrs(tags, operation="process")
             attrs[_ATTR_STATUS] = status
@@ -212,6 +224,8 @@ class OpenTelemetryRecorder:
             return
 
         if event == "published":
+            if self._publish_duration is None:
+                return
             attrs = self._attrs(tags, operation="publish")
             attrs[_ATTR_STATUS] = tags.get("status", "success")
             exc = tags.get("exception_type")

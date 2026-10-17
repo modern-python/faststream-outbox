@@ -1,16 +1,20 @@
 """Prometheus adapter for the ``MetricsRecorder`` seam.
 
-Drop-in shape parity with ``faststream.prometheus.PrometheusMiddleware``.
-
 Metric names, status values (``acked, nacked, error``), histogram buckets, and
-constructor argument names all mirror upstream. Label sets follow upstream's
-split: consume-side metrics tag by ``[app_name, broker, handler, *custom]``;
-publish-side metrics tag by ``[app_name, broker, destination, *custom]``.
+constructor argument names mirror ``faststream.prometheus.PrometheusMiddleware``.
+Label sets follow upstream's split: consume-side metrics tag by
+``[app_name, broker, handler, *custom]``; publish-side metrics tag by
+``[app_name, broker, destination, *custom]``. The ``handler`` value is the
+subscriber's call name, where upstream's middleware uses the queue name.
 ``broker`` is always ``"outbox"`` — same value as ``messaging.system`` from the
 OpenTelemetry adapter and the native middleware providers in
 :mod:`faststream_outbox.prometheus` / :mod:`faststream_outbox.opentelemetry`.
-Existing FastStream Prometheus dashboards keep working — add ``broker="outbox"``
-to PromQL filters to scope queries to outbox traffic.
+Add ``broker="outbox"`` to PromQL filters to scope queries to outbox traffic.
+
+When ``OutboxPrometheusMiddleware`` is registered too, pass
+``include_bus_metrics=False`` so only the middleware records the
+``faststream_received_*`` / ``faststream_published_*`` families. The two can
+then share one registry.
 
 Usage::
 
@@ -74,7 +78,7 @@ _DEFAULT_DURATION_BUCKETS: tuple[float, ...] = (
 
 
 class PrometheusRecorder:
-    """Drop-in Prometheus adapter for ``MetricsRecorder``.
+    """Prometheus adapter for ``MetricsRecorder``.
 
     Args:
         registry: Prometheus collector registry. Required (no global default so
@@ -87,8 +91,11 @@ class PrometheusRecorder:
             histogram. Defaults to FastStream's ``DEFAULT_SIZE_BUCKETS``.
         custom_labels: extra labels appended to every metric. Same shape as
             upstream: ``dict[str, str | Callable[[Mapping], str]]``. Callable
-            values receive the recorder's ``tags`` mapping and return the
-            label value.
+            values receive the event's ``tags`` mapping and return the
+            label value. ``published`` tags carry no ``subscriber``.
+        include_bus_metrics: if False, skip the consume/publish families that
+            ``OutboxPrometheusMiddleware`` also records and keep only the
+            ``{metrics_prefix}_outbox_*`` series. Set it when registering both.
 
     """
 
@@ -100,6 +107,7 @@ class PrometheusRecorder:
         metrics_prefix: str = "faststream",
         received_messages_size_buckets: Sequence[float] | None = None,
         custom_labels: dict[str, str | Callable[[Mapping[str, typing.Any]], str]] | None = None,
+        include_bus_metrics: bool = True,
     ) -> None:
         if not is_prometheus_client_installed:
             msg = "PrometheusRecorder requires the 'prometheus' extra: pip install 'faststream-outbox[prometheus]'"
@@ -107,79 +115,77 @@ class PrometheusRecorder:
         self._app_name = "" if app_name is EMPTY else app_name
         self._custom_label_keys = list((custom_labels or {}).keys())
         self._custom_label_resolvers = list((custom_labels or {}).values())
+        self._include_bus_metrics = include_bus_metrics
 
         # Upstream uses different label sets for consume vs publish: consume
         # tags by ``handler`` (the subscriber), publish tags by ``destination``
-        # (the queue). Mirroring that split keeps dashboards drop-in compatible
-        # with what ``faststream.prometheus.PrometheusMiddleware`` produces, so
-        # users registering both seams (recorder + upstream middleware) see one
-        # time series per (broker, handler) / (broker, destination) instead of
-        # split, mismatched series.
+        # (the queue).
         consume_labels = ["app_name", "broker", "handler", *self._custom_label_keys]
         publish_labels = ["app_name", "broker", "destination", *self._custom_label_keys]
         size_buckets = received_messages_size_buckets or _UPSTREAM_SIZE_BUCKETS
         p = metrics_prefix
 
-        # ----- Consume side (mirror upstream PrometheusMiddleware verbatim) -----
-        self._received_total = Counter(
-            f"{p}_received_messages_total",
-            "Count of received messages (one per dispatched handler invocation).",
-            consume_labels,
-            registry=registry,
-        )
-        self._received_size = Histogram(
-            f"{p}_received_messages_size_bytes",
-            "Size of received message bodies.",
-            consume_labels,
-            buckets=tuple(size_buckets),
-            registry=registry,
-        )
-        self._in_process = Gauge(
-            f"{p}_received_messages_in_process",
-            "Messages currently being processed by handlers.",
-            consume_labels,
-            registry=registry,
-        )
-        self._processed_total = Counter(
-            f"{p}_received_processed_messages_total",
-            "Count of processed messages by status.",
-            [*consume_labels, "status"],
-            registry=registry,
-        )
-        self._processed_duration = Histogram(
-            f"{p}_received_processed_messages_duration_seconds",
-            "Handler duration.",
-            consume_labels,
-            buckets=_DEFAULT_DURATION_BUCKETS,
-            registry=registry,
-        )
-        self._processed_exceptions = Counter(
-            f"{p}_received_processed_messages_exceptions_total",
-            "Handler exceptions broken down by exception type.",
-            [*consume_labels, "exception_type"],
-            registry=registry,
-        )
+        if include_bus_metrics:
+            # ----- Consume side (mirror upstream PrometheusMiddleware verbatim) -----
+            self._received_total = Counter(
+                f"{p}_received_messages_total",
+                "Count of received messages (one per dispatched handler invocation).",
+                consume_labels,
+                registry=registry,
+            )
+            self._received_size = Histogram(
+                f"{p}_received_messages_size_bytes",
+                "Size of received message bodies.",
+                consume_labels,
+                buckets=tuple(size_buckets),
+                registry=registry,
+            )
+            self._in_process = Gauge(
+                f"{p}_received_messages_in_process",
+                "Messages currently being processed by handlers.",
+                consume_labels,
+                registry=registry,
+            )
+            self._processed_total = Counter(
+                f"{p}_received_processed_messages_total",
+                "Count of processed messages by status.",
+                [*consume_labels, "status"],
+                registry=registry,
+            )
+            self._processed_duration = Histogram(
+                f"{p}_received_processed_messages_duration_seconds",
+                "Handler duration.",
+                consume_labels,
+                buckets=_DEFAULT_DURATION_BUCKETS,
+                registry=registry,
+            )
+            self._processed_exceptions = Counter(
+                f"{p}_received_processed_messages_exceptions_total",
+                "Handler exceptions broken down by exception type.",
+                [*consume_labels, "exception_type"],
+                registry=registry,
+            )
 
-        # ----- Publish side (mirror upstream verbatim) -----
-        self._published_total = Counter(
-            f"{p}_published_messages_total",
-            "Count of published messages by status.",
-            [*publish_labels, "status"],
-            registry=registry,
-        )
-        self._published_duration = Histogram(
-            f"{p}_published_messages_duration_seconds",
-            "Publish operation duration (the INSERT).",
-            publish_labels,
-            buckets=_DEFAULT_DURATION_BUCKETS,
-            registry=registry,
-        )
-        self._published_exceptions = Counter(
-            f"{p}_published_messages_exceptions_total",
-            "Publish exceptions broken down by exception type.",
-            [*publish_labels, "exception_type"],
-            registry=registry,
-        )
+            # ----- Publish side (mirror upstream verbatim) -----
+            self._published_total = Counter(
+                f"{p}_published_messages_total",
+                "Count of published messages by status.",
+                [*publish_labels, "status"],
+                registry=registry,
+            )
+            self._published_duration = Histogram(
+                f"{p}_published_messages_duration_seconds",
+                "Publish operation duration (the INSERT).",
+                publish_labels,
+                buckets=_DEFAULT_DURATION_BUCKETS,
+                registry=registry,
+            )
+            self._published_exceptions = Counter(
+                f"{p}_published_messages_exceptions_total",
+                "Publish exceptions broken down by exception type.",
+                [*publish_labels, "exception_type"],
+                registry=registry,
+            )
 
         # ----- Outbox-specific (no upstream equivalent; distinct names) -----
         # Fired from subscriber-scope sites so they use the consume label set.
@@ -232,13 +238,16 @@ class PrometheusRecorder:
     def _publish_values(self, tags: Mapping[str, typing.Any]) -> tuple[str, ...]:
         # Upstream tags publish-side metrics by ``destination`` (the queue
         # name), not ``handler`` — see ``faststream/prometheus/container.py``
-        # ``published_messages_*`` definitions. Matching that schema keeps
-        # series consistent when ``OutboxPrometheusMiddleware`` is registered
-        # alongside this recorder.
+        # ``published_messages_*`` definitions.
         destination = tags.get("queue", "")
         return (self._app_name, BROKER_SYSTEM, destination, *self._resolve_custom_values(tags))
 
-    def __call__(self, event: str, tags: Mapping[str, typing.Any]) -> None:  # noqa: C901, PLR0911, PLR0912
+    def __call__(self, event: str, tags: Mapping[str, typing.Any]) -> None:
+        if event == "published":
+            if self._include_bus_metrics:
+                self._record_published(tags)
+            return
+
         consume_base = self._consume_values(tags)
 
         if event == "fetched":
@@ -246,6 +255,32 @@ class PrometheusRecorder:
             self._fetch_batches.labels(*consume_base, "true" if count else "false").inc()
             return
 
+        # ``duration_seconds`` is present exactly on the event that closes a ``dispatched``
+        # (which carries the matching in-process ``.inc()``). ``nacked_terminal(reason=
+        # "max_deliveries")`` and a lease lost before any handler ran carry none, and
+        # dec'ing the gauge there drives ``..._in_process`` negative (B9).
+        duration = tags.get("duration_seconds")
+        if self._include_bus_metrics:
+            self._record_bus_consume(event, tags, consume_base, duration)
+
+        if event == "nacked_terminal":
+            self._terminal_reason.labels(*consume_base, tags["reason"]).inc()
+        elif event == "lease_lost":
+            self._lease_lost.labels(*consume_base, tags["phase"]).inc()
+        elif event == "dlq_written":
+            self._dlq_written.labels(*consume_base, tags["failure_reason"]).inc()
+        elif event == "drain_timeout":
+            self._drain_timeout.labels(*consume_base).inc()
+        # Unknown event — silently ignored so future event vocabulary additions
+        # don't break old recorders.
+
+    def _record_bus_consume(
+        self,
+        event: str,
+        tags: Mapping[str, typing.Any],
+        consume_base: tuple[str, ...],
+        duration: float | None,
+    ) -> None:
         if event == "dispatched":
             self._received_total.labels(*consume_base).inc()
             size = tags.get("size_bytes")
@@ -258,17 +293,9 @@ class PrometheusRecorder:
             # Map outbox event names to upstream ``ProcessingStatus`` values.
             status = "acked" if event == "acked" else "nacked"
             self._processed_total.labels(*consume_base, status).inc()
-            duration = tags.get("duration_seconds")
             if duration is not None:
-                # ``duration_seconds`` is present exactly for terminals that followed a
-                # ``dispatched`` (which carries the matching in-process ``.inc()``).
-                # ``nacked_terminal(reason="max_deliveries")`` fires WITHOUT a preceding
-                # ``dispatched`` (the handler never ran) and carries no duration — dec'ing
-                # the gauge there drives ``..._in_process`` negative (B9).
                 self._in_process.labels(*consume_base).dec()
                 self._processed_duration.labels(*consume_base).observe(duration)
-            if event == "nacked_terminal":
-                self._terminal_reason.labels(*consume_base, tags["reason"]).inc()
             exc = tags.get("exception_type")
             if exc is not None:
                 self._processed_exceptions.labels(*consume_base, exc).inc()
@@ -279,43 +306,33 @@ class PrometheusRecorder:
             # upstream ``error`` status counter so existing alerts on
             # ``status="error"`` catch it.
             self._processed_total.labels(*consume_base, "error").inc()
-            self._lease_lost.labels(*consume_base, tags["phase"]).inc()
-            return
 
-        if event == "dlq_written":
-            self._dlq_written.labels(*consume_base, tags["failure_reason"]).inc()
-            return
+        if event in {"lease_lost", "dispatch_abandoned"} and duration is not None:
+            self._in_process.labels(*consume_base).dec()
 
-        if event == "drain_timeout":
-            self._drain_timeout.labels(*consume_base).inc()
-            return
-
-        if event == "published":
-            publish_base = self._publish_values(tags)
-            status = tags.get("status", "success")
-            # Count = messages landed. Errors (count=0) and timer_id conflicts
-            # (count=0) don't increment the totals — aligns with the OTel adapter's
-            # ``messaging.publish.messages`` semantics. ``_published_exceptions``
-            # below is the canonical error counter; ``_published_duration`` records
-            # every attempt (with the status label) so failed-publish latency stays
-            # observable.
-            count = tags.get("count", 0)  # default 0 matches the OTel adapter (F6-02); producer always sets it
-            if status == "error":
-                # P28: an error lands 0 messages but is one failed publish. Increment the
-                # status="error" series (the exact label dashboards alert on) by 1, rather
-                # than gating on count > 0 — which left it permanently at zero.
-                self._published_total.labels(*publish_base, status).inc()
-            elif count > 0:
-                self._published_total.labels(*publish_base, status).inc(count)
-            duration = tags.get("duration_seconds")
-            if duration is not None:
-                self._published_duration.labels(*publish_base).observe(duration)
-            exc = tags.get("exception_type")
-            if exc is not None:
-                self._published_exceptions.labels(*publish_base, exc).inc()
-            return
-        # Unknown event — silently ignored so future event vocabulary additions
-        # don't break old recorders.
+    def _record_published(self, tags: Mapping[str, typing.Any]) -> None:
+        publish_base = self._publish_values(tags)
+        status = tags.get("status", "success")
+        # Count = messages landed. Errors (count=0) and timer_id conflicts
+        # (count=0) don't increment the totals — aligns with the OTel adapter's
+        # ``messaging.publish.messages`` semantics. ``_published_exceptions``
+        # below is the canonical error counter; ``_published_duration`` records
+        # every attempt (with the status label) so failed-publish latency stays
+        # observable.
+        count = tags.get("count", 0)  # default 0 matches the OTel adapter (F6-02); producer always sets it
+        if status == "error":
+            # P28: an error lands 0 messages but is one failed publish. Increment the
+            # status="error" series (the exact label dashboards alert on) by 1, rather
+            # than gating on count > 0 — which left it permanently at zero.
+            self._published_total.labels(*publish_base, status).inc()
+        elif count > 0:
+            self._published_total.labels(*publish_base, status).inc(count)
+        duration = tags.get("duration_seconds")
+        if duration is not None:
+            self._published_duration.labels(*publish_base).observe(duration)
+        exc = tags.get("exception_type")
+        if exc is not None:
+            self._published_exceptions.labels(*publish_base, exc).inc()
 
 
 __all__ = ["PrometheusRecorder"]

@@ -19,11 +19,18 @@ Event vocabulary (stable, additive):
   reasons (``retry_terminal``, ``rejected``) and absent for ``max_deliveries`` (no handler
   ran). ``exception_type`` is present when ``last_exception`` was set (post-handler raises;
   manual ``msg.reject()`` may omit it).
-* ``lease_lost`` — terminal flush found a foreign lease. Tags include ``phase`` (``terminal`` | ``retry``).
+* ``lease_lost`` — terminal flush found a foreign lease. Tags include ``phase`` (``terminal`` | ``retry``),
+  and ``duration_seconds`` when the handler ran.
   ``acked`` / ``nacked_retried`` / ``nacked_terminal`` are emitted only **after** the
   terminal/retry write lands (P17); a row whose lease was reclaimed emits ``lease_lost``
   *instead* (never a paired acked/nacked), so the row isn't counted twice when it
   redelivers.
+* ``dispatch_abandoned`` — a dispatched row was left to lease expiry with no outcome written: an
+  error escaped the handler pipeline, the subscriber stopped mid-dispatch, or the outcome write
+  failed. Tags: ``queue, subscriber, deliveries_count, duration_seconds``.
+  Every ``dispatched`` is closed by exactly one later event carrying ``duration_seconds``:
+  ``acked``, ``nacked_retried``, ``nacked_terminal``, ``lease_lost`` or ``dispatch_abandoned``.
+  In-process gauges decrement on that tag.
 * ``dlq_written`` — emitted from ``_flush_terminal`` after the DELETE+INSERT CTE commits.
   Fires only when ``OutboxBroker`` was constructed with ``dlq_table=...`` AND the row was
   terminal-by-failure (any ``nacked_terminal`` reason). Skipped on lease-lost. Tags:

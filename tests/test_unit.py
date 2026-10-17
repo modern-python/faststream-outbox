@@ -2218,7 +2218,7 @@ async def test_dispatch_one_preserves_row_when_consume_early_exits_on_shutdown()
     ``running`` is False. Without the guard, ``dispatch_one`` falls through to ``assert_state_set ->
     reject() -> _safe_flush`` and silently DELETEs a row whose handler never ran -- so every rolling
     deploy leaks rows from busy subscribers. The guard leaves the lease to expire so another replica
-    reclaims it, which is why no metric fires here.
+    reclaims it, which is why no ack or nack fires here.
     """
     events, recorder = _events_recorder()
     metadata = MetaData()
@@ -4365,3 +4365,114 @@ def test_outbox_autovacuum_ddl_default_omits_cost_options() -> None:
     sql = outbox_autovacuum_ddl("outbox")
     assert "cost_delay" not in sql
     assert "cost_limit" not in sql
+
+
+_CLOSING_EVENTS = {"acked", "nacked_retried", "nacked_terminal", "lease_lost", "dispatch_abandoned"}
+
+
+def _assert_dispatch_closed_once(events: list[tuple[str, dict]]) -> None:
+    assert [e for e, _ in events].count("dispatched") == 1
+    closing = [e for e, t in events if e in _CLOSING_EVENTS and "duration_seconds" in t]
+    assert len(closing) == 1, closing
+
+
+def _make_dispatch_harness(
+    recorder: typing.Any, *, handler_raises: bool, terminal_flush_batch_size: int = 1
+) -> tuple[OutboxBroker, TestOutboxBroker, FakeOutboxClient]:
+    metadata = MetaData()
+    broker = OutboxBroker(outbox_table=make_outbox_table(metadata), metrics_recorder=recorder)
+
+    @broker.subscriber("orders", terminal_flush_batch_size=terminal_flush_batch_size)
+    async def handle(body: dict) -> None:
+        del body
+        if handler_raises:
+            msg = "boom"
+            raise ValueError(msg)
+
+    fake = FakeOutboxClient()
+    test_broker = TestOutboxBroker(broker)
+    test_broker.fake_client = fake
+    return broker, test_broker, fake
+
+
+def _make_handled_msg() -> OutboxInnerMessage:
+    payload, headers = _encode_payload({"order_id": 1})
+    return _make_msg(queue="orders", payload=payload, headers=headers)
+
+
+@pytest.mark.parametrize(
+    ("scenario", "handler_raises"),
+    [
+        ("terminal_lease_lost", False),
+        ("retry_lease_lost", True),
+        ("consume_escapes", False),
+        ("config_error", False),
+        ("shutdown_race", False),
+        ("flush_error_swallowed", False),
+        ("flush_error_propagates", False),
+    ],
+)
+async def test_every_dispatched_row_is_closed_by_one_event_with_a_duration(scenario: str, handler_raises: bool) -> None:
+    """INVARIANT: every ``dispatched`` event is followed by exactly one event carrying ``duration_seconds``.
+
+    Recorders keep an in-process gauge: ``dispatched`` raises it and a closing event with a duration lowers
+    it. A path that leaves a dispatched row without one (lease loss, an error escaping ``consume()``, the
+    shutdown race, a failed flush) makes the gauge climb for the life of the process.
+    """
+    events, recorder = _events_recorder()
+    broker, test_broker, fake = _make_dispatch_harness(recorder, handler_raises=handler_raises)
+    msg = _make_handled_msg()
+    writer_conn = MagicMock() if scenario == "flush_error_propagates" else None
+    patches = {
+        "terminal_lease_lost": (fake, "delete_with_lease", AsyncMock(return_value=False)),
+        "retry_lease_lost": (fake, "mark_pending_with_lease", AsyncMock(return_value=False)),
+        "flush_error_swallowed": (fake, "delete_with_lease", AsyncMock(side_effect=RuntimeError("db down"))),
+        "flush_error_propagates": (fake, "delete_with_lease", AsyncMock(side_effect=RuntimeError("db down"))),
+    }
+
+    async with test_broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        if scenario == "consume_escapes":
+            patches[scenario] = (sub, "consume", AsyncMock(side_effect=RuntimeError("middleware bypass")))
+        elif scenario == "config_error":
+            patches[scenario] = (sub, "consume", AsyncMock(side_effect=_OutboxConfigError("bad relay")))
+        elif scenario == "shutdown_race":
+            sub.running = False
+        target, attr, mock = patches.get(scenario, (fake, "feed", fake.feed))
+        with patch.object(target, attr, new=mock):
+            if scenario in {"config_error", "flush_error_propagates"}:
+                with pytest.raises((_OutboxConfigError, RuntimeError)):
+                    await sub.dispatch_one(msg, writer_conn=writer_conn)
+            else:
+                await sub.dispatch_one(msg, writer_conn=writer_conn)
+
+    _assert_dispatch_closed_once(events)
+
+
+@pytest.mark.parametrize("delete_fails", [False, True])
+async def test_every_buffered_row_is_closed_by_one_event_with_a_duration(delete_fails: bool) -> None:
+    """INVARIANT: a buffered row's ``dispatched`` is closed once, whether the batched delete loses it or fails.
+
+    The batched delete reports a reclaimed row as ``lease_lost`` and a failed statement re-raises for the
+    worker to reconnect. Either way the handler already ran, so dropping the duration from those events
+    leaves the in-process gauge raised for a row no worker holds any more.
+    """
+    events, recorder = _events_recorder()
+    broker, test_broker, fake = _make_dispatch_harness(recorder, handler_raises=False, terminal_flush_batch_size=2)
+    msg = _make_handled_msg()
+    mock = AsyncMock(side_effect=RuntimeError("db down")) if delete_fails else AsyncMock(return_value=set())
+
+    async with test_broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        sub._inflight.put_nowait(msg)  # noqa: SLF001
+        sub._inflight.get_nowait()  # noqa: SLF001
+        buffer: list = []
+        assert await sub.dispatch_one(msg, writer_conn=None, buffer=buffer)
+        with patch.object(fake, "delete_batch_with_lease", new=mock):
+            if delete_fails:
+                with pytest.raises(RuntimeError):
+                    await sub._flush_buffer(buffer, writer_conn=None)  # noqa: SLF001
+            else:
+                await sub._flush_buffer(buffer, writer_conn=None)  # noqa: SLF001
+
+    _assert_dispatch_closed_once(events)
