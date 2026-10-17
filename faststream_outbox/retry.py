@@ -176,3 +176,20 @@ class ExponentialRetry(_RetryStrategyTemplate):
         # Absolute backstop so an unbounded config can't emit a delay Postgres'
         # make_interval() can't represent.
         return min(delay, _MAX_DELAY_SECONDS)
+
+
+def _default_retry_strategy() -> "RetryStrategyProto":
+    """Fallback retry policy when the user passes nothing.
+
+    An outbox is a reliability primitive; defaulting to "delete on first error" turns
+    every transient handler failure into silent data loss. Defaulting to a bounded
+    exponential retry keeps the contract intuitive — users who actually want
+    delete-on-error opt in explicitly with ``NoRetry()``.
+    """
+    return ExponentialRetry(
+        initial_delay_seconds=1.0,
+        multiplier=2.0,
+        max_delay_seconds=300.0,
+        max_attempts=10,
+        jitter_factor=0.2,
+    )

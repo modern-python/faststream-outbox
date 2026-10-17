@@ -3,7 +3,6 @@ import datetime as dt
 import logging
 import typing
 import uuid
-import warnings as _warnings
 from collections.abc import Awaitable, Callable, Mapping
 from types import TracebackType
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -483,18 +482,7 @@ async def test_outbox_route_accepts_ack_policy() -> None:
     async def handle(body: str) -> None:
         del body
 
-    # REJECT_ON_ERROR + default ExponentialRetry triggers a misconfig warning at
-    # registration; pair with NoRetry() to keep the test focused on ack_policy.
-    router = OutboxRouter(
-        handlers=(
-            OutboxRoute(
-                handle,
-                queues="orders",
-                ack_policy=AckPolicy.REJECT_ON_ERROR,
-                retry_strategy=NoRetry(),
-            ),
-        ),
-    )
+    router = OutboxRouter(handlers=(OutboxRoute(handle, queues="orders", ack_policy=AckPolicy.REJECT_ON_ERROR),))
 
     broker = _make_broker()
     broker.include_router(router)
@@ -1356,17 +1344,11 @@ async def test_fake_broker_reject_on_error_deletes_row_on_first_failure() -> Non
     broker = _make_broker()
     attempts: list[str] = []
 
-    with _warnings.catch_warnings():
-        # REJECT_ON_ERROR + the default exponential retry triggers the misconfig warning;
-        # this test asserts only the runtime semantics. Coverage for the warning itself
-        # lives in tests/test_unit.py::test_subscriber_warns_on_reject_with_retry_strategy.
-        _warnings.simplefilter("ignore", UserWarning)
-
-        @broker.subscriber("orders", ack_policy=AckPolicy.REJECT_ON_ERROR)
-        async def handle(body: str) -> None:
-            attempts.append(body)
-            msg = "boom"
-            raise RuntimeError(msg)
+    @broker.subscriber("orders", ack_policy=AckPolicy.REJECT_ON_ERROR)
+    async def handle(body: str) -> None:
+        attempts.append(body)
+        msg = "boom"
+        raise RuntimeError(msg)
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
@@ -1914,15 +1896,7 @@ async def test_fake_dlq_drops_last_exception_when_renderer_returns_none() -> Non
 
 async def test_fake_dlq_captures_rejected_failure() -> None:
     """``REJECT_ON_ERROR`` ack policy + raising handler → DLQ row with reason ``rejected``."""
-    with _warnings.catch_warnings():
-        # REJECT_ON_ERROR + a retry strategy triggers a misconfig warning at registration
-        # (the retry strategy is ignored). Pass NoRetry() to match the policy and ignore
-        # the warning — the runtime semantics we care about (single attempt → DLQ) hold.
-        _warnings.simplefilter("ignore", UserWarning)
-        broker, _received, raised = _make_broker_with_dlq(
-            ack_policy=AckPolicy.REJECT_ON_ERROR,
-            retry_strategy=NoRetry(),
-        )
+    broker, _received, raised = _make_broker_with_dlq(ack_policy=AckPolicy.REJECT_ON_ERROR)
     raised.append(ValueError("poison message"))
     test_broker = TestOutboxBroker(broker)
 

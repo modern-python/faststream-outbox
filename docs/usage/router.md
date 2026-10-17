@@ -22,7 +22,8 @@ async def handle_order(order_id: int) -> None:
 ## No `prefix`
 
 Unlike some FastStream routers, `OutboxRouter` does not accept a
-`prefix` argument. Queues are routed by their literal name, so producers
+`prefix` argument, and `broker.include_router(router, prefix=...)` raises
+`ValueError`. Queues are routed by their literal name, so producers
 and consumers must agree on the exact string. If you want namespacing
 (e.g., one Postgres instance shared across services), put it in the queue
 name itself:

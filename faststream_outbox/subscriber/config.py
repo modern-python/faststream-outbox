@@ -1,3 +1,4 @@
+import math
 import sys
 import typing
 import warnings
@@ -9,7 +10,8 @@ from faststream._internal.configs import SubscriberSpecificationConfig, Subscrib
 from faststream._internal.constants import EMPTY
 from faststream.middlewares import AckPolicy
 
-from faststream_outbox.retry import NoRetry
+from faststream_outbox.response import _MAX_QUEUE_LENGTH
+from faststream_outbox.retry import NoRetry, _default_retry_strategy
 
 
 if typing.TYPE_CHECKING:
@@ -45,6 +47,23 @@ def _subscriber_warn(message: str) -> None:
     warnings.warn(message, UserWarning, stacklevel=stacklevel)
 
 
+def _validate_queues(queues: list[str]) -> None:
+    """Reject queue names that no published row can ever match, with the same rules as publish."""
+    for queue in queues:
+        if not isinstance(queue, str):
+            msg = f"queue must be a str, got {type(queue).__name__}"
+            raise TypeError(msg)
+        if not queue:
+            msg = "queue must be a non-empty string"
+            raise ValueError(msg)
+        if len(queue) > _MAX_QUEUE_LENGTH:
+            msg = f"queue must be at most {_MAX_QUEUE_LENGTH} characters (got {len(queue)})"
+            raise ValueError(msg)
+    if duplicates := sorted({q for q in queues if queues.count(q) > 1}):
+        msg = f"duplicate queue names in one subscriber: {duplicates}"
+        raise ValueError(msg)
+
+
 @dataclass(kw_only=True)
 class OutboxSubscriberConfig(SubscriberUsecaseConfig):
     _outer_config: "OutboxBrokerConfig"  # ty: ignore[invalid-mutable-override]
@@ -70,6 +89,8 @@ class OutboxSubscriberConfig(SubscriberUsecaseConfig):
         if parent_post_init is not None:
             parent_post_init()
         self._validate()
+        if self.retry_strategy is None:
+            self.retry_strategy = _default_retry_strategy()
 
     def _validate(self) -> None:  # noqa: C901  # flat sequence of independent knob checks
         """Reject impossible knob values, warn on combos that silently misbehave.
@@ -84,6 +105,8 @@ class OutboxSubscriberConfig(SubscriberUsecaseConfig):
         # did (e.g. the NACK+NoRetry warning fires only on an explicit NACK_ON_ERROR, not
         # on the default that resolves to NACK_ON_ERROR via the ``ack_policy`` property).
         ack_policy = None if self._ack_policy is EMPTY else self._ack_policy
+        _validate_queues(self.queues)
+        self._validate_numbers()
         if self.max_workers <= 0:
             msg = f"max_workers must be >= 1, got {self.max_workers}"
             raise ValueError(msg)
@@ -132,11 +155,10 @@ class OutboxSubscriberConfig(SubscriberUsecaseConfig):
                 "ack_policy=NACK_ON_ERROR with retry_strategy=NoRetry() has the same effect "
                 "as REJECT_ON_ERROR (one attempt, then delete). Pick one for clarity.",
             )
-        if self.max_deliveries is not None and (self.retry_strategy is None or is_no_retry):
+        if self.max_deliveries is not None and is_no_retry:
             _subscriber_warn(
-                "max_deliveries is set but no retry_strategy is configured (or NoRetry was "
-                "passed); the delivery cap is unreachable on the happy path since the row "
-                "is deleted after the first attempt.",
+                "max_deliveries is set but retry_strategy=NoRetry(); the delivery cap is "
+                "unreachable on the happy path since the row is deleted after the first attempt.",
             )
         if self.lease_ttl_seconds <= self.max_fetch_interval:
             _subscriber_warn(
@@ -146,6 +168,23 @@ class OutboxSubscriberConfig(SubscriberUsecaseConfig):
                 f"of healthy in-flight rows. Recommended: lease_ttl_seconds >= "
                 f"2 * max_fetch_interval + P99(handler).",
             )
+
+    def _validate_numbers(self) -> None:
+        """Reject bools passed as counts, NaN or infinite intervals, and a ``max_deliveries`` below 1."""
+        for name in ("max_workers", "fetch_batch_size", "terminal_flush_batch_size", "max_deliveries"):
+            value = getattr(self, name)
+            if value is None and name == "max_deliveries":
+                continue
+            if isinstance(value, bool) or not isinstance(value, int):
+                msg = f"{name} must be an int, got {value!r}"
+                raise TypeError(msg)
+        for name in ("min_fetch_interval", "max_fetch_interval", "lease_ttl_seconds"):
+            if not math.isfinite(getattr(self, name)):
+                msg = f"{name} must be a finite number, got {getattr(self, name)}"
+                raise ValueError(msg)
+        if self.max_deliveries is not None and self.max_deliveries < 1:
+            msg = f"max_deliveries must be >= 1 or None (unlimited), got {self.max_deliveries}"
+            raise ValueError(msg)
 
     @property
     def ack_policy(self) -> AckPolicy:

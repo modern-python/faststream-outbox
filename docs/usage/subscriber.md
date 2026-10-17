@@ -90,7 +90,7 @@ Per-subscriber knobs, passed to `@broker.subscriber("…", …)`:
 | `min_fetch_interval` | `1.0` s | Base for the adaptive idle backoff (jittered ±50%, so an actual wait can land below it); no sleep at all while fetches keep returning rows |
 | `max_fetch_interval` | `10.0` s | Ceiling for the adaptive idle backoff (with jitter) |
 | `lease_ttl_seconds` | `60.0` s | How long a claim is valid before another fetch may reclaim it. Must exceed your handler's P99 with margin. |
-| `max_deliveries` | `None` (unbounded) | Total claims (including lease-expiry re-claims) after which the row is dropped without invoking the handler. Defends against handlers that consistently wedge. |
+| `max_deliveries` | `None` (unbounded) | Total claims (including lease-expiry re-claims) after which the row is dropped without invoking the handler. Defends against handlers that consistently wedge. Must be at least `1`; use `None`, not `0`, for no cap. |
 | `terminal_flush_batch_size` | `1` (off) | Coalesce completed terminal `DELETE`s into one `DELETE … RETURNING` per N rows. `1` is one round-trip per message (unchanged). Higher trades a wider crash-redelivery window for far fewer round-trips. See [Batching terminal deletes](#batching-terminal-deletes). |
 | `ack_policy` | `AckPolicy.NACK_ON_ERROR` | See [Ack policy](#ack-policy) |
 | `retry_strategy` | `ExponentialRetry(...)` | See [Retry strategies](#retry-strategies) |
@@ -108,11 +108,14 @@ Per-subscriber knobs, passed to `@broker.subscriber("…", …)`:
 async def handle_urgent(body: dict) -> None: ...
 ```
 
-Subscriber options are validated when the subscriber is created: likely-wrong
-combinations (`lease_ttl_seconds <= max_fetch_interval`, `max_deliveries`
-without retry, `min_fetch_interval > max_fetch_interval`, etc.) warn or
-raise. Every construction path (`@broker.subscriber`, `@router.subscriber`,
-`OutboxRoute`) is checked.
+Subscriber options are validated when the subscriber is created. Values that
+would delete data or never consume raise: a `max_deliveries` below 1, a NaN or
+infinite interval, a `bool` passed as a count, and a queue name that is empty,
+longer than 255 characters, or listed twice. Likely-wrong combinations
+(`lease_ttl_seconds <= max_fetch_interval`, `max_deliveries` with `NoRetry()`,
+`min_fetch_interval > max_fetch_interval`, etc.) warn or raise. Every
+construction path (`@broker.subscriber`, `@router.subscriber`, `OutboxRoute`)
+is checked.
 
 The table above lists the outbox-specific knobs. The standard FastStream
 subscriber kwargs pass through unchanged too: `dependencies`, `parser`,
