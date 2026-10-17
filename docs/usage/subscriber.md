@@ -86,8 +86,8 @@ Per-subscriber knobs, passed to `@broker.subscriber("…", …)`:
 | Parameter | Default | Description |
 |---|---|---|
 | `max_workers` | `1` | Concurrent handlers per subscriber |
-| `fetch_batch_size` | `10` | Rows claimed per fetch cycle |
-| `min_fetch_interval` | `1.0` s | Base for the adaptive idle backoff (jittered ±50%, so an actual wait can land below it) and the wait when the inflight queue is full; no sleep at all while fetches keep returning rows |
+| `fetch_batch_size` | `10` | Most rows held in memory and claimed per fetch. The next fetch runs once workers have taken half of them. |
+| `min_fetch_interval` | `1.0` s | Base for the adaptive idle backoff (jittered ±50%, so an actual wait can land below it); no sleep at all while fetches keep returning rows |
 | `max_fetch_interval` | `10.0` s | Ceiling for the adaptive idle backoff (with jitter) |
 | `lease_ttl_seconds` | `60.0` s | How long a claim is valid before another fetch may reclaim it. Must exceed your handler's P99 with margin. |
 | `max_deliveries` | `None` (unbounded) | Total claims (including lease-expiry re-claims) after which the row is dropped without invoking the handler. Defends against handlers that consistently wedge. |

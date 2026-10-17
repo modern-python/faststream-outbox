@@ -26,3 +26,7 @@ class RunConfig:
     # 1 = today's per-row terminal DELETE; >1 coalesces plain-delete acks into one
     # batched ``DELETE ... RETURNING`` per batch (the opt-in batched-flush path).
     terminal_flush_batch_size: int = 1
+    # Consumer (min_fetch_interval, max_fetch_interval) in seconds.
+    fetch_interval: tuple[float, float] = (0.001, 0.001)
+    # Producer publishes per transaction; None puts every publish in one transaction.
+    publishes_per_transaction: int | None = None

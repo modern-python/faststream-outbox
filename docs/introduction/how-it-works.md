@@ -104,8 +104,10 @@ The worker loop (× `max_workers`) pulls from an in-process
 `asyncio.Queue(maxsize=fetch_batch_size)`, dispatches each row via
 `OutboxSubscriber.dispatch_one` (which runs the handler), then
 flushes the row's terminal state (`DELETE` on success, `UPDATE
-next_attempt_at` for retry). Each worker owns a long-lived `AsyncConnection`,
-so draining N rows costs O(workers) pool checkouts, not O(rows).
+next_attempt_at` for retry). Once workers have taken half of that queue, they
+wake the fetch loop for the next claim, so a backlog drains at database speed
+without waiting for a NOTIFY or the poll interval. Each worker owns a long-lived
+`AsyncConnection`, so draining N rows costs O(workers) pool checkouts, not O(rows).
 
 ## The lease-token invariant
 

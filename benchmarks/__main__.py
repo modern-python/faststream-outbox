@@ -58,9 +58,14 @@ async def _run_sweep(dsn: str, messages: int, repeats: int) -> list[RunResult]:
         batched_cfg = RunConfig(messages=messages, max_workers=1, fetch_batch_size=100, terminal_flush_batch_size=100)
         batched_runs = [await run_consumer(engine, batched_cfg) for _ in range(repeats)]
         results.append(_median_by_wall(batched_runs))
-        producer_cfg = RunConfig(messages=messages)
-        producer_runs = [await run_producer(engine, producer_cfg) for _ in range(repeats)]
-        results.append(_median_by_wall(producer_runs))
+        # A backlog seeded without NOTIFY, drained at the subscriber's default intervals.
+        default_interval_cfg = RunConfig(messages=messages, fetch_interval=(1.0, 10.0))
+        default_interval_runs = [await run_consumer(engine, default_interval_cfg) for _ in range(repeats)]
+        results.append(_median_by_wall(default_interval_runs))
+        for per_transaction in (None, 1):
+            producer_cfg = RunConfig(messages=messages, publishes_per_transaction=per_transaction)
+            producer_runs = [await run_producer(engine, producer_cfg) for _ in range(repeats)]
+            results.append(_median_by_wall(producer_runs))
     finally:
         await engine.dispose()
     return results
