@@ -23,10 +23,10 @@
 ## Requirements
 
 - Python 3.11+
-- PostgreSQL 12+. The features used (partial indexes, `FOR UPDATE SKIP
-  LOCKED`, `make_interval`, `pg_notify`) all predate 12. The examples and
-  CI run on 17; that is what's exercised, so 17 is the safest choice if
-  you're starting fresh.
+- PostgreSQL 13+. `outbox_autovacuum_ddl` sets the insert-triggered
+  autovacuum options that 13 introduced; on 12 the `ALTER TABLE` fails.
+  CI runs the test suite on 13 and on 17. The examples use 17, so that is
+  the safest choice if you're starting fresh.
 - A running Postgres instance accessible via SQLAlchemy `AsyncEngine`
 
 ## Free-threaded Python

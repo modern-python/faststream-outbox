@@ -97,6 +97,8 @@ jobs:
     # the same versions can still disagree on whether those versions install.
     # 3.14t is out: the dev group's `faststream[kafka]` pulls aiokafka, which ships no cp314t
     # wheel, so under --no-build this leg would measure upstream's gap rather than a floor.
+    # PostgreSQL 13 is the server floor: outbox_autovacuum_ddl sets the insert-triggered
+    # reloptions that 13 introduced.
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     strategy:
@@ -109,7 +111,7 @@ jobs:
           - "3.14"
     services:
       postgres:
-        image: postgres:17
+        image: postgres:13
         env:
           POSTGRES_USER: outbox
           POSTGRES_PASSWORD: outbox
