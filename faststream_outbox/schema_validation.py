@@ -66,22 +66,24 @@ async def validate_schema(
     ``False`` never checks it.
     """
     async with engine.connect() as conn:
-        errors = await conn.run_sync(_validate_schema_sync, table)
+        schema = await conn.run_sync(_resolve_schema, table)
+        errors = await conn.run_sync(_validate_schema_sync, table, schema)
         # S2 / lease_ck: these two probes catch drift that `alembic revision
         # --autogenerate` cannot remediate — its index comparator ignores
         # postgresql_where and it has no check-constraint comparator at all.
         # Collect them separately so the raised error can point operators at
         # the hand-written-migration recipe (_AUTOGEN_BLIND_HINT) only when
         # one of them actually fired.
-        blind_errors = await conn.run_sync(_validate_index_predicates_sync, table)
-        blind_errors.extend(await conn.run_sync(_validate_check_constraints_sync, table))
+        blind_errors = await conn.run_sync(_validate_index_predicates_sync, table, schema)
+        blind_errors.extend(await conn.run_sync(_validate_check_constraints_sync, table, schema))
         errors.extend(blind_errors)
         if dlq_table is not None:
-            errors.extend(await conn.run_sync(_validate_dlq_schema_sync, dlq_table))
+            dlq_schema = await conn.run_sync(_resolve_schema, dlq_table)
+            errors.extend(await conn.run_sync(_validate_dlq_schema_sync, dlq_table, dlq_schema))
         autovacuum_errors: list[str] = []
         if check_autovacuum:
             reloptions = (
-                await conn.execute(_RELOPTIONS_QUERY, {"table": table.name, "schema": table.schema})
+                await conn.execute(_RELOPTIONS_QUERY, {"table": table.name, "schema": schema})
             ).scalar_one_or_none()
             autovacuum_errors = autovacuum_findings(table.name, reloptions)
     message_parts: list[str] = []
@@ -91,6 +93,24 @@ async def validate_schema(
         message_parts.append("Outbox autovacuum not tuned: " + "; ".join(autovacuum_errors))
     if message_parts:
         raise RuntimeError("\n\n".join(message_parts))
+
+
+_RESOLVE_SCHEMA_QUERY = text(
+    "SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+    "WHERE c.oid = to_regclass(format('%I', CAST(:table AS text)))",
+)
+
+
+def _resolve_schema(connection: "Connection", table: "Table") -> str | None:
+    """Return the schema the app's queries reach *table* in.
+
+    An unqualified table resolves through the whole ``search_path``, not just ``current_schema()``,
+    so ask Postgres where the name lands. ``None`` means it doesn't resolve; the probes then fall
+    back to ``current_schema()`` and report the table missing.
+    """
+    if table.schema is not None:
+        return table.schema
+    return connection.execute(_RESOLVE_SCHEMA_QUERY, {"table": table.name}).scalar_one_or_none()
 
 
 def _normalize_predicate(predicate: str) -> str:
@@ -123,7 +143,7 @@ _INDEX_PREDICATE_QUERY = text(
 )
 
 
-def _validate_index_predicates_sync(connection: "Connection", table: "Table") -> list[str]:
+def _validate_index_predicates_sync(connection: "Connection", table: "Table", schema: str | None) -> list[str]:
     """Compare the live partial-index WHERE predicates against what the package expects (S2).
 
     Alembic's index diff ignores ``postgresql_where``, so the alembic autogenerate pass
@@ -140,7 +160,7 @@ def _validate_index_predicates_sync(connection: "Connection", table: "Table") ->
     rows = (
         connection.execute(
             _INDEX_PREDICATE_QUERY,
-            {"table": table.name, "schema": table.schema},
+            {"table": table.name, "schema": schema},
         )
         .mappings()
         .all()
@@ -180,7 +200,7 @@ _EXPECTED_CHECK_CONSTRAINTS = {
 }
 
 
-def _validate_check_constraints_sync(connection: "Connection", table: "Table") -> list[str]:
+def _validate_check_constraints_sync(connection: "Connection", table: "Table", schema: str | None) -> list[str]:
     """Verify the live DB carries a CHECK enforcing each invariant the package needs.
 
     Alembic's ``compare_metadata`` registers no check-constraint comparator, so a missing
@@ -200,7 +220,7 @@ def _validate_check_constraints_sync(connection: "Connection", table: "Table") -
     rows = (
         connection.execute(
             _CHECK_CONSTRAINT_QUERY,
-            {"table": table.name, "schema": table.schema},
+            {"table": table.name, "schema": schema},
         )
         .mappings()
         .all()
@@ -241,19 +261,20 @@ def _compose_schema_mismatch_message(errors: list[str], *, has_blind_drift: bool
     return msg
 
 
-def _validate_schema_sync(connection: "Connection", table: "Table") -> list[str]:
+def _validate_schema_sync(connection: "Connection", table: "Table", schema: str | None) -> list[str]:
     """Run the outbox-table validation pass; see :func:`_run_validate` for the diff machinery."""
-    return _run_validate(connection, table, make_outbox_table)
+    return _run_validate(connection, table, schema, make_outbox_table)
 
 
-def _validate_dlq_schema_sync(connection: "Connection", table: "Table") -> list[str]:
+def _validate_dlq_schema_sync(connection: "Connection", table: "Table", schema: str | None) -> list[str]:
     """Run the DLQ-table validation pass; see :func:`_run_validate` for the diff machinery."""
-    return _run_validate(connection, table, make_dlq_table)
+    return _run_validate(connection, table, schema, make_dlq_table)
 
 
 def _run_validate(
     connection: "Connection",
     table: "Table",
+    schema: str | None,
     canonical_factory: "Callable[[MetaData, str], Table]",
 ) -> list[str]:
     """Run Alembic's autogenerate diff against the live DB and surface any "missing schema" drift.
@@ -286,7 +307,7 @@ def _run_validate(
     # user's schema onto the canonical copy so the autogenerate diff compares
     # ``app.outbox`` against ``app.outbox`` rather than the default search_path —
     # matching the schema-qualified DLQ CTE in ``client._build_dlq_cte`` (B10).
-    canonical_metadata = MetaData(schema=table.schema)
+    canonical_metadata = MetaData(schema=schema)
     canonical_factory(canonical_metadata, table.name)
 
     # Alembic reports the connection's DEFAULT schema to ``include_name`` as ``None`` (with
@@ -295,7 +316,7 @@ def _run_validate(
     # search_path) must be normalized to ``None`` before comparing, else ``name == "public"``
     # never matches Alembic's ``None`` and a CORRECT table falsely reads as "does not exist".
     default_schema_name = connection.dialect.default_schema_name
-    target_schema = None if table.schema == default_schema_name else table.schema
+    target_schema = None if schema == default_schema_name else schema
 
     def _include_name(name: str | None, type_: str, parent_names: "Mapping[str, str | None]") -> bool:
         # ``include_schemas=True`` makes Alembic enumerate EVERY schema and call this with

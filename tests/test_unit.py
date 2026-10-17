@@ -1411,7 +1411,7 @@ def test_validate_schema_sync_raises_when_alembic_missing() -> None:
         patch("faststream_outbox.schema_validation.is_alembic_installed", new=False),
         pytest.raises(ImportError, match=r"pip install 'faststream-outbox\[validate\]'"),
     ):
-        _validate_schema_sync(MagicMock(), t)
+        _validate_schema_sync(MagicMock(), t, None)
 
 
 def test_compose_schema_mismatch_message_appends_hint_on_blind_drift() -> None:
@@ -1461,7 +1461,7 @@ def test_validate_check_constraints_passes_under_convention_resolved_name() -> N
     connection = _mock_check_constraint_connection(
         [{"name": "ck_outbox_faststream_outbox_faststream_lease_ck", "definition": _LEASE_CK_DEFINITION}],
     )
-    assert _validate_check_constraints_sync(connection, table) == []
+    assert _validate_check_constraints_sync(connection, table, None) == []
 
 
 def test_validate_check_constraints_passes_under_literal_name() -> None:
@@ -1470,14 +1470,14 @@ def test_validate_check_constraints_passes_under_literal_name() -> None:
     connection = _mock_check_constraint_connection(
         [{"name": "outbox_faststream_lease_ck", "definition": _LEASE_CK_DEFINITION}],
     )
-    assert _validate_check_constraints_sync(connection, table) == []
+    assert _validate_check_constraints_sync(connection, table, None) == []
 
 
 def test_validate_check_constraints_missing_describes_predicate() -> None:
     """When no live CHECK enforces the predicate, the error names the invariant, not a guessed name."""
     table = make_outbox_table(MetaData(), table_name="outbox_faststream")
     connection = _mock_check_constraint_connection([])  # constraint absent from the live DB
-    errors = _validate_check_constraints_sync(connection, table)
+    errors = _validate_check_constraints_sync(connection, table, None)
     assert errors == [
         (
             f"missing CHECK constraint enforcing '{_LEASE_CK_PREDICATE}' "
@@ -1493,7 +1493,7 @@ def test_validate_check_constraints_drifted_predicate_reported_as_missing() -> N
     connection = _mock_check_constraint_connection(
         [{"name": "outbox_faststream_lease_ck", "definition": drifted}],
     )
-    errors = _validate_check_constraints_sync(connection, table)
+    errors = _validate_check_constraints_sync(connection, table, None)
     assert errors == [
         (
             f"missing CHECK constraint enforcing '{_LEASE_CK_PREDICATE}' "
