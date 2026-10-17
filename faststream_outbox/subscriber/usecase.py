@@ -236,6 +236,11 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
     def _fetch_tags(self) -> dict[str, typing.Any]:
         return self._base_tags(self._queues[0] if self._queues else "")
 
+    @property
+    def _pooled_connections(self) -> int:
+        """Engine-pool connections held while running: the fetch connection plus one writer per worker."""
+        return 1 + self._config.max_workers
+
     def _base_tags(self, queue: str) -> dict[str, typing.Any]:
         return {"queue": queue, "subscriber": self._call_name}
 

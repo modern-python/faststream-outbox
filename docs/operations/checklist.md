@@ -9,7 +9,9 @@ story.
 - [ ] Engine pool ≥ `Σ subs × (max_workers + 1)`. Every
   subscriber holds `max_workers + 1` SQLAlchemy pool connections (one
   writer per worker + one fetch) plus one raw asyncpg connection for
-  `LISTEN`. Sub-budget formula in [Subscriber § Connection
+  `LISTEN`. With a fixed-size pool, `broker.start()` raises below this
+  number; budget extra connections for the application's own sessions on
+  top. Sub-budget formula in [Subscriber § Connection
   budget](../usage/subscriber.md#connection-budget).
 - [ ] Postgres `max_connections` ≥ `replicas × Σ subs × (max_workers + 2)`.
   That covers `max_workers + 1` pool connections plus the raw asyncpg `LISTEN`

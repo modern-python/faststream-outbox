@@ -27,6 +27,7 @@ from faststream.exceptions import IncorrectState
 from faststream.specification.schema import BrokerSpec
 from faststream.specification.schema.extra import Tag, TagDict
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.pool import QueuePool
 from typing_extensions import override
 
 from faststream_outbox.client import AbstractOutboxClient, OutboxClient
@@ -228,10 +229,36 @@ class OutboxBroker(
 
     @override
     async def start(self) -> None:
+        self._check_pool_capacity()
         await self.connect()
         await super().start()
         self._warn_on_unstarted_foreign_publishers()
         self._warn_on_duplicate_queues()
+
+    def _check_pool_capacity(self) -> None:
+        """Raise when a fixed-size pool can't hold every subscriber's connections at once.
+
+        ``max_overflow`` has no public accessor; a missing ``_max_overflow`` skips the check
+        rather than failing startup.
+        """
+        engine = self.config.broker_config.engine
+        if engine is None:
+            return
+        pool = engine.pool
+        max_overflow = getattr(pool, "_max_overflow", None)
+        if not isinstance(pool, QueuePool) or not isinstance(max_overflow, int) or max_overflow < 0:
+            return
+        needed = sum(getattr(sub, "_pooled_connections", 0) for sub in self.subscribers)
+        capacity = pool.size() + max_overflow
+        if needed > capacity:
+            msg = (
+                f"Outbox subscribers need {needed} pooled connections for as long as they run (one fetch "
+                f"connection plus one per worker, for each subscriber), but the engine's pool allows "
+                f"{capacity} (pool_size={pool.size()} + max_overflow={max_overflow}). Raise pool_size or "
+                f"max_overflow on the engine, or lower max_workers, and leave room for the application's "
+                f"own sessions."
+            )
+            raise RuntimeError(msg)
 
     def _warn_on_duplicate_queues(self) -> None:
         # P22: the registration-time overlap warning only sees the broker's own

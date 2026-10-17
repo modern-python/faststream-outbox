@@ -26,6 +26,7 @@ from pydantic import BaseModel
 from sqlalchemy import MetaData, Table
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.pool import NullPool, QueuePool
 from typing_extensions import get_protocol_members
 
 from faststream_outbox import (
@@ -4505,3 +4506,67 @@ async def test_every_buffered_row_is_closed_by_one_event_with_a_duration(delete_
                 await sub._flush_buffer(buffer, writer_conn=None)  # noqa: SLF001
 
     _assert_dispatch_closed_once(events)
+
+
+def _broker_on_pool(**engine_kwargs: typing.Any) -> OutboxBroker:
+    return _make_broker(create_async_engine("postgresql+asyncpg://u:p@localhost/db", **engine_kwargs))
+
+
+def _subscribe(registrator: OutboxBroker | OutboxRouter, queue: str, max_workers: int) -> None:
+    @registrator.subscriber(queue, max_workers=max_workers)
+    async def handle(body: dict) -> None: ...
+
+
+async def test_start_rejects_a_pool_smaller_than_the_subscribers_hold() -> None:
+    """INVARIANT: ``start()`` refuses a fixed-size pool with fewer connections than the subscribers hold.
+
+    Each subscriber keeps ``1 + max_workers`` pooled connections for its whole life: the fetch connection
+    and one writer per worker. Below that total the loops wait on each other for connections, every
+    checkout times out after ``pool_timeout``, and the subscribers retry forever without consuming.
+    """
+    broker = _broker_on_pool(pool_size=2, max_overflow=1)
+    _subscribe(broker, "orders", max_workers=3)
+    try:
+        with pytest.raises(RuntimeError, match=r"need 4 pooled connections .* allows 3"):
+            await broker.start()
+    finally:
+        await broker.stop()
+        await broker.config.broker_config.engine.dispose()
+
+
+async def test_pool_check_counts_router_subscribers() -> None:
+    broker = _broker_on_pool(pool_size=2, max_overflow=0)
+    router = OutboxRouter()
+    _subscribe(router, "orders", max_workers=2)
+    broker.include_router(router)
+    with pytest.raises(RuntimeError, match="need 3 pooled connections"):
+        broker._check_pool_capacity()  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    "engine_kwargs",
+    [
+        {"pool_size": 2, "max_overflow": 2},
+        {"poolclass": NullPool},
+        {"pool_size": 1, "max_overflow": -1},
+        {"pool_size": 0},
+    ],
+    ids=["exactly-enough", "null-pool", "unlimited-overflow", "unlimited-size"],
+)
+def test_pool_check_accepts_pools_that_fit_or_have_no_fixed_size(engine_kwargs: dict[str, typing.Any]) -> None:
+    broker = _broker_on_pool(**engine_kwargs)
+    _subscribe(broker, "orders", max_workers=3)
+    broker._check_pool_capacity()  # noqa: SLF001
+
+
+def test_pool_check_skips_a_broker_without_an_engine() -> None:
+    broker = _make_broker()
+    _subscribe(broker, "orders", max_workers=3)
+    broker._check_pool_capacity()  # noqa: SLF001
+
+
+def test_queue_pool_exposes_the_overflow_limit_the_pool_check_reads() -> None:
+    """``_max_overflow`` is private; this fails here, not at a user's startup, if SQLAlchemy renames it."""
+    pool = create_async_engine("postgresql+asyncpg://u:p@localhost/db", pool_size=3, max_overflow=4).pool
+    assert isinstance(pool, QueuePool)
+    assert pool._max_overflow == 4  # noqa: SLF001
