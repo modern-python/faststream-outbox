@@ -4,7 +4,7 @@ Both ``OutboxBroker.publish`` / ``publish_batch`` and ``OutboxPublisher.publish`
 route through this producer via FastStream's ``_basic_publish(cmd, producer=...)``
 middleware stack, so encode → insert → ``published`` semantics live in one place. The
 insert itself (and its NOTIFY) belongs to the broker's client. The producer never opens
-its own session: every command carries the caller's ``AsyncSession`` so the row commits
+its own session: every command carries the caller's ``AsyncSession`` or ``AsyncConnection`` so the row commits
 atomically with the caller's domain writes.
 """
 

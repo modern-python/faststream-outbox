@@ -26,10 +26,10 @@ from faststream._internal.types import BrokerMiddleware, CustomCallable
 from faststream.exceptions import IncorrectState
 from faststream.specification.schema import BrokerSpec
 from faststream.specification.schema.extra import Tag, TagDict
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.pool import QueuePool
 from typing_extensions import override
 
+from faststream_outbox._session import SessionOrConnection, require_session_or_connection
 from faststream_outbox.client import AbstractOutboxClient, OutboxClient
 from faststream_outbox.configs import LastExceptionRenderer, OutboxBrokerConfig
 from faststream_outbox.message import OutboxInnerMessage
@@ -413,7 +413,7 @@ class OutboxBroker(
         body: typing.Any,
         *,
         queue: str,
-        session: AsyncSession,
+        session: SessionOrConnection,
         headers: dict[str, str] | None = None,
         correlation_id: str | None = None,
         activate_in: dt.timedelta | None = None,
@@ -422,6 +422,7 @@ class OutboxBroker(
     ) -> int | None:
         """Insert one outbox row using *session*'s open transaction.
 
+        *session* is an ``AsyncSession`` or, for Core code, an ``AsyncConnection``.
         Must be called inside a transaction the caller owns (typically inside an
         ``async with session.begin():`` block). ``publish`` does not flush, commit,
         or open its own transaction — that is the whole point of the transactional
@@ -453,7 +454,7 @@ class OutboxBroker(
         self,
         *bodies: typing.Any,
         queue: str,
-        session: AsyncSession,
+        session: SessionOrConnection,
         headers: dict[str, str] | None = None,
         activate_in: dt.timedelta | None = None,
         activate_at: dt.datetime | None = None,
@@ -467,9 +468,7 @@ class OutboxBroker(
         """
         # P1: validate the session type up front so an empty batch fails the same way a
         # non-empty one does (the command constructor that checks it is only built below).
-        if not isinstance(session, AsyncSession):
-            msg = "broker.publish_batch requires an sqlalchemy.ext.asyncio.AsyncSession"
-            raise TypeError(msg)
+        require_session_or_connection(session, "broker.publish_batch")
         if not bodies:
             # Validate queue + activate args even when there's no work so an empty
             # batch rejects the same misconfigurations a non-empty one does (F4-06).
@@ -499,7 +498,7 @@ class OutboxBroker(
         *,
         queue: str,
         timer_id: str,
-        session: AsyncSession,
+        session: SessionOrConnection,
     ) -> bool:
         """Delete a not-yet-leased timer row. Idempotent at the ``(queue, timer_id)`` level.
 
@@ -534,7 +533,7 @@ class OutboxBroker(
     async def fetch_unprocessed(
         self,
         *,
-        session: AsyncSession,
+        session: SessionOrConnection,
         queue: str | None = None,
         limit: int = 1000,
     ) -> list[OutboxInnerMessage]:

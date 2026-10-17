@@ -34,8 +34,8 @@ transactions are the better fit.*
 ## Producer side
 
 `broker.publish(body, *, queue, session, ...)` inserts an outbox row through
-the caller's `AsyncSession`. It does not flush, commit, or open its own
-transaction; the row must commit with the caller's domain writes:
+the caller's `AsyncSession` (or `AsyncConnection`, for Core code). It does not
+flush, commit, or open its own transaction; the row must commit with the caller's domain writes:
 
 ```python
 async with session_factory() as session, session.begin():

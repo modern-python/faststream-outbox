@@ -598,15 +598,15 @@ def test_broker_with_engine_has_client() -> None:
 
 
 async def test_broker_publish_rejects_non_async_session() -> None:
-    """INVARIANT: a non-``AsyncSession`` session argument is refused at the publish boundary.
+    """INVARIANT: a session that is neither ``AsyncSession`` nor ``AsyncConnection`` is refused at the boundary.
 
-    The transactional contract is only enforceable through a real session; anything else silently
-    degrades it. Accepting a duck-typed object (a sync ``Session``, a connection, a mock in
-    production code) would let the insert run outside the caller's transaction and fail as lost
-    messages rather than as a ``TypeError`` at the call site.
+    The transactional contract is only enforceable through a handle that owns the caller's transaction;
+    anything else silently degrades it. Accepting a duck-typed object (a sync ``Session``, a raw driver
+    connection, a mock in production code) would let the insert run outside the caller's transaction and
+    fail as lost messages rather than as a ``TypeError`` at the call site.
     """
     broker = _make_broker()
-    with pytest.raises(TypeError, match="AsyncSession"):
+    with pytest.raises(TypeError, match="AsyncSession or AsyncConnection"):
         await broker.publish(b"x", queue="orders", session=object())  # ty: ignore[invalid-argument-type]
 
 

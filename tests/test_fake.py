@@ -14,7 +14,7 @@ from faststream._internal.producer import ProducerProto
 from faststream.exceptions import NackMessage, StopConsume
 from faststream.middlewares import AckPolicy
 from sqlalchemy import MetaData
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 from typing_extensions import get_protocol_members
 
 from faststream_outbox import (
@@ -108,6 +108,20 @@ async def test_fake_broker_publish_triggers_handler() -> None:
 
     assert received == [{"order_id": 1}]
     assert test_broker.fake_client.rows == []  # row deleted after ack
+
+
+async def test_publish_on_a_core_connection_dispatches_under_the_test_broker() -> None:
+    broker = _make_broker()
+    received: list[dict] = []
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> None:
+        received.append(body)
+
+    async with TestOutboxBroker(broker):
+        await broker.publish({"order_id": 1}, queue="orders", session=AsyncMock(spec=AsyncConnection))
+
+    assert received == [{"order_id": 1}]
 
 
 async def test_sync_batch_inserts_whole_batch_before_dispatch_and_published_first() -> None:
