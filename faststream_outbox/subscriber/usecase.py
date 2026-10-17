@@ -43,7 +43,7 @@ from typing_extensions import override
 from faststream_outbox.message import ENVELOPE_MANAGED_HEADERS, OutboxInnerMessage, Retry, Terminal
 from faststream_outbox.parser.parser import OutboxParser
 from faststream_outbox.publisher.fake import OutboxFakePublisher
-from faststream_outbox.response import OutboxResponse
+from faststream_outbox.response import OutboxResponse, _OutboxConfigError
 from faststream_outbox.subscriber.config import OutboxSubscriberConfig, OutboxSubscriberSpecificationConfig
 
 
@@ -77,14 +77,6 @@ class _PendingFlush:
     row: OutboxInnerMessage
     event: str
     tags: dict[str, typing.Any]
-
-
-# Marker exception raised by programming guards inside ``process_message`` (e.g.
-# the OutboxResponse + foreign-publisher dual-fire guard). Inherits from
-# ``RuntimeError`` so ``pytest.raises(RuntimeError, ...)`` in tests catches it, but
-# is a distinct subclass so ``consume()`` and ``dispatch_one`` can re-raise it while
-# still swallowing plain handler-raised ``RuntimeError``s.
-class _OutboxConfigError(RuntimeError): ...
 
 
 # Cap for the ``last_exception`` string written to the DLQ. Some exceptions carry
@@ -643,11 +635,11 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                     # P18: a config error (e.g. OutboxResponse + foreign publisher) is not a
                     # connection failure. Letting it propagate to _run_with_reconnect would tear
                     # down the writer connection and back off (up to 30s), throttling unrelated
-                    # rows. Log it and continue; the row's lease expires and it is reclaimed.
-                    # Fix the configuration to stop the error.
+                    # rows. dispatch_one already wrote the recorded outcome, so the retry
+                    # strategy applies; log it and continue until the configuration is fixed.
                     self._log(
                         log_level=logging.ERROR,
-                        message=f"Outbox configuration error (fix required; row left to lease-expiry retry): {e!r}",
+                        message=f"Outbox configuration error (fix required; row retried per its strategy): {e!r}",
                         exc_info=e,
                     )
                 finally:
@@ -722,14 +714,12 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         try:
             await self.consume(row)
         except _OutboxConfigError:
-            # _OutboxConfigError escaping consume() is a programming guard (e.g.
-            # the OutboxResponse + foreign-publisher dual-fire guard). Re-raise so
-            # callers see the error immediately — sync test dispatch surfaces it
-            # from outbox.publish; the worker loop's outer except re-raises it via
-            # _run_with_reconnect so it's logged at ERROR level with a reconnect
-            # backoff rather than silently ignored.
+            # A programming guard tripped after the handler ran. Write the outcome the ack
+            # middleware recorded, then re-raise: sync test dispatch surfaces it from
+            # outbox.publish, and _worker_inner logs it at ERROR. Inline (buffer=None),
+            # because a buffered row would be task_done'd twice once the error unwinds.
             row.handler_duration_seconds = time.perf_counter() - start_perf
-            self._emit_dispatch_abandoned(row)
+            await self._write_outcome(row, base, buffer=None, writer_conn=writer_conn)
             raise
         except Exception as e:  # noqa: BLE001
             # No ack/nack metric here: the row was never marked terminal/retry, so
@@ -745,6 +735,18 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             self._emit_dispatch_abandoned(row)
             return False
         row.handler_duration_seconds = time.perf_counter() - start_perf
+        return await self._write_outcome(row, base, buffer=buffer, writer_conn=writer_conn)
+
+    async def _write_outcome(
+        self,
+        row: OutboxInnerMessage,
+        base: dict[str, typing.Any],
+        *,
+        buffer: "list[_PendingFlush] | None",
+        writer_conn: "AsyncConnection | None",
+    ) -> bool:
+        """Write the outcome recorded during consume and emit its metric. Returns True iff buffered."""
+        logger = self._outer_config.logger.logger.logger if self._outer_config.logger else None
         # Shutdown race: SubscriberUsecase.consume() returns None without invoking
         # process_message when self.running has been flipped to False by stop().
         # Detecting that here lets us preserve the row instead of falling through
@@ -1006,10 +1008,9 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         ``OutboxResponse + foreign-publisher`` dual-fire check in
         ``process_message``) raise ``_OutboxConfigError`` (a ``RuntimeError``
         subclass) so the guard is distinguishable from handler-raised
-        ``RuntimeError``s. Re-raising here lets ``dispatch_one`` surface it to
-        the caller (sync test dispatch exposes it from ``outbox.publish``; the
-        worker loop re-raises so the error is logged and the lease expires rather
-        than silently swallowing a configuration mistake).
+        ``RuntimeError``s. Re-raising here lets ``dispatch_one`` write the recorded
+        outcome and surface the error: sync test dispatch exposes it from
+        ``outbox.publish``, and the worker loop logs it at ERROR.
 
         # Upstream equivalent (extended):
         #   SubscriberUsecase.consume

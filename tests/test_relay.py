@@ -209,7 +209,7 @@ async def test_outbox_response_with_foreign_publisher_raises() -> None:
     The two compose into a silent dual-fire: the row lands in the outbox *and* the same body is
     published to the foreign broker, so downstream sees it twice with no error anywhere. The guard
     turns an undetectable delivery bug into a loud ``_OutboxConfigError`` at dispatch, which the
-    worker loop then swallows without nacking so the row simply waits for the wiring to be fixed.
+    worker loop logs at ERROR while the row retries until the wiring is fixed.
     """
     metadata = MetaData()
     outbox_table = make_outbox_table(metadata)
@@ -253,6 +253,32 @@ async def test_outbox_response_with_foreign_publisher_fires_guard_before_side_ef
         publisher_kafka.mock.assert_not_called()
         # …and no follow-on outbox row was inserted for the relayed body.
         assert not any(r.queue == "next_queue" for r in test_outbox.fake_client.rows)
+
+
+async def test_outbox_response_with_foreign_publisher_writes_the_recorded_retry() -> None:
+    """INVARIANT: a configuration error after the handler writes the outcome the ack middleware recorded.
+
+    The error unwinds through the ack middleware, which nacks, so the retry strategy has already
+    decided. Dropping that outcome leaves the row leased until expiry and, with ``max_deliveries=None``,
+    re-runs the handler every ``lease_ttl_seconds`` forever.
+    """
+    metadata = MetaData()
+    broker_outbox = OutboxBroker(outbox_table=make_outbox_table(metadata))
+    broker_kafka = KafkaBroker("kafka://test:9092")
+    publisher_kafka = broker_kafka.publisher("relay_topic")
+
+    @publisher_kafka
+    @broker_outbox.subscriber("relay_queue")
+    async def relay(body: dict[str, Any]) -> OutboxResponse:
+        return OutboxResponse(body=body, queue="next_queue", session=mock.AsyncMock(spec=AsyncSession))
+
+    test_outbox = TestOutboxBroker(broker_outbox, run_loops=False)
+    async with TestKafkaBroker(broker_kafka), test_outbox as outbox:
+        with pytest.raises(RuntimeError, match="OutboxResponse"):
+            await outbox.publish({"x": 1}, queue="relay_queue", session=None)  # ty: ignore[invalid-argument-type]
+        rows = [(r.queue, r.attempts_count, r.acquired_token) for r in test_outbox.fake_client.rows]
+
+    assert rows == [("relay_queue", 1, None)]
 
 
 async def test_unstarted_foreign_broker_warns_on_start(caplog: pytest.LogCaptureFixture) -> None:

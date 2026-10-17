@@ -96,9 +96,12 @@ delivery, opened in a `session.begin()` block, committed on handler return,
 rolled back on exception.
 
 A handler's `AsyncSession` is therefore resolved exactly as in an HTTP
-route (a fresh session per delivery, not a shared instance), and
-`OutboxResponse(session=...)` commits the follow-on row with the handler's
-domain writes. See [Chained
+route (a fresh session per delivery, not a shared instance). Publish
+follow-on rows with `router.broker.publish(..., session=session)` inside
+the handler so they commit with its domain writes. Returning
+`OutboxResponse(session=session)` with this session does not work: the
+dependency is torn down before the response is published, so the dispatch
+raises and the inbound row is retried. See [Chained
 publishing](./publisher.md#chained-publishing).
 
 ## Annotated context shortcuts

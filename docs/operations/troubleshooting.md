@@ -17,6 +17,7 @@ owns the underlying design.
 | [`AckPolicy.ACK_FIRST` raises `ValueError` at registration](#ackpolicyack_first-raises-valueerror-at-registration) | By design (would defeat outbox reliability) |
 | [`OutboxResponse(...)` + foreign-publisher decorator logs a configuration error](#outboxresponse-foreign-publisher-decorator-config-error) | By design (dual-fire footgun) |
 | [Chained `OutboxResponse` retries after the handler "succeeded"](#outboxresponse-relay-publish-failure) | Follow-on publish fails post-handler; nacks the inbound row |
+| [`OutboxResponse` raises "no open transaction"](#outboxresponse-no-open-transaction) | The response's session closed before the publish |
 | [`validate_schema()` raises `ImportError`](#validate_schema-raises-importerror) | `[validate]` extra not installed |
 
 ## `event=lease_lost` recurring in logs { #event-lease_lost-recurring-in-logs }
@@ -245,14 +246,14 @@ See [Subscriber § Ack policy](../usage/subscriber.md#ack-policy).
 
 A handler with both `@kafka_pub` and an `OutboxResponse(...)` return
 value logs an ERROR on every dispatch:
-`Outbox configuration error (fix required; row left to lease-expiry retry)`.
+`Outbox configuration error (fix required; row retried per its strategy)`.
 
 This is by design. The combination would both insert a row into the
 outbox *and* publish to Kafka, a dual-fire that doubles delivery. The
 subscriber refuses the chain composition after the handler returns. The
-worker logs the error and moves on without nacking, so the retry
-strategy is not consulted. The row's lease expires, a later fetch
-reclaims it, and the cycle repeats until the configuration is fixed.
+worker logs the error and writes the nack the ack middleware recorded, so
+the row follows its retry strategy until the configuration is fixed (or,
+with `max_deliveries` set, until it goes terminal).
 
 To confirm, inspect the handler's decorator stack and return type.
 
@@ -288,6 +289,24 @@ To fix it, resolve the underlying publish failure: the schema or
 connection for the follow-on insert, or conflicting headers that need
 dropping. For non-idempotent chains, pass a deterministic `timer_id` so
 a redelivery's insert is a no-op.
+
+See [Publisher § Chained publishing](../usage/publisher.md#chained-publishing).
+
+## `OutboxResponse` raises "no open transaction" { #outboxresponse-no-open-transaction }
+
+A handler that returns `OutboxResponse(...)` logs an ERROR on every
+dispatch saying the response's session has no open transaction, and the
+inbound row keeps retrying.
+
+The response is published after the handler returns. A session from
+`Depends(...)`, or from an `async with` block inside the handler, is
+already closed by then, so the follow-on row would sit in a transaction
+nobody commits. The subscriber refuses to publish it and the inbound row
+follows its retry strategy.
+
+To fix it, open the session in a broker middleware so it outlives the
+handler, or call `broker.publish(..., session=session)` inside the
+handler instead of returning `OutboxResponse`.
 
 See [Publisher § Chained publishing](../usage/publisher.md#chained-publishing).
 

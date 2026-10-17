@@ -149,35 +149,46 @@ with your domain writes):
 
 !!! note "The `session` must outlive the handler return"
     The returned `OutboxResponse` is published after the handler
-    returns, so its `session` must still be open at that point. The
-    requirement is about session *lifetime*, not any particular framework:
-    provide the session through a dependency that the framework tears down
-    *after* the response flow. FastAPI's `Depends(get_session)` or
-    FastStream's own `Depends` / `Context` session both do this. Opening
-    your own `async with session_factory() as session:` inside the handler
-    does not work here: that session closes on `return`, before the row
-    is inserted. In that case, call `broker.publish(..., session=session)`
-    directly inside the `async with` instead (see
-    [§ Not a relay decorator](#not-a-relay-decorator)).
+    returns, so its `session` must still hold an open transaction at that
+    point. A session from `Depends(...)` does not: FastStream and FastAPI
+    both tear dependencies down inside the handler call, before the
+    response is published. The same goes for an
+    `async with session_factory() as session:` block inside the handler.
+    In those cases the dispatch raises `RuntimeError` naming the missing
+    transaction, logs it at ERROR, and retries the inbound row. Either
+    open the session in a broker middleware, as below, or call
+    `broker.publish(..., session=session)` inside the handler instead
+    (see [§ Not a relay decorator](#not-a-relay-decorator)).
+
+A broker middleware's `on_receive` / `after_processed` hooks wrap the
+whole dispatch, response publish included, so a session opened there
+covers both the handler's writes and the follow-on row. The commit runs
+before the ack decision, so a failed commit retries the inbound row:
 
 ```python
-from fastapi import Depends
+from faststream import BaseMiddleware, Context
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from faststream_outbox import OutboxResponse
-from faststream_outbox.annotations import OutboxMessage
+from faststream_outbox import OutboxBroker, OutboxResponse
 
-# `get_session` is your app's session dependency — the same one your HTTP
-# routes use. `Depends(...)` resolves inside a handler only under the FastAPI
-# integration; see the engine / sessionmaker setup in the FastAPI guide.
+
+class SessionPerMessage(BaseMiddleware):
+    async def on_receive(self) -> None:
+        self._begin = session_factory.begin()
+        self.context.set_local("session", await self._begin.__aenter__())
+        await super().on_receive()
+
+    async def after_processed(self, exc_type=None, exc_val=None, exc_tb=None) -> bool | None:
+        await self._begin.__aexit__(exc_type, exc_val, exc_tb)
+        return await super().after_processed(exc_type, exc_val, exc_tb)
+
+
+broker = OutboxBroker(engine, outbox_table=outbox_table, middlewares=[SessionPerMessage])
 
 
 @broker.subscriber("orders")
-async def handle(
-    msg: OutboxMessage,
-    session: AsyncSession = Depends(get_session),
-) -> OutboxResponse:
-    ...  # process inbound
+async def handle(body: dict, session: AsyncSession = Context()) -> OutboxResponse:
+    ...  # domain writes on `session`
     return OutboxResponse(
         body={"chained": True},
         queue="downstream",
@@ -185,8 +196,9 @@ async def handle(
     )
 ```
 
-`correlation_id` propagates from the inbound message if you don't set one
-explicitly, which is useful for trace stitching. Plain returns (`None`, `dict`,
+`correlation_id` comes from `headers["correlation_id"]` when you set the
+header but not the argument, and otherwise from the inbound message, which
+is useful for trace stitching. Plain returns (`None`, `dict`,
 etc.) are silently skipped, so handlers that don't want to chain just
 return normally.
 

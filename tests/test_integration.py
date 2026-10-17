@@ -10,6 +10,7 @@ from typing import Any
 from unittest import mock
 
 import pytest
+from faststream import BaseMiddleware, Context, Depends
 from faststream.kafka import KafkaBroker, TestKafkaBroker
 from sqlalchemy import MetaData, Table, event, insert, select, text
 from sqlalchemy.exc import IntegrityError
@@ -468,6 +469,94 @@ async def test_outbox_response_followon_row_commits_with_handler_transaction(pg_
     async with session_factory() as session:
         rows = await broker.fetch_unprocessed(session=session, queue="downstream")
     assert [r.queue for r in rows] == ["downstream"]
+
+
+async def test_outbox_response_on_a_session_closed_before_the_publish_is_retried(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+) -> None:
+    """INVARIANT: an ``OutboxResponse`` whose session has no open transaction is refused and the inbound row retried.
+
+    ``Depends`` tears its session down inside the handler call, before the response is published, so
+    the follow-on INSERT would land in a transaction nobody commits. Publishing anyway acks the inbound
+    row and loses the follow-on row without an error.
+    """
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+
+    async def get_session() -> Any:
+        async with session_factory() as session, session.begin():
+            yield session
+
+    session_dep = Depends(get_session)
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+
+    @broker.subscriber(
+        "orders", min_fetch_interval=0.05, max_fetch_interval=0.2, retry_strategy=ConstantRetry(delay_seconds=60.0)
+    )
+    async def handle(body: dict[str, Any], session: AsyncSession = session_dep) -> OutboxResponse:
+        return OutboxResponse(body=body, queue="downstream", session=session)
+
+    errors: list[str] = []
+    async with broker:
+        sub = next(iter(broker._subscribers))  # noqa: SLF001
+        original_log = sub._log  # noqa: SLF001
+
+        def spy_log(*args: Any, **kwargs: Any) -> Any:
+            if kwargs.get("log_level") == logging.ERROR:
+                errors.append(str(kwargs.get("message", "")))
+            return original_log(*args, **kwargs)
+
+        with mock.patch.object(sub, "_log", side_effect=spy_log):
+            async with session_factory() as session, session.begin():
+                await broker.publish({"order_id": 1}, queue="orders", session=session)
+            await _wait_until(lambda: bool(errors), timeout=10.0)
+            await asyncio.sleep(0.2)
+
+    async with pg_engine.connect() as conn:
+        rows = (await conn.execute(select(outbox_table.c.queue, outbox_table.c.attempts_count))).all()
+    assert [(r.queue, r.attempts_count) for r in rows] == [("orders", 1)]
+    assert any("transaction" in e for e in errors), errors
+
+
+class _SessionPerMessage(BaseMiddleware):
+    """Open the handler's session and transaction around the whole dispatch, response publish included."""
+
+    session_factory: async_sessionmaker[AsyncSession]
+
+    async def on_receive(self) -> None:
+        self._begin = self.session_factory.begin()
+        self.context.set_local("session", await self._begin.__aenter__())
+        await super().on_receive()
+
+    async def after_processed(self, exc_type: Any = None, exc_val: Any = None, exc_tb: Any = None) -> bool | None:
+        await self._begin.__aexit__(exc_type, exc_val, exc_tb)
+        return await super().after_processed(exc_type, exc_val, exc_tb)
+
+
+async def test_outbox_response_on_a_middleware_scoped_session_commits_the_followon_row(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+) -> None:
+    """A session opened in a broker middleware outlives the response publish, so the follow-on row commits."""
+    _SessionPerMessage.session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table, middlewares=[_SessionPerMessage])
+    handled: list[dict[str, Any]] = []
+    session_ctx = Context()
+
+    @broker.subscriber("orders", min_fetch_interval=0.05, max_fetch_interval=0.2)
+    async def handle(body: dict[str, Any], session: AsyncSession = session_ctx) -> OutboxResponse:
+        handled.append(body)
+        return OutboxResponse(body=body, queue="downstream", session=session)
+
+    async with broker:
+        async with _SessionPerMessage.session_factory() as session, session.begin():
+            await broker.publish({"order_id": 1}, queue="orders", session=session)
+        await _wait_until(lambda: bool(handled), timeout=10.0)
+        await asyncio.sleep(0.3)
+
+    async with pg_engine.connect() as conn:
+        queues = (await conn.execute(select(outbox_table.c.queue))).scalars().all()
+    assert queues == ["downstream"]
 
 
 async def test_publish_payload_is_decodable_by_subscriber(pg_engine, outbox_table) -> None:
@@ -1907,8 +1996,8 @@ async def test_relay_dual_fire_guard_through_worker_loop_leaves_row_and_logs(
     Every existing relay-chain test runs in ``TestOutboxBroker(run_loops=False)``,
     where the handler runs synchronously inside ``publish`` and the guard raises out
     of ``dispatch_one``. The *worker-loop* contract is different: ``_worker_inner``
-    catches the ``_OutboxConfigError``, logs it at ERROR, and leaves the row for
-    lease-expiry retry (it must NOT delete it or fire the foreign publish). This is
+    catches the ``_OutboxConfigError`` and logs it at ERROR, and the row is retried
+    per its strategy (never deleted, and the foreign publish never fires). This is
     the first test that exercises that catch path end-to-end against real Postgres.
     """
     broker_outbox = OutboxBroker(pg_engine, outbox_table=outbox_table)
@@ -1948,8 +2037,8 @@ async def test_relay_dual_fire_guard_through_worker_loop_leaves_row_and_logs(
         # Asserted inside the TestKafkaBroker context: outside it, `.mock` raises SetupError.
         publisher_kafka.mock.assert_not_called()
 
-    # Row left in place (lease held, not deleted) for lease-expiry retry.
-    assert await _row_count(pg_engine, outbox_table) == 1, "config-error row must be left for lease-expiry, not deleted"
+    # Row kept for retry, not deleted.
+    assert await _row_count(pg_engine, outbox_table) == 1, "config-error row must be retried, not deleted"
     # And the _OutboxConfigError was logged at ERROR by the worker loop.
     assert errors, "worker loop must log the _OutboxConfigError at ERROR"
 
