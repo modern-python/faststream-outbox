@@ -5,8 +5,9 @@ Two scenarios:
 * **consumer** -- seed N rows directly, then start the broker with a no-op handler
   and drain them. A no-op handler is the point: what is measured is transport cost,
   not handler cost.
-* **producer** -- N ``publish()`` calls in one transaction. Surfaces the two
-  statements per publish (``INSERT ... RETURNING`` + ``SELECT pg_notify``).
+* **producer** -- N ``publish()`` calls, in one transaction or in transactions of
+  ``publishes_per_transaction``. Surfaces the ``INSERT ... RETURNING`` per publish and the
+  ``SELECT pg_notify`` per transaction.
 
 Each run gets a fresh table (UUID suffix, mirroring the ``outbox_table`` fixture in
 tests/conftest.py) so pg_stat_user_tables counters start at zero.
@@ -119,16 +120,15 @@ async def run_consumer(engine: AsyncEngine, cfg: RunConfig) -> RunResult:
         # redelivery can't drive the counter to N while rows are still unprocessed.
         seen_ids: set[bytes] = set()
 
+        # The seed's raw INSERT emits no pg_notify, so the fetch loop never gets a NOTIFY wake.
+        # Most points pin a tiny interval so the idle tail stays short; one runs the subscriber's
+        # default intervals to show a backlog still drains at DB speed.
         @broker.subscriber(
             cfg.queue,
             max_workers=cfg.max_workers,
             fetch_batch_size=cfg.fetch_batch_size,
-            # Tiny fetch interval so drain is DB-bound, not sleep-bound: the seed's raw
-            # INSERT emits no pg_notify and the broker isn't running during it, so the
-            # fetch loop never gets a NOTIFY wake and would otherwise sleep its full
-            # max_fetch_interval whenever _inflight drains. min must be <= max.
-            min_fetch_interval=0.001,
-            max_fetch_interval=0.001,
+            min_fetch_interval=cfg.fetch_interval[0],
+            max_fetch_interval=cfg.fetch_interval[1],
             terminal_flush_batch_size=cfg.terminal_flush_batch_size,
         )
         async def _handler(msg: bytes) -> None:
@@ -165,7 +165,7 @@ async def run_consumer(engine: AsyncEngine, cfg: RunConfig) -> RunResult:
 
 
 async def run_producer(engine: AsyncEngine, cfg: RunConfig) -> RunResult:
-    """N publish() calls in one transaction -- the write-path cost."""
+    """N publish() calls, batched into transactions per the config -- the write-path cost."""
     await ensure_extension(engine)
     metadata, table = await _create_table(engine)
     try:
@@ -174,12 +174,14 @@ async def run_producer(engine: AsyncEngine, cfg: RunConfig) -> RunResult:
 
         broker = OutboxBroker(engine, outbox_table=table, logger=None)
         payload = b"x" * cfg.payload_bytes
+        per_transaction = cfg.publishes_per_transaction or cfg.messages
 
         async with probe(engine, table.name) as sink:
             started = time.perf_counter()
-            async with AsyncSession(engine) as session, session.begin():
-                for _ in range(cfg.messages):
-                    await broker.publish(payload, queue=cfg.queue, session=session)
+            for first in range(0, cfg.messages, per_transaction):
+                async with AsyncSession(engine) as session, session.begin():
+                    for _ in range(min(per_transaction, cfg.messages - first)):
+                        await broker.publish(payload, queue=cfg.queue, session=session)
             wall = time.perf_counter() - started
 
         return RunResult(scenario="producer", config=cfg, wall_seconds=wall, probe=sink[0])

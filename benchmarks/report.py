@@ -19,6 +19,15 @@ emitted whenever a physical connection is established inside the measured window
 workload work. SELECT is the only operation the environment also emits, so it is the only one
 that cannot be gated exactly.
 
+``other_calls`` counts BEGIN, COMMIT and other utility statements. The fetch and writer
+connections run in autocommit, so a consumer run sends almost none; it is gated with the same
+kind of absolute slack as ``select_calls``.
+
+``fetch_calls`` is the fetch CTE (``WITH ready AS (...) UPDATE``). The fetch loop claims once
+half a batch of slots is free, so the count lands between ``messages / fetch_batch_size`` and
+twice that, depending on how far the loop lags the workers. It is gated at twice its baseline,
+which still fails by an order of magnitude if the loop goes back to one-row claims.
+
 ``wal_records`` is near-structural but carries ~5% server-wide spread, so it is gated
 with a 10% upper-bound band, never exact. The total ``calls``, ``wal_bytes`` (full-page
 images), ``wal_fpi`` and wall-clock / ``msgs_per_second`` are reported for humans but
@@ -27,6 +36,7 @@ NEVER gated -- they are timing- or FPI-noisy and would flake the build.
 
 import typing
 
+from benchmarks.config import RunConfig
 from benchmarks.workload import RunResult
 
 
@@ -51,14 +61,14 @@ from benchmarks.workload import RunResult
 EXACT_KEYS: tuple[str, ...] = ("delete_calls", "tup_upd", "tup_del", "tup_ins", "insert_calls")
 
 # Near-deterministic: ~5% observed spread, so a 10% upper-bound band leaves headroom.
-TOLERANT_KEYS: dict[str, float] = {"wal_records": 0.10}
+TOLERANT_KEYS: dict[str, float] = {"wal_records": 0.10, "fetch_calls": 1.0}
 
 # Upper bound as baseline + N, for counters whose baseline is small enough that a ratio band
 # collapses (a 10% band on 0 is still 0). The slack absorbs infrastructure statements the probe
 # filter cannot exclude, and must stay far below one statement per message so the regressions
 # these numbers exist to catch -- a SELECT added to the consume path, or the producer losing
 # per-transaction pg_notify dedup -- still fail by three orders of magnitude.
-SLACK_KEYS: dict[str, int] = {"select_calls": 2}
+SLACK_KEYS: dict[str, int] = {"select_calls": 2, "other_calls": 2}
 
 
 def normalize(result: RunResult) -> dict[str, float]:
@@ -74,6 +84,8 @@ def normalize(result: RunResult) -> dict[str, float]:
     delete_calls = p.calls_by_op.get("delete", 0)
     insert_calls = p.calls_by_op.get("insert", 0)
     select_calls = p.calls_by_op.get("select", 0)
+    fetch_calls = p.calls_by_op.get("with", 0)
+    other_calls = p.calls_by_op.get("other", 0)
     return {
         "messages": n,
         "wall_seconds": result.wall_seconds,
@@ -82,6 +94,8 @@ def normalize(result: RunResult) -> dict[str, float]:
         "delete_calls": delete_calls,
         "insert_calls": insert_calls,
         "select_calls": select_calls,
+        "fetch_calls": fetch_calls,
+        "other_calls": other_calls,
         "tup_ins": p.tup_ins,
         "tup_upd": p.tup_upd,
         "tup_del": p.tup_del,
@@ -109,7 +123,11 @@ def _key(result: RunResult) -> str:
     cfg = result.config
     base = f"{result.scenario}/w{cfg.max_workers}/b{cfg.fetch_batch_size}"
     if cfg.terminal_flush_batch_size != 1:
-        return f"{base}/tfbs{cfg.terminal_flush_batch_size}"
+        base = f"{base}/tfbs{cfg.terminal_flush_batch_size}"
+    if cfg.fetch_interval != RunConfig.fetch_interval:
+        base = f"{base}/interval{cfg.fetch_interval[0]:g}-{cfg.fetch_interval[1]:g}"
+    if cfg.publishes_per_transaction is not None:
+        base = f"{base}/ppt{cfg.publishes_per_transaction}"
     return base
 
 
@@ -122,21 +140,21 @@ def format_table(results: list[RunResult]) -> str:
     """Render the runs as a human table with a gated-vs-informational footer."""
     # Columns/precision/footer facts are mirrored in format_markdown -- keep in sync.
     header = (
-        f"{'scenario':<22} {'msg/s':>9} {'delete/msg':>11} {'WALrec/msg':>11} "
+        f"{'scenario':<34} {'msg/s':>9} {'delete/msg':>11} {'WALrec/msg':>11} "
         f"{'WALB/msg':>9} {'fpi':>5} {'upd':>7} {'del':>7} {'dead_tup':>9}"
     )
     lines = [header, "-" * len(header)]
     for r in results:
         m = normalize(r)
         lines.append(
-            f"{_key(r):<22} {m['msgs_per_second']:>9.0f} {m['delete_calls_per_msg']:>11.3f} "
+            f"{_key(r):<34} {m['msgs_per_second']:>9.0f} {m['delete_calls_per_msg']:>11.3f} "
             f"{m['wal_records_per_msg']:>11.2f} {m['wal_bytes_per_msg']:>9.0f} "
             f"{m['wal_fpi']:>5.0f} {m['tup_upd']:>7.0f} {m['tup_del']:>7.0f} {m['dead_tup']:>9.0f}",
         )
     lines.append("")
     lines.append("GATED (fail the build): delete_calls + tuple counters (upd/del/ins) + the")
-    lines.append("producer's insert_calls, all exact; select_calls +2; wal_records within a 10%")
-    lines.append("band. Columns upd/del are those gated raw counters.")
+    lines.append("producer's insert_calls, all exact; select_calls and other_calls +2; wal_records")
+    lines.append("within a 10% band; fetch_calls within 2x. Columns upd/del are those gated raw counters.")
     lines.append("INFORMATIONAL (never gated): total calls, WAL bytes, msg/s -- FPI/timing noise.")
     lines.append("delete/msg, WALrec/msg and WALB/msg are per-message views, not the gated totals.")
     return "\n".join(lines)
@@ -168,7 +186,8 @@ def format_markdown(results: list[RunResult], failures: list[str]) -> str:
     lines.append("")
     lines.append(
         "_Gated (fails the build): `delete_calls` + tuple counters (upd/del/ins) + the "
-        "producer's `insert_calls`, exact; `select_calls` within +2; `wal_records` within a 10% band. "
+        "producer's `insert_calls`, exact; `select_calls` and `other_calls` within +2; "
+        "`wal_records` within a 10% band; `fetch_calls` within 2x. "
         "msg/s, WAL bytes and total calls are informational (timing/FPI noise)._",
     )
     return "\n".join(lines)

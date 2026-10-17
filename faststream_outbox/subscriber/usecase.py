@@ -22,6 +22,7 @@ in the next iteration.
 
 import asyncio
 import dataclasses
+import functools
 import logging
 import random
 import time
@@ -208,13 +209,12 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         self._inflight: asyncio.Queue[OutboxInnerMessage] = asyncio.Queue(
             maxsize=config.fetch_batch_size,
         )
-        # Set by the LISTEN callback to wake _fetch_loop early; cleared after each
-        # wakeup. When LISTEN is unavailable the event simply never fires and the
-        # loop sleeps the full adaptive interval.
         # Frozen set of served queues for the O(1) NOTIFY-payload filter (P14); the
         # queue list is fixed per subscriber, so caching it here clarifies intent.
         self._served_queues: frozenset[str] = frozenset(config.queues)
+        # Wakes _fetch_loop: set by the LISTEN callback and by workers once `_refill_at` slots are free.
         self._notify_event: asyncio.Event = asyncio.Event()
+        self._refill_at: int = max(1, config.fetch_batch_size // 2)
         # Set by stop() to halt _fetch_inner before tasks are cancelled. Distinct
         # from self.running: running must stay True during drain so FastStream's
         # SubscriberUsecase.consume() doesn't early-exit on rows already in _inflight.
@@ -232,11 +232,17 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
     def _queues(self) -> list[str]:
         return self._config.queues
 
+    @functools.cached_property
+    def _call_name(self) -> str:
+        # Exposed as the ``subscriber`` tag, which adapters map to FastStream's ``handler`` label.
+        return self.specification.call_name
+
+    @functools.cached_property
+    def _fetch_tags(self) -> dict[str, typing.Any]:
+        return self._base_tags(self._queues[0] if self._queues else "")
+
     def _base_tags(self, queue: str) -> dict[str, typing.Any]:
-        # ``self.specification.call_name`` is the subscriber's handler name (the
-        # decorated function's ``__name__``); we expose it as the ``subscriber``
-        # tag so adapters can map it to FastStream's ``handler`` label.
-        return {"queue": queue, "subscriber": self.specification.call_name}
+        return {"queue": queue, "subscriber": self._call_name}
 
     @staticmethod
     def _with_exception_type(tags: dict[str, typing.Any], row: OutboxInnerMessage) -> dict[str, typing.Any]:
@@ -358,7 +364,8 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         if engine is None:
             yield {"fetch_conn": None, "listen_conn": None}
             return
-        async with engine.connect() as fetch_conn:
+        async with engine.connect() as raw_fetch_conn:
+            fetch_conn = await raw_fetch_conn.execution_options(isolation_level="AUTOCOMMIT")
             listen_conn = await self._open_listen_connection(engine)
             try:
                 yield {"fetch_conn": fetch_conn, "listen_conn": listen_conn}
@@ -393,17 +400,18 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                     )
                     last_listen_check = now
             free = self._inflight.maxsize - self._inflight.qsize()
-            if free <= 0:
+            if free < self._refill_at:
                 await self._wait_for_notify_or_timeout(base)
                 continue
-            limit = min(free, self._config.fetch_batch_size)
+            # A NOTIFY that lands after this clear is served by this fetch or wakes the next wait.
+            self._notify_event.clear()
             # fetch_conn is None only in the test-broker path against FakeOutboxClient
             # (which ignores conn); the real OutboxClient raises if conn is None. The
             # AbstractOutboxClient surface admits None so both implementations type-check.
             rows = await self._client.fetch(
                 fetch_conn,
                 self._queues,
-                limit=limit,
+                limit=free,
                 lease_ttl_seconds=self._config.lease_ttl_seconds,
             )
             # Emit a fetched event per tick (count=0 on idle), tagged by the first
@@ -413,7 +421,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             # ``queue`` tag from row-level events instead.
             self._emit_metric(
                 "fetched",
-                {**self._base_tags(self._queues[0] if self._queues else ""), "count": len(rows)},
+                {**self._fetch_tags, "count": len(rows)},
             )
             if rows:
                 idle_count = 0
@@ -603,6 +611,8 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                         row = await self._inflight.get()
                 else:
                     row = await self._inflight.get()
+                if self._inflight.maxsize - self._inflight.qsize() >= self._refill_at:
+                    self._notify_event.set()
                 buffered = False
                 try:
                     buffered = await self.dispatch_one(row, writer_conn=writer_conn, buffer=buffer)

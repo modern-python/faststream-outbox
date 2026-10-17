@@ -675,6 +675,63 @@ async def test_loop_mode_feed_wakes_fetch_loop_via_notify() -> None:
         await asyncio.wait_for(handled.wait(), timeout=2.0)  # ~30s without the notify wakeup
 
 
+async def test_loop_mode_backlog_drains_without_waiting_for_the_poll_interval() -> None:
+    """INVARIANT: a fetch loop with a full in-flight queue refetches as soon as workers free space.
+
+    One NOTIFY wakes the loop for a 30-row backlog with a 10-row batch and a 30 s poll. If the
+    full-queue branch waits on the poll timer instead of on workers freeing slots, every batch after
+    the first waits `min_fetch_interval`, and a backlog that arrives without a NOTIFY (restart,
+    retries, timers coming due) drains at `fetch_batch_size / min_fetch_interval` whatever
+    `max_workers` is.
+    """
+    broker = _make_broker()
+    handled: list[str] = []
+
+    @broker.subscriber("orders", fetch_batch_size=10, min_fetch_interval=30.0, max_fetch_interval=30.0)
+    async def handle(body: str) -> None:
+        handled.append(body)
+
+    test_broker = TestOutboxBroker(broker, run_loops=True)
+    async with test_broker:
+        await asyncio.sleep(0.05)
+        for i in range(30):
+            payload, hdrs = encode_payload(f"m{i}")
+            test_broker.feed("orders", payload, headers=hdrs)
+        await _wait_until(lambda: len(handled) == 30)
+
+
+async def test_loop_mode_fetch_loop_claims_at_least_half_a_batch_per_fetch() -> None:
+    """INVARIANT: the fetch loop claims only once half a batch of in-flight slots is free.
+
+    Fetching whenever a single slot frees up turns each claim into a one-row round trip, so the
+    fetch CTE runs about once per message and `fetch_batch_size` stops mattering.
+    """
+    fetched: list[int] = []
+
+    def recorder(event: str, tags: typing.Mapping[str, typing.Any]) -> None:
+        if event == "fetched" and tags["count"]:
+            fetched.append(tags["count"])
+
+    broker = OutboxBroker(outbox_table=make_outbox_table(MetaData()), metrics_recorder=recorder)
+    handled: list[str] = []
+
+    @broker.subscriber("orders", fetch_batch_size=10, min_fetch_interval=30.0, max_fetch_interval=30.0)
+    async def handle(body: str) -> None:
+        await asyncio.sleep(0)
+        handled.append(body)
+
+    test_broker = TestOutboxBroker(broker, run_loops=True)
+    async with test_broker:
+        await asyncio.sleep(0.05)
+        for i in range(100):
+            payload, hdrs = encode_payload(f"m{i}")
+            test_broker.feed("orders", payload, headers=hdrs)
+        await _wait_until(lambda: len(handled) == 100)
+
+    assert sum(fetched) == 100
+    assert min(fetched[:-1]) >= 5, fetched
+
+
 async def test_loop_mode_publish_wakes_fetch_loop_via_notify() -> None:
     """P30: broker.publish in loop mode wakes the fetch loop (single-publish notify path)."""
     broker = _make_broker()

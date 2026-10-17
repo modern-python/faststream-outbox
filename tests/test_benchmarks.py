@@ -21,6 +21,8 @@ def _probe(
     delete_calls: int = 500,
     insert_calls: int = 0,
     select_calls: int = 0,
+    fetch_calls: int = 12,
+    other_calls: int = 10,
     **overrides: float,
 ) -> ProbeResult:
     calls_by_op = {
@@ -28,8 +30,8 @@ def _probe(
         "insert": insert_calls,
         "update": 0,
         "delete": delete_calls,
-        "with": 12,
-        "other": 10,
+        "with": fetch_calls,
+        "other": other_calls,
     }
     defaults: dict[str, object] = {
         "calls": 522,
@@ -220,6 +222,35 @@ def test_compare_fails_on_a_producer_losing_pg_notify_dedup() -> None:
     assert "select_calls" in failures[0]
 
 
+def test_compare_fails_when_the_fetch_loop_claims_one_row_at_a_time() -> None:
+    """INVARIANT: ``fetch_calls`` stays within twice its baseline.
+
+    The fetch loop claims once half a batch of in-flight slots is free, so the claim count sits
+    between ``messages / fetch_batch_size`` and ``messages / (fetch_batch_size // 2)`` depending
+    on how far the loop lags the workers. A loop that refetches whenever one slot frees runs the
+    fetch CTE about once per message, far outside that range.
+    """
+    baseline = to_baseline([_result(fetch_calls=12)])
+    assert compare(to_baseline([_result(fetch_calls=24)]), baseline) == []
+    failures = compare(to_baseline([_result(fetch_calls=500)]), baseline)
+    assert len(failures) == 1
+    assert "fetch_calls" in failures[0]
+
+
+def test_compare_fails_when_the_fetch_connection_opens_transactions() -> None:
+    """INVARIANT: ``other_calls`` (BEGIN, COMMIT and other utility statements) stays near its baseline.
+
+    The fetch and writer connections run in autocommit, so a consumer run sends no BEGIN or
+    COMMIT. Losing autocommit on either adds two round trips per fetch or per terminal write,
+    which only shows up here.
+    """
+    baseline = to_baseline([_result(other_calls=0)])
+    assert compare(to_baseline([_result(other_calls=2)]), baseline) == []
+    failures = compare(to_baseline([_result(other_calls=24)]), baseline)
+    assert len(failures) == 1
+    assert "other_calls" in failures[0]
+
+
 def test_format_table_labels_gated_vs_informational() -> None:
     table = format_table([_result(), _producer()])
     # Both runs are rendered.
@@ -283,3 +314,23 @@ def test_run_accepts_its_flags() -> None:
 def test_a_subcommand_is_required() -> None:
     with pytest.raises(SystemExit):
         _build_parser().parse_args([])
+
+
+def test_baseline_keys_name_the_interval_and_transaction_variants() -> None:
+    default_interval = RunResult(
+        scenario="consumer",
+        config=RunConfig(messages=500, fetch_interval=(1.0, 10.0)),
+        wall_seconds=1.0,
+        probe=_probe(),
+    )
+    per_transaction = RunResult(
+        scenario="producer",
+        config=RunConfig(messages=500, publishes_per_transaction=1),
+        wall_seconds=1.0,
+        probe=_probe(),
+    )
+    assert set(to_baseline([_result(), default_interval, per_transaction])["runs"]) == {
+        "consumer/w1/b100",
+        "consumer/w1/b100/interval1-10",
+        "producer/w1/b100/ppt1",
+    }
