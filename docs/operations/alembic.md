@@ -209,7 +209,7 @@ def upgrade() -> None:
 ```
 
 This sets `autovacuum_vacuum_scale_factor = 0` and `autovacuum_vacuum_threshold =
-1000` (plus the insert-triggered pair, Postgres 13+). Tune the thresholds for your
+1000`, plus the insert-triggered pair, which needs PostgreSQL 13 or later. Tune the thresholds for your
 message rate, for example `outbox_autovacuum_ddl("outbox", vacuum_threshold=5000,
 insert_threshold=5000)`.
 
