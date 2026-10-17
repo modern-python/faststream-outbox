@@ -60,6 +60,24 @@ For those, the `RuntimeError` ends with a pointer to
 [Alembic migrations § Fixing drift autogenerate can't see](../operations/alembic.md#fixing-drift-autogenerate-cant-see),
 which holds the hand-written migration recipe.
 
+Two indexes changed shape between releases, so a table migrated on an
+older version fails validation after an upgrade until it gets the new
+index. For those, the error names the release and links to the upgrade
+migration:
+
+```text
+Outbox schema mismatch: table 'outbox' missing index over ['queue', 'next_attempt_at', 'id'] (name='outbox_leased_idx', unique=False); a table created before 0.17 needs it in place of outbox_lease_idx: https://faststream-outbox.modern-python.org/operations/alembic/#upgrading-to-017
+```
+
+| Missing index | Changed in | Upgrade migration |
+| --- | --- | --- |
+| `outbox_pending_idx` | 0.15 | [Upgrading to 0.15](../operations/alembic.md#upgrading-to-015) |
+| `outbox_leased_idx` | 0.17 | [Upgrading to 0.17](../operations/alembic.md#upgrading-to-017) |
+
+Use the linked migration, not `alembic revision --autogenerate`: it
+builds the index without `CONCURRENTLY` and blocks writes for the whole
+build.
+
 !!! warning "Server defaults are not checked"
     The diff runs with `compare_server_default=False`. Alembic's
     server-default comparison is flaky against Postgres' normalized
