@@ -19,7 +19,7 @@ from functools import partial
 
 from faststream.response.publish_type import PublishType
 
-from faststream_outbox.response import OutboxPublishCommand
+from faststream_outbox.response import OutboxPublishCommand, _OutboxConfigError
 
 
 if typing.TYPE_CHECKING:
@@ -43,6 +43,14 @@ class OutboxFakePublisher:
     ) -> typing.Any:
         if not isinstance(cmd, OutboxPublishCommand):
             return None
+        if not cmd.session.in_transaction():
+            msg = (
+                "OutboxResponse is published after the handler returns, but its session has no open "
+                "transaction by then, so the follow-on row would never commit. Open the session and its "
+                "transaction in a broker middleware so they outlive the handler, or call "
+                "broker.publish(..., session=session) inside the handler instead."
+            )
+            raise _OutboxConfigError(msg)
         cmd.publish_type = PublishType.REPLY
         # ty diagnostic: ``producer.publish`` narrows to ``OutboxPublishCommand``
         # while ``PublisherMiddleware`` is generic over the base ``PublishCommand``.

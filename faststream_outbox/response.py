@@ -19,6 +19,8 @@ from faststream.response.publish_type import PublishType
 from faststream.response.response import BatchPublishCommand, PublishCommand, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from faststream_outbox.message import CORRELATION_ID_HEADER
+
 
 # Matches the ``queue`` column width in ``make_outbox_table`` (``String(255)``).
 _MAX_QUEUE_LENGTH = 255
@@ -66,6 +68,14 @@ def _validate_publish_args(
     if len(queue) > _MAX_QUEUE_LENGTH:
         msg = f"queue must be at most {_MAX_QUEUE_LENGTH} characters (got {len(queue)})"
         raise ValueError(msg)
+
+
+# Marker exception raised by programming guards on the dispatch path (e.g. the
+# OutboxResponse + foreign-publisher dual-fire guard). Inherits from
+# ``RuntimeError`` so ``pytest.raises(RuntimeError, ...)`` in tests catches it, but
+# is a distinct subclass so ``consume()`` and ``dispatch_one`` can re-raise it while
+# still swallowing plain handler-raised ``RuntimeError``s.
+class _OutboxConfigError(RuntimeError): ...
 
 
 class OutboxPublishCommand(BatchPublishCommand):
@@ -166,9 +176,13 @@ class OutboxResponse(Response):
     re-runs the same validator on ``as_publish_command()``, so it stays the authoritative
     single source of truth and the eager checks can never drift from it.
 
-    ``correlation_id`` defaults to the inbound message's correlation_id when not set
-    — FastStream's ``SubscriberUsecase.process_message`` does the inheritance before
-    publishing the response.
+    ``correlation_id`` defaults to ``headers["correlation_id"]``, then to the inbound
+    message's correlation_id, which FastStream's ``SubscriberUsecase.process_message``
+    fills in before publishing the response.
+
+    The response is published after the handler returns, so ``session`` must still
+    hold an open transaction then; otherwise the dispatch raises ``RuntimeError`` and
+    the inbound row is retried.
     """
 
     def __init__(
@@ -190,6 +204,8 @@ class OutboxResponse(Response):
             activate_in=activate_in,
             activate_at=activate_at,
         )
+        if correlation_id is None and headers:
+            correlation_id = headers.get(CORRELATION_ID_HEADER)
         super().__init__(body=body, headers=headers, correlation_id=correlation_id)
         self.queue = queue
         self.session = session

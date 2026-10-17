@@ -6,7 +6,7 @@ import uuid
 import warnings as _warnings
 from collections.abc import Awaitable, Callable, Mapping
 from types import TracebackType
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from faststream import BaseMiddleware, FastStream, StreamMessage
@@ -2375,3 +2375,63 @@ async def test_loop_mode_buffered_deletes_flush_before_the_lease_expires() -> No
         await _wait_until(lambda: not test_broker.fake_client.rows, timeout=5.0)
 
     assert sorted(handled) == sorted(f"m{i}" for i in range(30))
+
+
+async def test_handler_returning_outbox_response_takes_correlation_id_from_headers() -> None:
+    broker = _make_broker()
+    downstream_cors: list[str] = []
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> OutboxResponse:
+        del body
+        return OutboxResponse(
+            body={"v": 1}, queue="downstream", session=_fake_session(), headers={"correlation_id": "from-header"}
+        )
+
+    @broker.subscriber("downstream")
+    async def handle_next(body: dict, correlation_id: str = _Context("message.correlation_id")) -> None:
+        del body
+        downstream_cors.append(correlation_id)
+
+    async with TestOutboxBroker(broker):
+        await broker.publish({"x": 1}, queue="orders", correlation_id="inbound")  # ty: ignore[missing-argument]
+
+    assert downstream_cors == ["from-header"]
+
+
+async def test_outbox_response_on_a_session_without_a_transaction_retries_the_inbound_row() -> None:
+    broker = _make_broker()
+    closed_session = _fake_session()
+    closed_session.in_transaction = MagicMock(return_value=False)
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> OutboxResponse:
+        return OutboxResponse(body=body, queue="downstream", session=closed_session)
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        with pytest.raises(RuntimeError, match="transaction"):
+            await broker.publish({"x": 1}, queue="orders")  # ty: ignore[missing-argument]
+
+    assert [(r.queue, r.attempts_count, r.acquired_token) for r in test_broker.fake_client.rows] == [
+        ("orders", 1, None)
+    ]
+
+
+async def test_config_error_under_manual_ack_retries_the_row() -> None:
+    broker = _make_broker()
+    closed_session = _fake_session()
+    closed_session.in_transaction = MagicMock(return_value=False)
+
+    @broker.subscriber("orders", ack_policy=AckPolicy.MANUAL)
+    async def handle(body: dict) -> OutboxResponse:
+        return OutboxResponse(body=body, queue="downstream", session=closed_session)
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        with pytest.raises(RuntimeError, match="transaction"):
+            await broker.publish({"x": 1}, queue="orders")  # ty: ignore[missing-argument]
+
+    assert [(r.queue, r.attempts_count, r.acquired_token) for r in test_broker.fake_client.rows] == [
+        ("orders", 1, None)
+    ]
