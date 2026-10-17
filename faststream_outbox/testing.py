@@ -204,17 +204,17 @@ class FakeOutboxClient(AbstractOutboxClient):
         self,
         conn: typing.Any,  # noqa: ARG002
         pairs: "Sequence[tuple[int, uuid.UUID]]",
-    ) -> set[int]:
+    ) -> set[tuple[int, uuid.UUID]]:
         # Set-based form of the same rule as `_lease_token_matches`: the `ptok is not None`
         # filter is the claim-side NULL guard, `row.acquired_token is not None` the row-side —
         # so a NULL token on either side never matches (SQL `NULL = NULL`).
         wanted = {(pid, ptok) for pid, ptok in pairs if ptok is not None}
-        deleted: set[int] = set()
+        deleted: set[tuple[int, uuid.UUID]] = set()
         # Iterate a copy of indices high-to-low so deletions don't shift unscanned rows.
         for i in range(len(self._rows) - 1, -1, -1):
             row = self._rows[i]
             if row.acquired_token is not None and (row.id, row.acquired_token) in wanted:
-                deleted.add(row.id)
+                deleted.add((row.id, row.acquired_token))
                 del self._rows[i]
         return deleted
 

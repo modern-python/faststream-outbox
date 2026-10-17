@@ -623,6 +623,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         """
         buffer: list[_PendingFlush] = []
         batch_size = self._config.terminal_flush_batch_size
+        max_buffer_age = self._config.lease_ttl_seconds / 2
         try:
             while self.running:
                 if buffer:
@@ -652,7 +653,9 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                 finally:
                     if not buffered:
                         self._inflight.task_done()
-                if len(buffer) >= batch_size:
+                if buffer and (
+                    len(buffer) >= batch_size or time.monotonic() - buffer[0].row.claimed_at_monotonic >= max_buffer_age
+                ):
                     await self._flush_buffer(buffer, writer_conn=writer_conn)
         finally:
             # Bounded best-effort flush of completed-but-unflushed rows on exit. Reachable
@@ -853,7 +856,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             buffer.clear()
             raise
         for pending in buffer:
-            if pending.row.id in deleted:
+            if (pending.row.id, pending.row.acquired_token) in deleted:
                 self._emit_metric(pending.event, pending.tags)
             else:
                 self._emit_lease_lost(pending.row, phase="terminal")

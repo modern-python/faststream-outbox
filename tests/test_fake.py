@@ -2343,3 +2343,35 @@ async def test_fetch_loop_does_not_claim_after_stop_took_the_claim_lock() -> Non
         await asyncio.sleep(0.05)
         [row] = test_broker.fake_client.rows
         assert row.acquired_token is None
+
+
+async def test_loop_mode_buffered_deletes_flush_before_the_lease_expires() -> None:
+    """INVARIANT: buffered terminal deletes are flushed once the oldest was claimed half a lease TTL ago.
+
+    The buffer otherwise flushes only when full or when the in-flight queue runs dry. Under a
+    steady backlog the oldest buffered row waits about ``terminal_flush_batch_size`` handler
+    durations, its lease expires, and another fetch reclaims and re-runs it. Timing from the claim
+    rather than from buffering also covers the time a row spent queued in memory before dispatch.
+    """
+    broker = _make_broker()
+    handled: list[str] = []
+
+    @broker.subscriber(
+        "orders",
+        terminal_flush_batch_size=100,
+        lease_ttl_seconds=0.4,
+        min_fetch_interval=0.01,
+        max_fetch_interval=0.05,
+    )
+    async def handle(body: str) -> None:
+        handled.append(body)
+        await asyncio.sleep(0.03)
+
+    test_broker = TestOutboxBroker(broker, run_loops=True)
+    async with test_broker:
+        for i in range(30):
+            payload, hdrs = encode_payload(f"m{i}")
+            test_broker.feed("orders", payload, headers=hdrs)
+        await _wait_until(lambda: not test_broker.fake_client.rows, timeout=5.0)
+
+    assert sorted(handled) == sorted(f"m{i}" for i in range(30))

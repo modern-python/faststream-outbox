@@ -177,9 +177,10 @@ async def handle(order: dict) -> None: ...
 ```
 
 A worker buffers completed rows and flushes when the buffer reaches
-`terminal_flush_batch_size` or its inflight queue empties, so a
-lightly-loaded queue still flushes immediately and batching adds no latency;
-batching only engages under sustained load.
+`terminal_flush_batch_size`, when its inflight queue empties, or when the oldest
+buffered row was claimed half of `lease_ttl_seconds` ago. A lightly-loaded queue
+still flushes immediately and batching adds no latency; batching only engages
+under sustained load, and a buffered row is deleted before its lease can expire.
 
 In the benchmark (5 000 messages, `fetch_batch_size=100`), the
 terminal round-trips drop from one per message to one per batch, a 100×
