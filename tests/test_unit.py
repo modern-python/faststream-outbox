@@ -72,7 +72,7 @@ from faststream_outbox.subscriber.usecase import (
     _OutboxConfigError,
     _PendingFlush,
 )
-from faststream_outbox.testing import FakeOutboxClient, FakeOutboxProducer
+from faststream_outbox.testing import FakeOutboxClient
 
 
 def test_outbox_broker_registered_in_test_broker_registry() -> None:
@@ -1337,49 +1337,6 @@ def test_publisher_spec_get_schema_returns_publisher_spec() -> None:
     assert "orders:Publisher" in schema
     entry = schema["orders:Publisher"]
     assert entry.operation.message.title == "orders:Publisher:Message"
-
-
-# --- FakeOutboxProducer direct coverage ---
-
-
-async def test_fake_outbox_producer_publish_batch_inserts_rows() -> None:
-    broker = _make_broker()
-    fake_client = FakeOutboxClient()
-    producer = FakeOutboxProducer(fake_client, broker, serializer=None, run_loops=False)
-    cmd = OutboxPublishCommand(b"a", b"b", queue="orders", session=_make_session_mock())
-    await producer.publish_batch(cmd)
-    assert len(fake_client.rows) == 2
-    assert {r.payload for r in fake_client.rows} == {b"a", b"b"}
-
-
-async def test_fake_outbox_producer_publish_batch_with_none_body_inserts_row() -> None:
-    """B8: a sole None body inserts one b"" row via the fake producer too."""
-    broker = _make_broker()
-    fake_client = FakeOutboxClient()
-    producer = FakeOutboxProducer(fake_client, broker, serializer=None, run_loops=False)
-    cmd = OutboxPublishCommand(None, queue="orders", session=_make_session_mock())
-    await producer.publish_batch(cmd)
-    assert len(fake_client.rows) == 1
-    assert fake_client.rows[0].payload == b""
-
-
-async def test_fake_outbox_producer_publish_batch_leading_none_inserts_all() -> None:
-    """B8: (None, b"x") inserts 2 rows — the leading None is not dropped."""
-    broker = _make_broker()
-    fake_client = FakeOutboxClient()
-    producer = FakeOutboxProducer(fake_client, broker, serializer=None, run_loops=False)
-    cmd = OutboxPublishCommand(None, b"x", queue="orders", session=_make_session_mock())
-    await producer.publish_batch(cmd)
-    assert len(fake_client.rows) == 2
-    assert {r.payload for r in fake_client.rows} == {b"", b"x"}
-
-
-async def test_fake_outbox_producer_request_raises() -> None:
-    broker = _make_broker()
-    producer = FakeOutboxProducer(FakeOutboxClient(), broker, serializer=None, run_loops=False)
-    cmd = OutboxPublishCommand(b"x", queue="orders", session=_make_session_mock())
-    with pytest.raises(NotImplementedError, match="request-reply"):
-        await producer.request(cmd)
 
 
 def test_broker_client_property_raises_without_engine() -> None:
@@ -3650,8 +3607,7 @@ async def test_metrics_published_batch_emits_count_equal_to_batch_size() -> None
         await broker.publish_batch({"x": 1}, {"y": 2}, {"z": 3}, queue="orders", session=session)
 
     pub = [t for e, t in events if e == "published"]
-    # ``_build_fake_publish_batch`` aggregates: one event per ``publish_batch`` call
-    # with ``count == landed`` (mirrors the real producer's batch contract).
+    # One event per ``publish_batch`` call, with ``count`` equal to the rows inserted.
     assert len(pub) == 1
     assert pub[0]["count"] == 3
 

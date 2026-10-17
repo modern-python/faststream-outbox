@@ -231,16 +231,9 @@ async def test_outbox_prometheus_middleware_and_recorder_share_consume_series() 
     assert _acked_from(recorder_reg) == 1.0
 
 
-async def test_outbox_prometheus_middleware_publish_scope_does_not_fire_under_test_broker() -> None:
-    """``TestOutboxBroker`` patches ``broker.publish`` directly, bypassing ``_basic_publish``.
-
-    The middleware's ``publish_scope`` therefore must not fire. The recorder seam
-    (via ``FakeOutboxProducer`` / ``_build_fake_publish``) is the publish-side
-    metrics path in test mode. Negative-assert here so a future refactor that
-    routes test-broker publishes through ``_basic_publish`` (and thus through
-    the publish-scope middleware) trips this guardrail instead of silently
-    double-counting in production users that test through ``TestOutboxBroker``.
-    """
+@pytest.mark.parametrize("path", ["broker", "publisher"])
+async def test_outbox_prometheus_middleware_counts_publishes_under_test_broker(path: str) -> None:
+    """``TestOutboxBroker`` publishes through ``_basic_publish``, so the middleware's ``publish_scope`` counts them."""
     reg = CollectorRegistry()
     broker = _make_broker(reg)
 
@@ -249,20 +242,21 @@ async def test_outbox_prometheus_middleware_publish_scope_does_not_fire_under_te
         pass
 
     async with TestOutboxBroker(broker):
-        await broker.publish({"x": 1}, queue="orders", session=_session_mock())
+        if path == "publisher":
+            await broker.publisher("orders").publish({"x": 1}, session=_session_mock())
+        else:
+            await broker.publish({"x": 1}, queue="orders", session=_session_mock())
 
-    # A Counter that's never been ``.labels(...).inc()``-ed produces zero samples;
-    # any non-zero sample on the publish-side series means middleware fired.
-    non_zero_publish_samples = [
-        (sample.name, dict(sample.labels), sample.value)
+    published = [
+        (dict(sample.labels), sample.value)
         for metric in reg.collect()
         if metric.name == "faststream_published_messages"
         for sample in metric.samples
-        if sample.value > 0.0
+        if sample.name.endswith("_total")
     ]
-    assert non_zero_publish_samples == [], (
-        f"publish_scope middleware fired under TestOutboxBroker: {non_zero_publish_samples}"
-    )
+    assert [(labels["destination"], labels["status"], value) for labels, value in published] == [
+        ("orders", "success", 1.0)
+    ]
 
 
 def test_outbox_prometheus_middleware_raises_friendly_error_when_extra_missing() -> None:

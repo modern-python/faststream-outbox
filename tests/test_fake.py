@@ -44,19 +44,10 @@ from faststream_outbox.annotations import (
 from faststream_outbox.client import AbstractOutboxClient
 from faststream_outbox.configs import OutboxBrokerConfig
 from faststream_outbox.envelope import _encode_payload as encode_payload
+from faststream_outbox.response import OutboxPublishCommand
 from faststream_outbox.router import OutboxRoute
 from faststream_outbox.subscriber.config import OutboxSubscriberConfig
-from faststream_outbox.testing import FakeOutboxClient, FakeOutboxProducer, _FakeRow, _to_inner
-
-
-def _fake_session() -> AsyncMock:
-    """Build an ``AsyncMock(spec=AsyncSession)`` for tests where the session is ignored.
-
-    ``OutboxPublishCommand`` requires an ``AsyncSession``; the fake producer doesn't
-    touch it. The mock passes ``isinstance`` and lets publisher tests focus on the
-    fake-store side effects.
-    """
-    return AsyncMock(spec=AsyncSession)
+from faststream_outbox.testing import FakeOutboxClient, _FakeRow, _to_inner, fake_session
 
 
 def _make_broker() -> OutboxBroker:
@@ -76,14 +67,21 @@ async def _wait_until(predicate: Callable[[], object], *, timeout: float = 2.0) 
     raise AssertionError(msg)  # pragma: no cover - only when the predicate times out, failing the test
 
 
-def test_fake_outbox_producer_satisfies_producer_proto() -> None:
-    """FakeOutboxProducer satisfies ProducerProto: codec attribute present, no missing structural members."""
+async def test_test_broker_producer_satisfies_producer_proto() -> None:
+    """The producer the test broker swaps in satisfies ProducerProto: no missing structural members."""
     broker = _make_broker()
-    fc = FakeOutboxClient()
-    fp = FakeOutboxProducer(fc, broker, serializer=None, run_loops=False)
-    missing = get_protocol_members(ProducerProto) - set(dir(fp))
-    assert not missing, f"FakeOutboxProducer missing ProducerProto attrs: {missing}"
-    assert fp.codec is None
+    async with TestOutboxBroker(broker):
+        producer = broker.config.broker_config.producer
+    missing = get_protocol_members(ProducerProto) - set(dir(producer))
+    assert not missing, f"test-broker producer missing ProducerProto attrs: {missing}"
+
+
+async def test_test_broker_producer_refuses_request() -> None:
+    broker = _make_broker()
+    async with TestOutboxBroker(broker):
+        producer = broker.config.broker_config.producer
+        with pytest.raises(NotImplementedError, match="request-reply"):
+            await producer.request(OutboxPublishCommand(b"x", queue="orders", session=fake_session()))
 
 
 # --- Sync-mode tests (default TestOutboxBroker) ---------------------------------------
@@ -106,7 +104,7 @@ async def test_fake_broker_publish_triggers_handler() -> None:
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish({"order_id": 1}, queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish({"order_id": 1}, queue="orders", session=fake_session())
 
     assert received == [{"order_id": 1}]
     assert test_broker.fake_client.rows == []  # row deleted after ack
@@ -132,7 +130,7 @@ async def test_sync_batch_inserts_whole_batch_before_dispatch_and_published_firs
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish_batch("a", "b", "c", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish_batch("a", "b", "c", queue="orders", session=fake_session())
 
     # The whole 3-row batch was present before the first handler ran (the old per-feed
     # dispatch would have shown only 1), and ``published`` was emitted before delivery.
@@ -152,7 +150,7 @@ async def test_fake_broker_publish_batch_triggers_handler() -> None:
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish_batch("a", "b", "c", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish_batch("a", "b", "c", queue="orders", session=fake_session())
 
     assert received == ["a", "b", "c"]
     assert test_broker.fake_client.rows == []
@@ -168,8 +166,8 @@ async def test_fake_broker_multi_queue_subscriber() -> None:
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish("o-1", queue="orders")  # ty: ignore[missing-argument]
-        await broker.publish("s-1", queue="shipments")  # ty: ignore[missing-argument]
+        await broker.publish("o-1", queue="orders", session=fake_session())
+        await broker.publish("s-1", queue="shipments", session=fake_session())
 
     assert seen == ["o-1", "s-1"]
 
@@ -183,7 +181,7 @@ async def test_fake_broker_publish_to_unhandled_queue_leaves_row() -> None:
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish("not-mine", queue="other-queue")  # ty: ignore[missing-argument]
+        await broker.publish("not-mine", queue="other-queue", session=fake_session())
 
     assert len(test_broker.fake_client.rows) == 1
     assert test_broker.fake_client.rows[0].queue == "other-queue"
@@ -200,7 +198,7 @@ async def test_fake_broker_failing_handler_with_no_retry_deletes_row() -> None:
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish("x", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish("x", queue="orders", session=fake_session())
 
     assert test_broker.fake_client.rows == []
 
@@ -217,7 +215,7 @@ async def test_fake_broker_failing_handler_with_default_retry_keeps_row() -> Non
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish("x", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish("x", queue="orders", session=fake_session())
 
     assert len(test_broker.fake_client.rows) == 1
     row = test_broker.fake_client.rows[0]
@@ -238,7 +236,7 @@ async def test_fake_broker_correlation_id_in_handler_context() -> None:
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish({"x": 1}, queue="orders", correlation_id="trace-xyz")  # ty: ignore[missing-argument]
+        await broker.publish({"x": 1}, queue="orders", correlation_id="trace-xyz", session=fake_session())
 
     assert seen == ["trace-xyz"]
 
@@ -248,7 +246,7 @@ async def test_fake_broker_no_handler_no_dispatch() -> None:
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
         # No subscribers registered — publishing should leave the row in the fake client.
-        await broker.publish("nope", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish("nope", queue="orders", session=fake_session())
     assert len(test_broker.fake_client.rows) == 1
 
 
@@ -265,8 +263,8 @@ async def test_fake_broker_publish_with_timer_id_dedups() -> None:
     # No subscriber for "timers": rows persist so we can observe dedup behavior.
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        first = await broker.publish("x", queue="timers", timer_id="email-1")  # ty: ignore[missing-argument]
-        second = await broker.publish("y", queue="timers", timer_id="email-1")  # ty: ignore[missing-argument]
+        first = await broker.publish("x", queue="timers", timer_id="email-1", session=fake_session())
+        second = await broker.publish("y", queue="timers", timer_id="email-1", session=fake_session())
     assert first is not None
     assert second is None
     assert len(test_broker.fake_client.rows) == 1
@@ -283,10 +281,11 @@ async def test_fake_broker_publish_with_activate_in_dispatches_immediately() -> 
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish(  # ty: ignore[missing-argument]
+        await broker.publish(
             "delayed",
             queue="orders",
             activate_in=dt.timedelta(seconds=5),
+            session=fake_session(),
         )
 
     assert received == ["delayed"]
@@ -304,7 +303,7 @@ async def test_fake_broker_publish_with_activate_at_dispatches_immediately() -> 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
         future = dt.datetime.now(tz=dt.UTC) + dt.timedelta(seconds=5)
-        await broker.publish("at-future", queue="orders", activate_at=future)  # ty: ignore[missing-argument]
+        await broker.publish("at-future", queue="orders", activate_at=future, session=fake_session())
 
     assert received == ["at-future"]
     assert test_broker.fake_client.rows == []
@@ -320,11 +319,12 @@ async def test_fake_broker_publish_batch_with_activate_in_dispatches_immediately
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish_batch(  # ty: ignore[missing-argument]
+        await broker.publish_batch(
             "a",
             "b",
             queue="orders",
             activate_in=dt.timedelta(seconds=5),
+            session=fake_session(),
         )
 
     assert received == ["a", "b"]
@@ -342,7 +342,7 @@ async def test_fake_broker_publish_batch_with_activate_at_dispatches_immediately
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
         future = dt.datetime.now(tz=dt.UTC) + dt.timedelta(seconds=5)
-        await broker.publish_batch("a", "b", queue="orders", activate_at=future)  # ty: ignore[missing-argument]
+        await broker.publish_batch("a", "b", queue="orders", activate_at=future, session=fake_session())
 
     assert received == ["a", "b"]
     assert test_broker.fake_client.rows == []
@@ -353,11 +353,12 @@ async def test_fake_broker_publish_rejects_both_activate_in_and_activate_at() ->
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
         with pytest.raises(ValueError, match="at most one of activate_in / activate_at"):
-            await broker.publish(  # ty: ignore[missing-argument]
+            await broker.publish(
                 "x",
                 queue="orders",
                 activate_in=dt.timedelta(seconds=1),
                 activate_at=dt.datetime.now(tz=dt.UTC),
+                session=fake_session(),
             )
 
 
@@ -366,11 +367,12 @@ async def test_fake_broker_publish_batch_rejects_both_activate_in_and_activate_a
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
         with pytest.raises(ValueError, match="at most one of activate_in / activate_at"):
-            await broker.publish_batch(  # ty: ignore[missing-argument]
+            await broker.publish_batch(
                 "x",
                 queue="orders",
                 activate_in=dt.timedelta(seconds=1),
                 activate_at=dt.datetime.now(tz=dt.UTC),
+                session=fake_session(),
             )
 
 
@@ -379,11 +381,12 @@ async def test_fake_broker_publish_rejects_naive_activate_at() -> None:
     broker = _make_broker()
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        with pytest.raises(ValueError, match=r"broker\.publish requires activate_at to be timezone-aware"):
-            await broker.publish(  # ty: ignore[missing-argument]
+        with pytest.raises(ValueError, match="requires activate_at to be timezone-aware"):
+            await broker.publish(
                 "x",
                 queue="orders",
                 activate_at=dt.datetime.now(),  # noqa: DTZ005
+                session=fake_session(),
             )
 
 
@@ -391,11 +394,12 @@ async def test_fake_broker_publish_batch_rejects_naive_activate_at() -> None:
     broker = _make_broker()
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        with pytest.raises(ValueError, match=r"broker\.publish_batch requires activate_at to be timezone-aware"):
-            await broker.publish_batch(  # ty: ignore[missing-argument]
+        with pytest.raises(ValueError, match="requires activate_at to be timezone-aware"):
+            await broker.publish_batch(
                 "x",
                 queue="orders",
                 activate_at=dt.datetime.now(),  # noqa: DTZ005
+                session=fake_session(),
             )
 
 
@@ -403,7 +407,7 @@ async def test_fake_broker_publish_batch_empty_bodies_is_noop() -> None:
     broker = _make_broker()
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish_batch(queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish_batch(queue="orders", session=fake_session())
     assert test_broker.fake_client.rows == []
 
 
@@ -412,7 +416,7 @@ async def test_fake_broker_cancel_timer_removes_row() -> None:
     test_broker = TestOutboxBroker(broker)
     # No handler for "timers" — row persists after publish so we can cancel it.
     async with test_broker:
-        await broker.publish("x", queue="timers", timer_id="email-1")  # ty: ignore[missing-argument]
+        await broker.publish("x", queue="timers", timer_id="email-1", session=fake_session())
         assert len(test_broker.fake_client.rows) == 1
         cancelled = await broker.cancel_timer(queue="timers", timer_id="email-1", session=object())  # ty: ignore[invalid-argument-type]
         assert cancelled is True
@@ -425,8 +429,8 @@ async def test_fake_broker_fetch_unprocessed_reads_fake_client() -> None:
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
         # No subscriber — rows stay in fake client.
-        await broker.publish("a", queue="q1")  # ty: ignore[missing-argument]
-        await broker.publish("b", queue="q2")  # ty: ignore[missing-argument]
+        await broker.publish("a", queue="q1", session=fake_session())
+        await broker.publish("b", queue="q2", session=fake_session())
 
         all_rows = await broker.fetch_unprocessed(session=object())  # ty: ignore[invalid-argument-type]
         assert [r.queue for r in all_rows] == ["q1", "q2"]
@@ -441,7 +445,7 @@ async def test_fake_broker_fetch_unprocessed_respects_limit() -> None:
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
         for i in range(5):
-            await broker.publish(str(i), queue="q1")  # ty: ignore[missing-argument]
+            await broker.publish(str(i), queue="q1", session=fake_session())
         limited = await broker.fetch_unprocessed(limit=2, session=object())  # ty: ignore[invalid-argument-type]
         assert len(limited) == 2
         all_rows = await broker.fetch_unprocessed(session=object())  # ty: ignore[invalid-argument-type]
@@ -471,7 +475,7 @@ async def test_fake_broker_router_subscriber_receives_publish() -> None:
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish("via-router", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish("via-router", queue="orders", session=fake_session())
 
     assert received == ["via-router"]
 
@@ -495,7 +499,7 @@ async def test_outbox_route_accepts_ack_policy() -> None:
     # ack_policy through the full dispatch path (not just the stored value).
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish("payload", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish("payload", queue="orders", session=fake_session())
     assert test_broker.fake_client.rows == []  # handler succeeded → row deleted
 
 
@@ -521,7 +525,7 @@ async def test_fake_broker_publish_invokes_flush_terminal_when_lease_lost() -> N
     test_broker = TestOutboxBroker(broker)
     test_broker.fake_client = LeaseLostClient()
     async with test_broker:
-        await broker.publish("lease-lost", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish("lease-lost", queue="orders", session=fake_session())
 
     assert received == ["lease-lost"]
     # P17 + lease-lost: the failed delete emits lease_lost(phase=terminal); the paired
@@ -554,7 +558,7 @@ async def test_fake_broker_publish_invokes_flush_retry_when_lease_lost() -> None
     test_broker = TestOutboxBroker(broker)
     test_broker.fake_client = LeaseLostRetryClient()
     async with test_broker:
-        await broker.publish("never-cleared", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish("never-cleared", queue="orders", session=fake_session())
 
     assert attempts == ["never-cleared"]
     # The failed retry-update emits lease_lost(phase=retry); the paired ``nacked_retried``
@@ -596,8 +600,8 @@ async def test_fake_broker_publish_swallows_post_consume_failure() -> None:
     raising = RaisingDeleteClient()
     test_broker.fake_client = raising
     async with test_broker:
-        await broker.publish("first-fails-on-delete", queue="orders")  # ty: ignore[missing-argument]
-        await broker.publish("second-ok", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish("first-fails-on-delete", queue="orders", session=fake_session())
+        await broker.publish("second-ok", queue="orders", session=fake_session())
 
     assert raising.calls >= 2
     assert received == ["first-fails-on-delete", "second-ok"]
@@ -629,7 +633,7 @@ async def test_fake_broker_retry_strategy_receives_handler_exception() -> None:
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish("payload", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish("payload", queue="orders", session=fake_session())
 
     assert len(seen_exceptions) == 1
     exc = seen_exceptions[0]
@@ -733,7 +737,7 @@ async def test_loop_mode_publish_wakes_fetch_loop_via_notify() -> None:
     test_broker = TestOutboxBroker(broker, run_loops=True)
     async with test_broker:
         await asyncio.sleep(0.05)
-        await broker.publish("x", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish("x", queue="orders", session=fake_session())
         await asyncio.wait_for(handled.wait(), timeout=2.0)
 
 
@@ -752,7 +756,7 @@ async def test_loop_mode_publish_batch_wakes_fetch_loop_via_notify() -> None:
     test_broker = TestOutboxBroker(broker, run_loops=True)
     async with test_broker:
         await asyncio.sleep(0.05)
-        await broker.publish_batch("a", "b", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish_batch("a", "b", queue="orders", session=fake_session())
         await asyncio.wait_for(done.wait(), timeout=2.0)
 
 
@@ -1220,7 +1224,7 @@ async def test_sync_publish_skips_callless_subscriber() -> None:
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish("ignored", queue="orphans")  # ty: ignore[missing-argument]
+        await broker.publish("ignored", queue="orphans", session=fake_session())
 
     assert len(test_broker.fake_client.rows) == 1
 
@@ -1308,9 +1312,9 @@ async def test_fake_publish_emits_published_error_on_encode_failure(batch: bool)
     unencodable = object()
     async with TestOutboxBroker(broker):
         publish = (
-            broker.publish_batch("ok", unencodable, queue="orders")  # ty: ignore[missing-argument]
+            broker.publish_batch("ok", unencodable, queue="orders", session=fake_session())
             if batch
-            else broker.publish(unencodable, queue="orders")  # ty: ignore[missing-argument]
+            else broker.publish(unencodable, queue="orders", session=fake_session())
         )
         with pytest.raises(Exception):  # noqa: B017, PT011  # whatever the serializer raises, the metric must record it
             await publish
@@ -1331,8 +1335,8 @@ async def test_fake_publish_reports_a_measured_duration() -> None:
 
     broker = OutboxBroker(outbox_table=make_outbox_table(MetaData()), metrics_recorder=recorder)
     async with TestOutboxBroker(broker):
-        await broker.publish("one", queue="orders")  # ty: ignore[missing-argument]
-        await broker.publish_batch("a", "b", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish("one", queue="orders", session=fake_session())
+        await broker.publish_batch("a", "b", queue="orders", session=fake_session())
 
     assert len(durations) == 2
     assert all(d > 0.0 for d in durations)
@@ -1432,7 +1436,7 @@ async def test_fake_broker_reject_on_error_deletes_row_on_first_failure() -> Non
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish("x", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish("x", queue="orders", session=fake_session())
 
     # Handler ran once, then row was deleted — no retry despite default ExponentialRetry.
     assert attempts == ["x"]
@@ -1451,7 +1455,7 @@ async def test_fake_broker_nack_on_error_default_keeps_row_for_retry() -> None:
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish("x", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish("x", queue="orders", session=fake_session())
 
     # Row rescheduled, not deleted — same as the no-ack_policy default.
     assert len(test_broker.fake_client.rows) == 1
@@ -1472,7 +1476,7 @@ async def test_fake_broker_manual_policy_handler_exception_retries_not_deletes()
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish("x", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish("x", queue="orders", session=fake_session())
 
     # The row survived: the default ExponentialRetry rescheduled it instead of
     # the destructive reject fallback deleting it.
@@ -1493,7 +1497,7 @@ async def test_fake_broker_nack_message_exception_retries_not_deletes() -> None:
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish("x", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish("x", queue="orders", session=fake_session())
 
     # The kwargs no longer TypeError inside the ack middleware -> no reject fallback.
     assert len(test_broker.fake_client.rows) == 1
@@ -1517,7 +1521,7 @@ async def test_fake_broker_manual_handler_without_ack_is_rejected_via_dispatch()
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish("x", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish("x", queue="orders", session=fake_session())
 
     # Rejected → row DELETEd. The mutation (no assert_state_set) leaves the row in place
     # (and emits a false ``acked``), so it would redeliver forever.
@@ -1527,8 +1531,8 @@ async def test_fake_broker_manual_handler_without_ack_is_rejected_via_dispatch()
 # --- Publisher tests --------------------------------------------------------------------
 
 
-async def test_publisher_publish_inserts_row_via_fake_producer() -> None:
-    """``publisher.publish`` routes through the fake producer → fake client store."""
+async def test_publisher_publish_inserts_row_into_fake_store() -> None:
+    """``publisher.publish`` routes through the real producer into the fake client store."""
     broker = _make_broker()
     received: list[dict] = []
 
@@ -1539,7 +1543,7 @@ async def test_publisher_publish_inserts_row_via_fake_producer() -> None:
     pub = broker.publisher("orders")
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        result = await pub.publish({"id": 1}, session=_fake_session())
+        result = await pub.publish({"id": 1}, session=fake_session())
     assert isinstance(result, int)
     assert received == [{"id": 1}]
 
@@ -1552,7 +1556,7 @@ async def test_publisher_static_headers_merge_with_per_call() -> None:
     pub = broker.publisher("orders", headers={"source": "default", "trace": "abc"})
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await pub.publish(b"x", session=_fake_session(), headers={"source": "override"})
+        await pub.publish(b"x", session=fake_session(), headers={"source": "override"})
 
     assert len(test_broker.fake_client.rows) == 1
     row_headers = test_broker.fake_client.rows[0].headers
@@ -1570,8 +1574,8 @@ async def test_publisher_with_timer_id_dedups() -> None:
     pub = broker.publisher("orders")
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        first = await pub.publish(b"hello", session=_fake_session(), timer_id="dedup-key")
-        second = await pub.publish(b"hello", session=_fake_session(), timer_id="dedup-key")
+        first = await pub.publish(b"hello", session=fake_session(), timer_id="dedup-key")
+        second = await pub.publish(b"hello", session=fake_session(), timer_id="dedup-key")
 
     assert first is not None
     assert second is None  # dedup'd
@@ -1588,7 +1592,7 @@ async def test_publisher_with_activate_in_records_next_attempt() -> None:
     test_broker = TestOutboxBroker(broker)
     before = dt.datetime.now(tz=dt.UTC)
     async with test_broker:
-        await pub.publish(b"x", session=_fake_session(), activate_in=dt.timedelta(seconds=30))
+        await pub.publish(b"x", session=fake_session(), activate_in=dt.timedelta(seconds=30))
         assert len(test_broker.fake_client.rows) == 1
         assert test_broker.fake_client.rows[0].next_attempt_at > before
 
@@ -1617,7 +1621,7 @@ async def test_publisher_publish_batch_via_broker_still_works() -> None:
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish_batch("a", "b", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish_batch("a", "b", queue="orders", session=fake_session())
 
     assert received == ["a", "b"]
 
@@ -1654,7 +1658,7 @@ async def test_handler_returning_outbox_response_publishes_followup_row() -> Non
         return OutboxResponse(
             body={"echoed": body["x"]},
             queue="downstream",
-            session=_fake_session(),
+            session=fake_session(),
         )
 
     @broker.subscriber("downstream")
@@ -1663,7 +1667,7 @@ async def test_handler_returning_outbox_response_publishes_followup_row() -> Non
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish({"x": "hi"}, queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish({"x": "hi"}, queue="orders", session=fake_session())
 
     assert next_received == [{"echoed": "hi"}]
     assert test_broker.fake_client.rows == []
@@ -1686,7 +1690,7 @@ async def test_propagate_inbound_headers_does_not_poison_cross_content_type_outb
         return OutboxResponse(
             body={"echoed": body},
             queue="downstream",
-            session=_fake_session(),
+            session=fake_session(),
         )
 
     @broker.subscriber("downstream")
@@ -1695,7 +1699,7 @@ async def test_propagate_inbound_headers_does_not_poison_cross_content_type_outb
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish("hi", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish("hi", queue="orders", session=fake_session())
 
     assert next_received == [{"echoed": "hi"}]
     assert test_broker.fake_client.rows == []
@@ -1718,7 +1722,7 @@ async def test_propagate_inbound_headers_does_not_poison_custom_correlation_id_o
         return OutboxResponse(
             body={"v": 1},
             queue="downstream",
-            session=_fake_session(),
+            session=fake_session(),
             correlation_id="custom-cid",
         )
 
@@ -1732,7 +1736,7 @@ async def test_propagate_inbound_headers_does_not_poison_custom_correlation_id_o
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish({"x": 1}, queue="orders", correlation_id="inbound-cid")  # ty: ignore[missing-argument]
+        await broker.publish({"x": 1}, queue="orders", correlation_id="inbound-cid", session=fake_session())
 
     assert downstream_cors == ["custom-cid"]
 
@@ -1745,7 +1749,7 @@ async def test_handler_returning_outbox_response_inherits_correlation_id() -> No
     @broker.subscriber("orders")
     async def handle(body: dict) -> OutboxResponse:
         del body
-        return OutboxResponse(body={"v": 1}, queue="downstream", session=_fake_session())
+        return OutboxResponse(body={"v": 1}, queue="downstream", session=fake_session())
 
     @broker.subscriber("downstream")
     async def handle_next(
@@ -1757,7 +1761,7 @@ async def test_handler_returning_outbox_response_inherits_correlation_id() -> No
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish({"x": 1}, queue="orders", correlation_id="trace-xyz")  # ty: ignore[missing-argument]
+        await broker.publish({"x": 1}, queue="orders", correlation_id="trace-xyz", session=fake_session())
 
     assert downstream_cors == ["trace-xyz"]
 
@@ -1772,13 +1776,13 @@ async def test_handler_returning_outbox_response_with_activate_in_records_future
         return OutboxResponse(
             body="delayed",
             queue="downstream",  # no subscriber — row persists for inspection
-            session=_fake_session(),
+            session=fake_session(),
             activate_in=dt.timedelta(seconds=60),
         )
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish({"x": 1}, queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish({"x": 1}, queue="orders", session=fake_session())
 
     downstream = [r for r in test_broker.fake_client.rows if r.queue == "downstream"]
     assert len(downstream) == 1
@@ -1795,14 +1799,14 @@ async def test_handler_returning_outbox_response_with_timer_id_dedups() -> None:
         return OutboxResponse(
             body="once",
             queue="downstream",
-            session=_fake_session(),
+            session=fake_session(),
             timer_id="dedupe-key",
         )
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish({"x": 1}, queue="orders")  # ty: ignore[missing-argument]
-        await broker.publish({"x": 2}, queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish({"x": 1}, queue="orders", session=fake_session())
+        await broker.publish({"x": 2}, queue="orders", session=fake_session())
 
     downstream = [r for r in test_broker.fake_client.rows if r.queue == "downstream"]
     assert len(downstream) == 1
@@ -1819,7 +1823,7 @@ async def test_handler_returning_plain_value_does_not_publish_followup_row() -> 
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish({"x": 1}, queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish({"x": 1}, queue="orders", session=fake_session())
 
     # Inbound row deleted on ack; no extra rows from the dict return.
     assert test_broker.fake_client.rows == []
@@ -1833,14 +1837,14 @@ async def test_handler_raising_before_returning_outbox_response_does_not_publish
     async def handle(body: dict) -> OutboxResponse:
         # Build the response then raise — process_message exits on exception
         # before iterating the response publishers, so nothing lands downstream.
-        _unused = OutboxResponse(body="never", queue="downstream", session=_fake_session())
+        _unused = OutboxResponse(body="never", queue="downstream", session=fake_session())
         del _unused, body
         msg = "boom"
         raise RuntimeError(msg)
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish({"x": 1}, queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish({"x": 1}, queue="orders", session=fake_session())
 
     # Inbound deleted by NoRetry; downstream untouched.
     assert test_broker.fake_client.rows == []
@@ -1867,14 +1871,12 @@ async def test_annotations_inject_message_broker_producer_client() -> None:
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish({"x": 1}, queue="orders")  # ty: ignore[missing-argument]
+        swapped_producer = broker.config.broker_config.producer
+        await broker.publish({"x": 1}, queue="orders", session=fake_session())
 
     assert isinstance(captured["msg"], OutboxMessage)
     assert captured["broker"] is broker
-    # In test mode the producer slot is swapped to FakeOutboxProducer during the
-    # ``async with`` block; identity-check would compare against the restored
-    # post-exit value, so check by type instead.
-    assert isinstance(captured["producer"], FakeOutboxProducer)
+    assert captured["producer"] is swapped_producer
     assert isinstance(captured["client"], AbstractOutboxClient)
     assert captured["client"] is test_broker.fake_client
 
@@ -1927,7 +1929,7 @@ async def test_fake_dlq_captures_retry_terminal_failure() -> None:
     test_broker = TestOutboxBroker(broker)
 
     async with test_broker:
-        await broker.publish("audit-me", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish("audit-me", queue="orders", session=fake_session())
 
     assert test_broker.fake_client.rows == []
     assert len(test_broker.fake_client.dlq_rows) == 1
@@ -1952,7 +1954,7 @@ async def test_fake_dlq_redacts_last_exception_with_renderer() -> None:
     test_broker = TestOutboxBroker(broker)
 
     async with test_broker:
-        await broker.publish("audit-me", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish("audit-me", queue="orders", session=fake_session())
 
     row = test_broker.fake_client.dlq_rows[0]
     assert row["last_exception"] == "RuntimeError"  # redacted: no message, no payload
@@ -1969,7 +1971,7 @@ async def test_fake_dlq_drops_last_exception_when_renderer_returns_none() -> Non
     test_broker = TestOutboxBroker(broker)
 
     async with test_broker:
-        await broker.publish("audit-me", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish("audit-me", queue="orders", session=fake_session())
 
     assert test_broker.fake_client.dlq_rows[0]["last_exception"] is None
 
@@ -1981,7 +1983,7 @@ async def test_fake_dlq_captures_rejected_failure() -> None:
     test_broker = TestOutboxBroker(broker)
 
     async with test_broker:
-        await broker.publish("poison", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish("poison", queue="orders", session=fake_session())
 
     assert test_broker.fake_client.rows == []
     assert len(test_broker.fake_client.dlq_rows) == 1
@@ -2023,7 +2025,7 @@ async def test_fake_dlq_unconfigured_silently_deletes() -> None:
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish("x", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish("x", queue="orders", session=fake_session())
 
     assert test_broker.fake_client.rows == []
     assert test_broker.fake_client.dlq_rows == []
@@ -2040,7 +2042,7 @@ async def test_fake_dlq_emits_dlq_written_metric() -> None:
     test_broker = TestOutboxBroker(broker)
 
     async with test_broker:
-        await broker.publish("x", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish("x", queue="orders", session=fake_session())
 
     dlq_events = [t for e, t in events if e == "dlq_written"]
     assert len(dlq_events) == 1
@@ -2059,7 +2061,7 @@ async def test_fake_dlq_not_emitted_on_handler_success() -> None:
     test_broker = TestOutboxBroker(broker)
 
     async with test_broker:
-        await broker.publish("happy", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish("happy", queue="orders", session=fake_session())
 
     assert not any(e == "dlq_written" for e, _ in events)
     assert test_broker.fake_client.dlq_rows == []
@@ -2119,7 +2121,7 @@ async def test_parser_error_leaves_row_for_retry() -> None:
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish({"order_id": 1}, queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish({"order_id": 1}, queue="orders", session=fake_session())
 
     assert len(test_broker.fake_client.rows) == 1
     assert test_broker.fake_client.rows[0].deliveries_count == 1
@@ -2135,7 +2137,7 @@ async def test_no_matching_filter_leaves_row_for_retry() -> None:
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish({"order_id": 1}, queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish({"order_id": 1}, queue="orders", session=fake_session())
 
     assert len(test_broker.fake_client.rows) == 1
 
@@ -2161,7 +2163,7 @@ async def test_middleware_suppressing_no_handler_error_rejects_row() -> None:
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish({"order_id": 1}, queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish({"order_id": 1}, queue="orders", session=fake_session())
 
     assert test_broker.fake_client.rows == []
 
@@ -2178,7 +2180,7 @@ async def test_handler_stop_consume_stops_subscriber() -> None:
 
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
-        await broker.publish({"order_id": 1}, queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish({"order_id": 1}, queue="orders", session=fake_session())
         assert not sub.running
 
     assert len(test_broker.fake_client.rows) == 1
@@ -2198,7 +2200,7 @@ async def test_handler_system_exit_stops_subscriber_and_exits_app() -> None:
     test_broker = TestOutboxBroker(broker)
     with patch.object(app, "exit") as app_exit:
         async with test_broker:
-            await broker.publish({"order_id": 1}, queue="orders")  # ty: ignore[missing-argument]
+            await broker.publish({"order_id": 1}, queue="orders", session=fake_session())
             assert not sub.running
 
     app_exit.assert_called_once_with()
@@ -2362,7 +2364,7 @@ async def test_loop_mode_consumes_after_an_earlier_stop_consume_on_the_same_brok
             raise StopConsume
 
     async with TestOutboxBroker(broker):
-        await broker.publish("stop", queue="orders")  # ty: ignore[missing-argument]
+        await broker.publish("stop", queue="orders", session=fake_session())
 
     handled.clear()
     test_broker = TestOutboxBroker(broker, run_loops=True)
@@ -2439,7 +2441,7 @@ async def test_handler_returning_outbox_response_takes_correlation_id_from_heade
     async def handle(body: dict) -> OutboxResponse:
         del body
         return OutboxResponse(
-            body={"v": 1}, queue="downstream", session=_fake_session(), headers={"correlation_id": "from-header"}
+            body={"v": 1}, queue="downstream", session=fake_session(), headers={"correlation_id": "from-header"}
         )
 
     @broker.subscriber("downstream")
@@ -2448,14 +2450,14 @@ async def test_handler_returning_outbox_response_takes_correlation_id_from_heade
         downstream_cors.append(correlation_id)
 
     async with TestOutboxBroker(broker):
-        await broker.publish({"x": 1}, queue="orders", correlation_id="inbound")  # ty: ignore[missing-argument]
+        await broker.publish({"x": 1}, queue="orders", correlation_id="inbound", session=fake_session())
 
     assert downstream_cors == ["from-header"]
 
 
 async def test_outbox_response_on_a_session_without_a_transaction_retries_the_inbound_row() -> None:
     broker = _make_broker()
-    closed_session = _fake_session()
+    closed_session = fake_session()
     closed_session.in_transaction = MagicMock(return_value=False)
 
     @broker.subscriber("orders")
@@ -2465,7 +2467,7 @@ async def test_outbox_response_on_a_session_without_a_transaction_retries_the_in
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
         with pytest.raises(RuntimeError, match="transaction"):
-            await broker.publish({"x": 1}, queue="orders")  # ty: ignore[missing-argument]
+            await broker.publish({"x": 1}, queue="orders", session=fake_session())
 
     assert [(r.queue, r.attempts_count, r.acquired_token) for r in test_broker.fake_client.rows] == [
         ("orders", 1, None)
@@ -2474,7 +2476,7 @@ async def test_outbox_response_on_a_session_without_a_transaction_retries_the_in
 
 async def test_config_error_under_manual_ack_retries_the_row() -> None:
     broker = _make_broker()
-    closed_session = _fake_session()
+    closed_session = fake_session()
     closed_session.in_transaction = MagicMock(return_value=False)
 
     @broker.subscriber("orders", ack_policy=AckPolicy.MANUAL)
@@ -2484,8 +2486,126 @@ async def test_config_error_under_manual_ack_retries_the_row() -> None:
     test_broker = TestOutboxBroker(broker)
     async with test_broker:
         with pytest.raises(RuntimeError, match="transaction"):
-            await broker.publish({"x": 1}, queue="orders")  # ty: ignore[missing-argument]
+            await broker.publish({"x": 1}, queue="orders", session=fake_session())
 
     assert [(r.queue, r.attempts_count, r.acquired_token) for r in test_broker.fake_client.rows] == [
         ("orders", 1, None)
     ]
+
+
+_MIDDLEWARE_PUBLISHES: list[str] = []
+
+
+class _PublishSpyMiddleware(BaseMiddleware):
+    async def publish_scope(
+        self,
+        call_next: Callable[[typing.Any], Awaitable[typing.Any]],
+        cmd: typing.Any,
+    ) -> typing.Any:
+        _MIDDLEWARE_PUBLISHES.append(cmd.destination)
+        return await call_next(cmd)
+
+
+@pytest.mark.parametrize("path", ["broker", "publisher", "response"])
+async def test_publish_middleware_runs_under_test_broker(path: str) -> None:
+    """#219: every publish path runs the broker's publish middlewares, as in production."""
+    _MIDDLEWARE_PUBLISHES.clear()
+    broker = OutboxBroker(outbox_table=make_outbox_table(MetaData()), middlewares=[_PublishSpyMiddleware])
+    delivered: list[str] = []
+
+    @broker.subscriber("orders")
+    async def handle(body: str) -> OutboxResponse | None:
+        delivered.append(body)
+        if path == "response":
+            return OutboxResponse(body="next", queue="downstream", session=fake_session())
+        return None
+
+    @broker.subscriber("downstream")
+    async def downstream(body: str) -> None:
+        delivered.append(body)
+
+    async with TestOutboxBroker(broker):
+        if path == "publisher":
+            await broker.publisher("orders").publish("first", session=fake_session())
+        else:
+            await broker.publish("first", queue="orders", session=fake_session())
+
+    assert delivered == (["first", "next"] if path == "response" else ["first"])
+    assert (["orders", "downstream"] if path == "response" else ["orders"]) == _MIDDLEWARE_PUBLISHES
+
+
+@pytest.mark.parametrize("batch", [False, True])
+async def test_publish_without_session_raises_under_test_broker(batch: bool) -> None:
+    broker = _make_broker()
+
+    @broker.subscriber("orders")
+    async def handle(body: str) -> None: ...
+
+    publish = broker.publish_batch if batch else broker.publish
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        with pytest.raises(TypeError, match="AsyncSession"):
+            await publish("a", queue="orders", session=None)  # ty: ignore[invalid-argument-type]
+    assert test_broker.fake_client.rows == []
+
+
+async def test_sync_publish_emits_published_before_the_handler_runs() -> None:
+    events: list[tuple[str, dict[str, typing.Any]]] = []
+
+    def _recorder(event: str, tags: Mapping[str, typing.Any]) -> None:
+        events.append((event, dict(tags)))
+
+    broker = OutboxBroker(outbox_table=make_outbox_table(MetaData()), metrics_recorder=_recorder)
+
+    @broker.subscriber("orders")
+    async def handle(body: str) -> None:
+        del body
+        events.append(("handler", {}))
+
+    async with TestOutboxBroker(broker):
+        await broker.publish("a", queue="orders", session=fake_session())
+
+    names = [name for name, _ in events]
+    assert names.index("published") < names.index("handler")
+    assert events[names.index("published")][1]["status"] == "success"
+
+
+async def test_config_error_raised_by_dispatch_is_not_a_failed_publish() -> None:
+    """A guard re-raised by sync dispatch surfaces from publish, but the row was stored, so ``published`` succeeded."""
+    events: list[tuple[str, dict[str, typing.Any]]] = []
+
+    def _recorder(event: str, tags: Mapping[str, typing.Any]) -> None:
+        events.append((event, dict(tags)))
+
+    broker = OutboxBroker(outbox_table=make_outbox_table(MetaData()), metrics_recorder=_recorder)
+    closed = AsyncMock(spec=AsyncSession)
+    closed.in_transaction.return_value = False
+
+    @broker.subscriber("orders")
+    async def handle(body: str) -> OutboxResponse:
+        del body
+        return OutboxResponse(body="next", queue="downstream", session=closed)
+
+    async with TestOutboxBroker(broker):
+        with pytest.raises(RuntimeError, match="no open transaction"):
+            await broker.publish("a", queue="orders", session=fake_session())
+
+    published = [tags for name, tags in events if name == "published"]
+    assert [(tags["queue"], tags["status"]) for tags in published] == [("orders", "success")]
+
+
+async def test_rows_inserted_without_a_publish_are_not_dispatched_after_reentry() -> None:
+    broker = _make_broker()
+    received: list[bytes] = []
+
+    @broker.subscriber("orders")
+    async def handle(body: bytes) -> None:
+        received.append(body)
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await test_broker.fake_client.insert(fake_session(), queue="orders", payload=b"direct", headers=None)
+    async with test_broker:
+        await broker.publish(b"published", queue="orders", session=fake_session())
+
+    assert received == [b"published"]

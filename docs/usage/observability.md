@@ -152,15 +152,9 @@ dlq_written](./dlq.md#metric-dlq_written).
 
 ## Test broker note
 
-`TestOutboxBroker` replaces `broker.publish` with a patched version that
-skips the middleware publish path, so middleware-registered
-publish-scope metrics do not fire in test mode. Middleware
-consume-scope metrics still fire, because handlers are still consumed
-through the normal middleware stack.
-
-The recorder-seam `published` event still fires in test mode, with the
-same tags as in production: `status="error"` and `exception_type` when
-encoding fails, and a measured `duration_seconds` for the in-memory
-insert.
-
-`TestKafkaBroker` and `TestRabbitBroker` behave the same way, for the same reason.
+`TestOutboxBroker` publishes through the production producer and
+middleware stack, so publish-scope middleware metrics and the recorder
+`published` event fire in test mode with the same tags as in production.
+Consume-scope metrics fire too. In sync mode the handler runs inside
+`publish`, so a publish-scope duration includes the handler's run time;
+the recorder's `duration_seconds` covers only the in-memory insert.

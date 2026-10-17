@@ -2,7 +2,8 @@
 
 `faststream-outbox` ships `TestOutboxBroker`, a test context manager that
 swaps the SQLAlchemy-backed client for an in-memory `FakeOutboxClient` so
-unit tests don't need Postgres.
+unit tests don't need Postgres. Only the storage is fake: publishing runs
+the broker's real producer and publish middlewares, as in production.
 
 By default it dispatches handlers synchronously inside `publish`, matching
 `TestKafkaBroker` / `TestRabbitBroker`, so tests need no `_wait_until` or
@@ -16,7 +17,7 @@ bottom), so async test functions need no `@pytest.mark.asyncio` marker.
 
 ```python
 from faststream_outbox import OutboxBroker, make_outbox_table
-from faststream_outbox.testing import TestOutboxBroker
+from faststream_outbox.testing import TestOutboxBroker, fake_session
 from sqlalchemy import MetaData
 
 
@@ -31,16 +32,17 @@ async def test_handler() -> None:
         received.append(order_id)
 
     async with TestOutboxBroker(broker):
-        await broker.publish(1, queue="orders")
+        await broker.publish(1, queue="orders", session=fake_session())
         # Handler has already run.
 
     assert received == [1]
 ```
 
-On `broker.publish` (and `publish_batch`), `session=` is optional in tests:
-the test broker patches those methods to ignore it. This does not extend
-to `broker.publisher("q").publish(...)`, which still requires a `session`
-(see [Testing publishers](#testing-publishers) below).
+Every publish needs a `session` in tests, as in production.
+`fake_session()` returns a mock `AsyncSession` that passes the session check
+and reports an open transaction, so an `OutboxResponse` accepts it too. Its
+methods do nothing: the fake store keeps the row whether you commit or roll
+back.
 
 The fake client keeps an in-memory list of rows you can inspect via
 `fake_client.rows`. `fake_client` is an attribute of the
@@ -52,7 +54,7 @@ async with tb:
     # "orders" has a subscriber, so in sync mode the row is dispatched and
     # acked (deleted) before publish returns. Publish to a queue with no
     # subscriber to inspect a row that survives.
-    await broker.publish(1, queue="audit")
+    await broker.publish(1, queue="audit", session=fake_session())
 
 assert len(tb.fake_client.rows) == 1
 ```
@@ -64,11 +66,6 @@ An unconsumed queue is used deliberately: a row published to a queue that
 ## Testing publishers
 
 ```python
-from unittest.mock import AsyncMock
-
-from sqlalchemy.ext.asyncio import AsyncSession
-
-
 async def test_publisher() -> None:
     metadata = MetaData()
     outbox_table = make_outbox_table(metadata, table_name="outbox")
@@ -82,21 +79,13 @@ async def test_publisher() -> None:
     pub = broker.publisher("orders")
 
     async with TestOutboxBroker(broker):
-        # The publisher path builds its publish command (which validates the
-        # session type) before the fake producer is reached, so session= is
-        # required and must be an AsyncSession. The fake never touches it — a
-        # spec'd mock satisfies the check.
-        await pub.publish({"order_id": 1}, session=AsyncMock(spec=AsyncSession))
+        await pub.publish({"order_id": 1}, session=fake_session())
 
     assert received == [{"order_id": 1}]
 ```
 
-`broker.publisher("q").publish(...)` lands rows in the same fake store as
-`broker.publish(queue="q", ...)`, because the test broker swaps in a fake
-producer that both paths go through. The one
-difference in tests is the `session`: `broker.publish` is patched to make it
-optional, but the publisher path is not, so pass a (mock) `AsyncSession` as
-shown.
+`broker.publisher("q").publish(...)` and `broker.publish(queue="q", ...)`
+go through the same producer and land rows in the same fake store.
 
 ## Loop-driven mode
 
@@ -146,8 +135,12 @@ registered handlers are not started, matching production.
 - `cancel_timer` and `fetch_unprocessed` run against the fake client
   (the test broker swaps its client in, so `broker.<method>` reaches it).
   The `session` argument is still required but is ignored in tests.
-- The fake producer uses the same envelope format as the real one, so
-  all serialization paths are exercised.
+- Publishing runs the production producer, so encoding, the `published`
+  metric and publish middlewares (Prometheus, OpenTelemetry or your own
+  `publish_scope`) behave as in production.
+- The fake store ignores transactions. A row published in a transaction
+  that rolls back is still stored and delivered. Test rollback behaviour
+  against a real database.
 - `lease_ttl_seconds` and re-delivery are not simulated in sync mode.
   Handlers that exceed the configured TTL in production may be re-delivered
   to another worker, but tests will only invoke the handler once.
@@ -166,7 +159,7 @@ registered handlers are not started, matching production.
 fake subscribers that `TestKafkaBroker` and friends attach to each
 publisher). Those spies mock the registered handler to forward
 `publisher.publish()` calls, which would conflict with the outbox's real
-dispatch path: the fake producer already lands rows in the fake client
+dispatch path: the test broker already lands rows in the fake client
 *and* drives the real handler. Publisher-mock assertions such as
 `publisher.mock.assert_called_once_with(...)` are therefore not available;
 assert on handler side effects or `fake_client.rows` instead.

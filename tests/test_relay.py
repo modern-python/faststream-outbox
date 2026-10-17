@@ -9,7 +9,7 @@ from sqlalchemy import MetaData
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from faststream_outbox import OutboxBroker, OutboxResponse, OutboxRouter, make_outbox_table
-from faststream_outbox.testing import TestOutboxBroker
+from faststream_outbox.testing import TestOutboxBroker, fake_session
 
 
 pytestmark = pytest.mark.asyncio
@@ -38,7 +38,7 @@ async def test_naked_decorator_chain_relays_plain_return_to_kafka() -> None:
     # must be wired before our subscriber starts, because the outbox's start() probes
     # foreign producers and warns about any whose broker isn't started yet.
     async with TestKafkaBroker(broker_kafka), TestOutboxBroker(broker_outbox, run_loops=False) as outbox:
-        await outbox.publish({"hello": "world"}, queue="relay_queue", session=None)  # ty: ignore[invalid-argument-type]
+        await outbox.publish({"hello": "world"}, queue="relay_queue", session=fake_session())
         publisher_kafka.mock.assert_called_once_with({"hello": "world"})
 
 
@@ -63,7 +63,7 @@ async def test_relay_via_kafka_router_publisher() -> None:
     broker_kafka.include_router(kafka_router)
 
     async with TestKafkaBroker(broker_kafka), TestOutboxBroker(broker_outbox, run_loops=False) as outbox:
-        await outbox.publish({"router": True}, queue="relay_queue", session=None)  # ty: ignore[invalid-argument-type]
+        await outbox.publish({"router": True}, queue="relay_queue", session=fake_session())
         publisher_kafka.mock.assert_called_once_with({"router": True})
 
 
@@ -88,7 +88,7 @@ async def test_relay_via_outbox_router_subscriber() -> None:
     broker_outbox.include_router(outbox_router)
 
     async with TestKafkaBroker(broker_kafka), TestOutboxBroker(broker_outbox, run_loops=False) as outbox:
-        await outbox.publish({"outbox_router": True}, queue="relay_queue", session=None)  # ty: ignore[invalid-argument-type]
+        await outbox.publish({"outbox_router": True}, queue="relay_queue", session=fake_session())
         publisher_kafka.mock.assert_called_once_with({"outbox_router": True})
 
 
@@ -120,7 +120,7 @@ async def test_propagate_inbound_headers_true_forwards_outbox_headers_to_kafka()
             await outbox.publish(
                 {"hi": 1},
                 queue="relay_queue",
-                session=None,  # ty: ignore[invalid-argument-type]
+                session=fake_session(),
                 headers={"x-trace-id": "abc123", "content-type": "application/json"},
             )
 
@@ -157,7 +157,7 @@ async def test_propagate_inbound_headers_false_drops_inbound_headers() -> None:
             await outbox.publish(
                 {"hi": 1},
                 queue="relay_queue",
-                session=None,  # ty: ignore[invalid-argument-type]
+                session=fake_session(),
                 headers={"x-trace-id": "should-be-dropped"},
             )
 
@@ -194,7 +194,7 @@ async def test_propagate_inbound_headers_true_does_not_override_explicit_respons
             await outbox.publish(
                 {"hi": 1},
                 queue="relay_queue",
-                session=None,  # ty: ignore[invalid-argument-type]
+                session=fake_session(),
                 headers={"x-trace-id": "should-not-clobber"},
             )
 
@@ -224,7 +224,7 @@ async def test_outbox_response_with_foreign_publisher_raises() -> None:
 
     async with TestKafkaBroker(broker_kafka), TestOutboxBroker(broker_outbox, run_loops=False) as outbox:
         with pytest.raises(RuntimeError, match="OutboxResponse"):
-            await outbox.publish({"x": 1}, queue="relay_queue", session=None)  # ty: ignore[invalid-argument-type]
+            await outbox.publish({"x": 1}, queue="relay_queue", session=fake_session())
 
 
 async def test_outbox_response_with_foreign_publisher_fires_guard_before_side_effects() -> None:
@@ -248,7 +248,7 @@ async def test_outbox_response_with_foreign_publisher_fires_guard_before_side_ef
     test_outbox = TestOutboxBroker(broker_outbox, run_loops=False)
     async with TestKafkaBroker(broker_kafka), test_outbox as outbox:
         with pytest.raises(RuntimeError, match="OutboxResponse"):
-            await outbox.publish({"x": 1}, queue="relay_queue", session=None)  # ty: ignore[invalid-argument-type]
+            await outbox.publish({"x": 1}, queue="relay_queue", session=fake_session())
         # Guard fired before the chain → the foreign Kafka publish never happened…
         publisher_kafka.mock.assert_not_called()
         # …and no follow-on outbox row was inserted for the relayed body.
@@ -275,7 +275,7 @@ async def test_outbox_response_with_foreign_publisher_writes_the_recorded_retry(
     test_outbox = TestOutboxBroker(broker_outbox, run_loops=False)
     async with TestKafkaBroker(broker_kafka), test_outbox as outbox:
         with pytest.raises(RuntimeError, match="OutboxResponse"):
-            await outbox.publish({"x": 1}, queue="relay_queue", session=None)  # ty: ignore[invalid-argument-type]
+            await outbox.publish({"x": 1}, queue="relay_queue", session=fake_session())
         rows = [(r.queue, r.attempts_count, r.acquired_token) for r in test_outbox.fake_client.rows]
 
     assert rows == [("relay_queue", 1, None)]
