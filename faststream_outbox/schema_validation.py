@@ -22,7 +22,7 @@ from faststream_outbox._import_checker import is_alembic_installed
 from faststream_outbox.autovacuum import _RELOPTIONS_QUERY, autovacuum_findings
 from faststream_outbox.schema import (
     _LEASE_CK_SUFFIX,
-    _LEASE_IDX_SUFFIX,
+    _LEASED_IDX_SUFFIX,
     _PENDING_IDX_SUFFIX,
     _TIMER_ID_UQ_SUFFIX,
     make_dlq_table,
@@ -123,7 +123,7 @@ def _normalize_predicate(predicate: str) -> str:
 _EXPECTED_INDEX_PREDICATES = {
     _PENDING_IDX_SUFFIX: "acquired_token is null",
     _TIMER_ID_UQ_SUFFIX: "timer_id is not null",
-    _LEASE_IDX_SUFFIX: "acquired_token is not null",
+    _LEASED_IDX_SUFFIX: "acquired_token is not null",
 }
 
 # Suffixes whose index must be UNIQUE — the timer_id arbiter relies on it for ON CONFLICT (F2-10).
@@ -251,6 +251,7 @@ _AUTOGEN_BLIND_HINT = (
 
 
 _PENDING_IDX_UPGRADE_URL = "https://faststream-outbox.modern-python.org/operations/alembic/#upgrading-to-015"
+_LEASED_IDX_UPGRADE_URL = "https://faststream-outbox.modern-python.org/operations/alembic/#upgrading-to-017"
 
 
 def _compose_schema_mismatch_message(errors: list[str], *, has_blind_drift: bool) -> str:
@@ -404,5 +405,9 @@ def _drift_entry_to_error(entry: "tuple[typing.Any, ...]", table_name: str) -> s
         error = f"table '{table_name}' missing index over {cols} (name={idx.name!r}, unique={bool(idx.unique)})"
         if idx.name.endswith(_PENDING_IDX_SUFFIX):
             error += f"; a table created before 0.15 needs this index rebuilt: {_PENDING_IDX_UPGRADE_URL}"
+        elif idx.name.endswith(_LEASED_IDX_SUFFIX):
+            error += (
+                f"; a table created before 0.17 needs it in place of {table_name}_lease_idx: {_LEASED_IDX_UPGRADE_URL}"
+            )
         return error
     return None

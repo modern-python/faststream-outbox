@@ -48,7 +48,7 @@ _POSTGRES_IDENT_MAX_BYTES = 63
 _CHANNEL_PREFIX = "outbox_"
 _PENDING_IDX_SUFFIX = "_pending_idx"
 _TIMER_ID_UQ_SUFFIX = "_timer_id_uq"
-_LEASE_IDX_SUFFIX = "_lease_idx"
+_LEASED_IDX_SUFFIX = "_leased_idx"
 _LEASE_CK_SUFFIX = "_lease_ck"
 
 
@@ -68,7 +68,7 @@ def validate_table_identifiers(table_name: str) -> None:
             f"{_CHANNEL_PREFIX}{table_name}",
             f"{table_name}{_PENDING_IDX_SUFFIX}",
             f"{table_name}{_TIMER_ID_UQ_SUFFIX}",
-            f"{table_name}{_LEASE_IDX_SUFFIX}",
+            f"{table_name}{_LEASED_IDX_SUFFIX}",
             f"{table_name}{_LEASE_CK_SUFFIX}",
         )
     )
@@ -124,7 +124,6 @@ def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table
     # Partial index that backs the fetch query's unleased branch: an ordered scan per queue on
     # (next_attempt_at, id) that stops after `limit` unlocked rows. `id` is part of the key because
     # rows published in one transaction share `next_attempt_at`. See ADR 0003.
-    # The expired-lease branch is covered by `_lease_idx` below.
     Index(
         f"{table_name}{_PENDING_IDX_SUFFIX}",
         table.c.queue,
@@ -142,17 +141,12 @@ def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table
         unique=True,
         postgresql_where=table.c.timer_id.is_not(None),
     )
-    # Partial index that backs the fetch query's expired-lease branch
-    # (`WHERE acquired_token IS NOT NULL AND acquired_at < lease_cutoff`). Without it,
-    # the OR's second arm forces a seq-scan of the whole table on every fetch — invisible
-    # under healthy steady-state (Branch A dominates) but the tail grows linearly with
-    # table size when handlers wedge or `lease_ttl_seconds < P99`. Trade-off: every fetch
-    # UPDATE rewrites (acquired_token, acquired_at), so this index pays write amplification
-    # proportional to the claim rate.
+    # The same ordered scan for the expired-lease branch. See ADR 0003.
     Index(
-        f"{table_name}{_LEASE_IDX_SUFFIX}",
+        f"{table_name}{_LEASED_IDX_SUFFIX}",
         table.c.queue,
-        table.c.acquired_at,
+        table.c.next_attempt_at,
+        table.c.id,
         postgresql_where=table.c.acquired_token.is_not(None),
     )
     return table

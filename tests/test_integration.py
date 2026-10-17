@@ -13,7 +13,7 @@ import asyncpg
 import pytest
 from faststream import BaseMiddleware, Context, Depends
 from faststream.kafka import KafkaBroker, TestKafkaBroker
-from sqlalchemy import MetaData, Table, event, func, insert, literal, select, text
+from sqlalchemy import MetaData, Table, case, event, func, insert, literal, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
@@ -424,13 +424,43 @@ async def test_validate_schema_fails_when_pending_index_missing(pg_engine, outbo
         await client.validate_schema()
 
 
-async def test_validate_schema_fails_when_lease_index_missing(pg_engine, outbox_table) -> None:
-    """Missing the expired-lease partial index sends the fetch CTE back to seq-scan; flag it."""
-    drop_sql = f'DROP INDEX "{outbox_table.name}_lease_idx"'
+async def test_validate_schema_reports_the_pre_0_17_lease_index(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+) -> None:
+    """An outbox migrated before 0.17 has ``_lease_idx`` on ``(queue, acquired_at)`` and lacks ``_leased_idx``."""
     async with pg_engine.begin() as conn:
-        await conn.exec_driver_sql(drop_sql)
+        await conn.execute(text(f'DROP INDEX "{outbox_table.name}_leased_idx"'))
+        await conn.execute(
+            text(
+                f'CREATE INDEX "{outbox_table.name}_lease_idx" ON {outbox_table.name} (queue, acquired_at) '
+                "WHERE acquired_token IS NOT NULL",
+            ),
+        )
     client = OutboxClient(pg_engine, outbox_table)
-    with pytest.raises(RuntimeError, match="missing index"):
+    with pytest.raises(RuntimeError, match=r"missing index.*leased_idx.*operations/alembic/#upgrading-to-017"):
+        await client.validate_schema()
+
+
+@pytest.mark.parametrize(
+    ("predicate", "error"),
+    [("", "is not a partial index"), ("WHERE acquired_token IS NULL", "has wrong partial predicate")],
+)
+async def test_validate_schema_checks_the_leased_index_predicate(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+    predicate: str,
+    error: str,
+) -> None:
+    """A ``_leased_idx`` rebuilt without ``acquired_token IS NOT NULL`` is reported (alembic's diff ignores it)."""
+    idx = f"{outbox_table.name}_leased_idx"
+    async with pg_engine.begin() as conn:
+        await conn.execute(text(f'DROP INDEX "{idx}"'))
+        await conn.execute(
+            text(f'CREATE INDEX "{idx}" ON {outbox_table.name} (queue, next_attempt_at, id) {predicate}')
+        )
+    client = OutboxClient(pg_engine, outbox_table)
+    with pytest.raises(RuntimeError, match=f"'{idx}' {error}"):
         await client.validate_schema()
 
 
@@ -616,6 +646,35 @@ def _scanned_rows(plan: dict[str, Any], table: str) -> list[float]:
     return found
 
 
+async def _explain_fetch(engine: AsyncEngine, table: Table, *, limit: int) -> dict[str, Any]:
+    """Run ``EXPLAIN ANALYZE`` on the statement a real fetch of ``orders`` sends, rolled back."""
+    captured: list[tuple[str, Any]] = []
+
+    def capture(_conn: Any, _cursor: Any, statement: str, parameters: Any, _context: Any, _many: bool) -> None:
+        if "FOR UPDATE SKIP LOCKED" in statement:
+            captured.append((statement, parameters))
+
+    client = OutboxClient(engine, table)
+    event.listen(engine.sync_engine, "before_cursor_execute", capture)
+    try:
+        async with engine.connect() as conn:
+            await client.fetch(conn, ["orders"], limit=limit, lease_ttl_seconds=60.0)
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", capture)
+    statement, parameters = captured[0]
+
+    async with engine.connect() as conn:
+        raw = (await conn.get_raw_connection()).driver_connection
+        assert raw is not None
+        tx = raw.transaction()
+        await tx.start()
+        try:
+            explained = await raw.fetchval(f"EXPLAIN (ANALYZE, FORMAT JSON) {statement}", *parameters)
+        finally:
+            await tx.rollback()
+    return explained[0]["Plan"]
+
+
 async def test_fetch_reads_only_the_rows_it_claims_from_a_backlog(
     pg_engine: AsyncEngine,
     outbox_table: Table,
@@ -633,31 +692,36 @@ async def test_fetch_reads_only_the_rows_it_claims_from_a_backlog(
         await conn.execute(insert(outbox_table).from_select(["queue", "payload"], backlog))
         await conn.execute(text(f"ANALYZE {outbox_table.name}"))
 
-    captured: list[tuple[str, Any]] = []
+    plan = await _explain_fetch(pg_engine, outbox_table, limit=limit)
 
-    def capture(_conn: Any, _cursor: Any, statement: str, parameters: Any, _context: Any, _many: bool) -> None:
-        if "FOR UPDATE SKIP LOCKED" in statement:
-            captured.append((statement, parameters))
+    assert max(_scanned_rows(plan, outbox_table.name)) <= 2 * limit
 
-    client = OutboxClient(pg_engine, outbox_table)
-    event.listen(pg_engine.sync_engine, "before_cursor_execute", capture)
-    try:
-        async with pg_engine.connect() as conn:
-            await client.fetch(conn, ["orders"], limit=limit, lease_ttl_seconds=60.0)
-    finally:
-        event.remove(pg_engine.sync_engine, "before_cursor_execute", capture)
-    statement, parameters = captured[0]
 
-    async with pg_engine.connect() as conn:
-        raw = (await conn.get_raw_connection()).driver_connection
-        assert raw is not None
-        tx = raw.transaction()
-        await tx.start()
-        try:
-            explained = await raw.fetchval(f"EXPLAIN (ANALYZE, FORMAT JSON) {statement}", *parameters)
-        finally:
-            await tx.rollback()
-    plan = explained[0]["Plan"]
+async def test_fetch_reads_only_the_rows_it_claims_from_expired_leases(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+) -> None:
+    """INVARIANT: reclaiming expired leases reads about ``limit`` rows, however many handlers hung.
+
+    The expired-lease branch must come off an ordered scan of ``_leased_idx``. An index keyed on
+    ``acquired_at`` makes Postgres read and sort every expired lease on the queue.
+    """
+    limit = 10
+    async with pg_engine.begin() as conn:
+        series = func.generate_series(1, 20000).column_valued("g")
+        leased = series % 4 == 0
+        backlog = select(
+            literal("orders"),
+            literal(b"x"),
+            func.now() - func.make_interval(0, 0, 0, 0, 0, 0, series),
+            case((leased, func.gen_random_uuid())),
+            case((leased, func.now() - func.make_interval(0, 0, 0, 0, 1))),
+        )
+        columns = ["queue", "payload", "next_attempt_at", "acquired_token", "acquired_at"]
+        await conn.execute(insert(outbox_table).from_select(columns, backlog))
+        await conn.execute(text(f"ANALYZE {outbox_table.name}"))
+
+    plan = await _explain_fetch(pg_engine, outbox_table, limit=limit)
 
     assert max(_scanned_rows(plan, outbox_table.name)) <= 2 * limit
 
