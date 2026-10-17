@@ -167,6 +167,36 @@ async def test_validate_schema_passes_for_explicitly_named_default_schema(pg_eng
             await conn.run_sync(metadata.drop_all)
 
 
+async def test_validate_schema_finds_a_table_through_a_later_search_path_entry(pg_engine: AsyncEngine) -> None:
+    """An unqualified table that resolves through a later ``search_path`` entry validates.
+
+    With ``search_path = <empty schema>, public`` the app reads and writes ``public.<table>``,
+    so validation must look there too, not only in ``current_schema()``.
+    """
+    schema = f"sch_sp_{uuid.uuid4().hex[:8]}"
+    suffix = uuid.uuid4().hex[:8]
+    metadata = MetaData()
+    table = make_outbox_table(metadata, table_name=f"outbox_sp_{suffix}")
+    dlq_table = make_dlq_table(metadata, table_name=f"outbox_sp_dlq_{suffix}")
+    async with pg_engine.begin() as conn:
+        await conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+        await conn.run_sync(metadata.create_all)
+        await conn.execute(text(outbox_autovacuum_ddl(table.name)))
+    dsn = pg_engine.url.render_as_string(hide_password=False)
+    search_path_engine = create_async_engine(
+        dsn,
+        connect_args={"server_settings": {"search_path": f'"{schema}", public'}},
+    )
+    try:
+        client = OutboxClient(search_path_engine, table, dlq_table=dlq_table)
+        await client.validate_schema(check_autovacuum=True)  # must NOT raise
+    finally:
+        await search_path_engine.dispose()
+        async with pg_engine.begin() as conn:
+            await conn.run_sync(metadata.drop_all)
+            await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+
+
 async def test_validate_schema_fails_for_missing_table(pg_engine) -> None:
     metadata = MetaData()
     table = make_outbox_table(metadata, table_name="does_not_exist_xyz")

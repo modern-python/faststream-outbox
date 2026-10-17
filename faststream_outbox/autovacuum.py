@@ -60,10 +60,10 @@ def outbox_autovacuum_ddl(
 
     ``schema`` defaults to ``None``, which renders an unqualified table name that resolves
     via the connection's ``search_path`` -- matching both ``Table.schema=None`` and
-    the ``validate_schema(check_autovacuum=True)`` reloptions lookup's
-    ``COALESCE(:schema, current_schema())``. Pass the same ``schema`` as the outbox
-    ``Table`` (e.g. ``table.schema``) when it lives in a named schema, so this DDL
-    targets the same table the check reads.
+    the ``validate_schema(check_autovacuum=True)`` reloptions lookup, which resolves the
+    table the same way. Pass the same ``schema`` as the outbox ``Table`` (e.g.
+    ``table.schema``) when it lives in a named schema, so this DDL targets the same table
+    the check reads.
     """
     quoted_table = _IDENTIFIER_PREPARER.quote(table_name)
     quoted_name = quoted_table if schema is None else f"{_IDENTIFIER_PREPARER.quote(schema)}.{quoted_table}"
@@ -82,8 +82,7 @@ def outbox_autovacuum_ddl(
 
 
 # reloptions come back from asyncpg as a ``list[str]`` of ``"key=value"`` items, or
-# None when the table has no options set (or does not exist). NULL nspname match uses
-# current_schema() so a search_path-relative table resolves the same way the app does.
+# None when the table has no options set (or does not exist).
 _RELOPTIONS_QUERY = text(
     "SELECT c.reloptions FROM pg_class c "
     "JOIN pg_namespace n ON n.oid = c.relnamespace "
