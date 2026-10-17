@@ -1,8 +1,8 @@
 """Publish-side DTO for the outbox transport.
 
 ``OutboxPublishCommand`` carries the domain fields that travel from the
-publisher / broker into ``OutboxProducer.publish``: the user's ``AsyncSession``
-(required — outbox rows commit with the caller's transaction), the queue name,
+publisher / broker into ``OutboxProducer.publish``: the user's ``AsyncSession`` or
+``AsyncConnection`` (required — outbox rows commit with the caller's transaction), the queue name,
 scheduling args, the timer dedup key. Centralizing the activate-args validation
 in the constructor ensures ``broker.publish``, ``broker.publish_batch`` and
 ``OutboxPublisher.publish`` all reject the same misconfigurations.
@@ -17,8 +17,8 @@ from collections.abc import Sequence
 
 from faststream.response.publish_type import PublishType
 from faststream.response.response import BatchPublishCommand, PublishCommand, Response
-from sqlalchemy.ext.asyncio import AsyncSession
 
+from faststream_outbox._session import SessionOrConnection, require_session_or_connection
 from faststream_outbox.message import CORRELATION_ID_HEADER
 
 
@@ -55,9 +55,7 @@ def _validate_publish_args(
     if activate_at is not None and activate_at.tzinfo is None:
         msg = f"{context} requires activate_at to be timezone-aware"
         raise ValueError(msg)
-    if not isinstance(session, AsyncSession):
-        msg = f"{context} requires an sqlalchemy.ext.asyncio.AsyncSession"
-        raise TypeError(msg)
+    require_session_or_connection(session, context)
     # ``queue`` reaches SQL otherwise unvalidated — empty / non-str / over the
     # ``String(255)`` column would surface as an opaque DB error or silent truncation.
     if not isinstance(queue, str):
@@ -91,7 +89,7 @@ class OutboxPublishCommand(BatchPublishCommand):
         /,
         *bodies: typing.Any,
         queue: str,
-        session: AsyncSession,
+        session: SessionOrConnection,
         headers: dict[str, str] | None = None,
         correlation_id: str | None = None,
         activate_in: dt.timedelta | None = None,
@@ -195,7 +193,7 @@ class OutboxResponse(Response):
         body: typing.Any,
         *,
         queue: str,
-        session: AsyncSession,
+        session: SessionOrConnection,
         headers: dict[str, str] | None = None,
         correlation_id: str | None = None,
         activate_in: dt.timedelta | None = None,

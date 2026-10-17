@@ -44,6 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from faststream_outbox import schema_validation
 from faststream_outbox._scheduling import is_future_dated, resolve_next_attempt_client_side
+from faststream_outbox._session import SessionOrConnection, require_session_or_connection
 from faststream_outbox._time import utcnow
 from faststream_outbox.message import OutboxInnerMessage
 from faststream_outbox.schema import (
@@ -90,7 +91,7 @@ class AbstractOutboxClient(abc.ABC):
     @abc.abstractmethod
     async def insert(
         self,
-        session: "AsyncSession",
+        session: SessionOrConnection,
         *,
         queue: str,
         payload: bytes,
@@ -109,7 +110,7 @@ class AbstractOutboxClient(abc.ABC):
     @abc.abstractmethod
     async def insert_batch(
         self,
-        session: "AsyncSession",
+        session: SessionOrConnection,
         *,
         queue: str,
         rows: "Sequence[tuple[bytes, dict[str, str] | None]]",
@@ -163,13 +164,13 @@ class AbstractOutboxClient(abc.ABC):
     ) -> bool: ...
 
     @abc.abstractmethod
-    async def cancel_timer(self, *, queue: str, timer_id: str, session: "AsyncSession") -> bool: ...
+    async def cancel_timer(self, *, queue: str, timer_id: str, session: SessionOrConnection) -> bool: ...
 
     @abc.abstractmethod
     async def fetch_unprocessed(
         self,
         *,
-        session: "AsyncSession",
+        session: SessionOrConnection,
         queue: str | None = None,
         limit: int = 1000,
     ) -> list[OutboxInnerMessage]: ...
@@ -282,7 +283,7 @@ class _OutboxInserter:
 
     async def insert(
         self,
-        session: "AsyncSession",
+        session: SessionOrConnection,
         *,
         queue: str,
         payload: bytes,
@@ -316,7 +317,7 @@ class _OutboxInserter:
 
     async def insert_batch(
         self,
-        session: "AsyncSession",
+        session: SessionOrConnection,
         *,
         queue: str,
         rows: "Sequence[tuple[bytes, dict[str, str] | None]]",
@@ -339,15 +340,15 @@ class _OutboxInserter:
         if not is_future_dated(activate_in, activate_at, now):
             await self._notify(session, queue)
 
-    def _notified_queues(self, session: "AsyncSession") -> set[str] | None:
+    def _notified_queues(self, session: SessionOrConnection) -> set[str] | None:
         """Return the queues already notified in *session*'s innermost transaction, or None outside one."""
-        sync_session = session.sync_session
-        txn = sync_session.get_nested_transaction() or sync_session.get_transaction()
+        sync_owner = session.sync_session if isinstance(session, AsyncSession) else session.sync_connection
+        txn = None if sync_owner is None else sync_owner.get_nested_transaction() or sync_owner.get_transaction()
         if txn is None:
             return None
         return self._notified.setdefault(txn, set())
 
-    async def _notify(self, session: "AsyncSession", queue: str) -> None:
+    async def _notify(self, session: SessionOrConnection, queue: str) -> None:
         # ``pg_notify(:channel, :payload)`` -- parameterized so channel and payload
         # bind cleanly (raw NOTIFY accepts only literals -- injection-prone). Runs on
         # the caller's session so NOTIFY commits with the row insert; rollback silently
@@ -359,12 +360,13 @@ class _OutboxInserter:
         # active transaction (get_nested_transaction() during a savepoint, else the outer
         # transaction) -- each a distinct, weak-referenceable object that GCs when the
         # transaction ends, so a rolled-back savepoint cannot suppress a later real NOTIFY.
-        # Key on the *sync* SessionTransaction, not the async AsyncSessionTransaction proxy:
-        # SQLAlchemy regenerates that proxy on every call and only weak-references it, so
-        # under autobegin (no explicit `session.begin()`) it would GC between publishes and
-        # defeat the memo. The Session holds the sync transaction strongly for its lifetime,
-        # so the key survives across publishes whether the caller uses `session.begin()` or
-        # autobegin. No active transaction -> emit unconditionally.
+        # Key on the *sync* transaction (the Session's SessionTransaction, or the Connection's
+        # RootTransaction / NestedTransaction), not the async proxy around it: SQLAlchemy
+        # regenerates that proxy on every call and only weak-references it, so under autobegin
+        # (no explicit `begin()`) it would GC between publishes and defeat the memo. The sync
+        # Session or Connection holds its transaction strongly while it is open, so the key
+        # survives across publishes whether the caller uses `begin()` or autobegin. No active
+        # transaction -> emit unconditionally.
         emitted = self._notified_queues(session)
         if emitted is not None:
             if queue in emitted:
@@ -410,7 +412,7 @@ class OutboxClient(AbstractOutboxClient):
 
     async def insert(
         self,
-        session: "AsyncSession",
+        session: SessionOrConnection,
         *,
         queue: str,
         payload: bytes,
@@ -431,7 +433,7 @@ class OutboxClient(AbstractOutboxClient):
 
     async def insert_batch(
         self,
-        session: "AsyncSession",
+        session: SessionOrConnection,
         *,
         queue: str,
         rows: "Sequence[tuple[bytes, dict[str, str] | None]]",
@@ -618,11 +620,9 @@ class OutboxClient(AbstractOutboxClient):
         result = await conn.execute(stmt, {"delay": max(0.0, delay_seconds)})
         return (result.rowcount or 0) > 0
 
-    async def cancel_timer(self, *, queue: str, timer_id: str, session: "AsyncSession") -> bool:
+    async def cancel_timer(self, *, queue: str, timer_id: str, session: SessionOrConnection) -> bool:
         """Delete a not-yet-leased ``(queue, timer_id)`` row on the caller's session."""
-        if not isinstance(session, AsyncSession):
-            msg = "OutboxClient.cancel_timer requires an sqlalchemy.ext.asyncio.AsyncSession"
-            raise TypeError(msg)
+        require_session_or_connection(session, "OutboxClient.cancel_timer")
         t = self._table
         stmt = delete(t).where(
             t.c.queue == queue,
@@ -635,14 +635,12 @@ class OutboxClient(AbstractOutboxClient):
     async def fetch_unprocessed(
         self,
         *,
-        session: "AsyncSession",
+        session: SessionOrConnection,
         queue: str | None = None,
         limit: int = 1000,
     ) -> list[OutboxInnerMessage]:
         """Read up to *limit* rows (optionally filtered by *queue*) on the caller's session."""
-        if not isinstance(session, AsyncSession):
-            msg = "OutboxClient.fetch_unprocessed requires an sqlalchemy.ext.asyncio.AsyncSession"
-            raise TypeError(msg)
+        require_session_or_connection(session, "OutboxClient.fetch_unprocessed")
         if limit < 1:
             # F4-04: a non-positive limit otherwise hits SQL (LIMIT -1 → DB error) or
             # silently returns nothing (LIMIT 0); reject it up front, consistently with

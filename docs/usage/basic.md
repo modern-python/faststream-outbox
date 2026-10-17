@@ -64,7 +64,9 @@ async with session_factory() as session, session.begin():
     # session.begin() commits both atomically on exit
 ```
 
-Passing anything that is not an `AsyncSession` raises `TypeError`. The whole
+Code that uses SQLAlchemy Core without the ORM can pass its `AsyncConnection`
+instead; see [Publishing on a Core connection](./publisher.md#publishing-on-a-core-connection).
+Passing anything else raises `TypeError`. The whole
 point of the outbox pattern is that the row commits atomically with your
 domain writes; opening a separate session would defeat it.
 

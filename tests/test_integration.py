@@ -2706,3 +2706,116 @@ async def test_notify_deduped_in_autobegin_transaction(pg_engine, outbox_table) 
                 await broker.publish({"n": 1}, queue="orders", session=session)
             await session.commit()
     assert count[0] == 1  # 5 publishes, one queue, one autobegin transaction -> one pg_notify
+
+
+async def test_publish_on_a_core_connection_commits_with_its_transaction(
+    pg_engine: AsyncEngine, outbox_table: Table
+) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    async with pg_engine.begin() as conn:
+        rid = await broker.publish({"n": 1}, queue="orders", session=conn)
+        assert await _row_count(pg_engine, outbox_table) == 0
+    assert rid is not None
+    assert await _row_count(pg_engine, outbox_table) == 1
+
+
+async def test_publish_on_a_core_connection_rolls_back_with_its_transaction(
+    pg_engine: AsyncEngine, outbox_table: Table
+) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    async with pg_engine.connect() as conn:
+        trans = await conn.begin()
+        await broker.publish({"n": 1}, queue="orders", session=conn)
+        await trans.rollback()
+    assert await _row_count(pg_engine, outbox_table) == 0
+
+
+async def test_publish_on_an_autobegun_core_connection_lands_on_commit(
+    pg_engine: AsyncEngine, outbox_table: Table
+) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    with _count_pg_notify(pg_engine) as count:
+        async with pg_engine.connect() as conn:
+            for _ in range(5):
+                await broker.publish({"n": 1}, queue="orders", session=conn)
+            assert await _row_count(pg_engine, outbox_table) == 0
+            await conn.commit()
+    assert await _row_count(pg_engine, outbox_table) == 5
+    assert count[0] == 1
+
+
+async def test_notify_on_a_core_connection_re_emits_after_savepoint_rollback(
+    pg_engine: AsyncEngine, outbox_table: Table
+) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+
+    class _RollbackError(Exception):
+        pass
+
+    with _count_pg_notify(pg_engine) as count:
+        async with pg_engine.begin() as conn:
+            with contextlib.suppress(_RollbackError):
+                async with conn.begin_nested():
+                    await broker.publish({"n": 1}, queue="orders", session=conn)
+                    raise _RollbackError
+            count[0] = 0
+            await broker.publish({"n": 2}, queue="orders", session=conn)
+            await broker.publish({"n": 3}, queue="orders", session=conn)
+    assert count[0] == 1
+
+
+async def test_publish_batch_on_a_core_connection_shares_the_notify_dedup(
+    pg_engine: AsyncEngine, outbox_table: Table
+) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    with _count_pg_notify(pg_engine) as count:
+        async with pg_engine.begin() as conn:
+            await broker.publish_batch({"n": 1}, {"n": 2}, queue="orders", session=conn)
+            await broker.publish({"n": 3}, queue="orders", session=conn)
+    assert await _row_count(pg_engine, outbox_table) == 3
+    assert count[0] == 1
+
+
+async def test_cancel_timer_on_a_core_connection_deletes_the_pending_timer(
+    pg_engine: AsyncEngine, outbox_table: Table
+) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    async with pg_engine.begin() as conn:
+        await broker.publish(
+            {"n": 1}, queue="orders", session=conn, activate_in=dt.timedelta(minutes=5), timer_id="t-1"
+        )
+    async with pg_engine.begin() as conn:
+        assert await broker.cancel_timer(queue="orders", timer_id="t-1", session=conn) is True
+    assert await _row_count(pg_engine, outbox_table) == 0
+
+
+async def test_fetch_unprocessed_on_a_core_connection_sees_its_uncommitted_rows(
+    pg_engine: AsyncEngine, outbox_table: Table
+) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    async with pg_engine.begin() as conn:
+        await broker.publish("pre-commit", queue="orders", session=conn)
+        rows = await broker.fetch_unprocessed(session=conn, queue="orders")
+    assert [r.queue for r in rows] == ["orders"]
+
+
+async def test_outbox_response_on_a_core_connection_commits_with_its_transaction(
+    pg_engine: AsyncEngine, outbox_table: Table
+) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    response_publisher = OutboxFakePublisher(broker.config.producer)
+    async with pg_engine.begin() as conn:
+        response = OutboxResponse(body={"chained": True}, queue="downstream", session=conn)
+        await response_publisher._publish(response.as_publish_command(), _extra_middlewares=[])  # noqa: SLF001
+        assert await _row_count(pg_engine, outbox_table) == 0
+    assert await _row_count(pg_engine, outbox_table) == 1
+
+
+async def test_publisher_publish_on_a_core_connection_commits_with_its_transaction(
+    pg_engine: AsyncEngine, outbox_table: Table
+) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    pub = broker.publisher("orders")
+    async with pg_engine.begin() as conn:
+        assert await pub.publish({"n": 1}, session=conn) is not None
+    assert await _row_count(pg_engine, outbox_table) == 1

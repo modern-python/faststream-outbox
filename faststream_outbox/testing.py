@@ -25,6 +25,7 @@ from faststream._internal.testing.broker import TestBroker, patch_broker_calls
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from faststream_outbox._scheduling import resolve_next_attempt_client_side
+from faststream_outbox._session import SessionOrConnection
 from faststream_outbox._time import utcnow
 from faststream_outbox.broker import OutboxBroker
 from faststream_outbox.client import _NO_DLQ_TABLE_MSG, AbstractOutboxClient
@@ -139,7 +140,7 @@ class FakeOutboxClient(AbstractOutboxClient):
 
     async def insert(
         self,
-        session: "AsyncSession",
+        session: SessionOrConnection,
         *,
         queue: str,
         payload: bytes,
@@ -164,7 +165,7 @@ class FakeOutboxClient(AbstractOutboxClient):
 
     async def insert_batch(
         self,
-        session: "AsyncSession",
+        session: SessionOrConnection,
         *,
         queue: str,
         rows: "Sequence[tuple[bytes, dict[str, str] | None]]",
@@ -341,7 +342,7 @@ class FakeOutboxClient(AbstractOutboxClient):
                 return True
         return False
 
-    async def cancel_timer(self, *, queue: str, timer_id: str, session: "AsyncSession") -> bool:
+    async def cancel_timer(self, *, queue: str, timer_id: str, session: SessionOrConnection) -> bool:
         """Mirror :meth:`OutboxBroker.cancel_timer` — drop a not-yet-leased timer row."""
         del session  # ignored (no real DB), matching the fake publish contract
         for i, row in enumerate(self._rows):
@@ -353,7 +354,7 @@ class FakeOutboxClient(AbstractOutboxClient):
     async def fetch_unprocessed(
         self,
         *,
-        session: "AsyncSession",
+        session: SessionOrConnection,
         queue: str | None = None,
         limit: int = 1000,
     ) -> list[OutboxInnerMessage]:

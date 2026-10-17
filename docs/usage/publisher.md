@@ -8,8 +8,8 @@ There are three ways to write an outbox row:
    per-queue config and AsyncAPI spec coverage.
 
 All three share the same transactional contract: the caller supplies an
-`AsyncSession`, and the row commits with the caller's domain writes. The
-broker does not flush, commit, or open its own transaction.
+`AsyncSession` or an `AsyncConnection`, and the row commits with the caller's
+domain writes. The broker does not flush, commit, or open its own transaction.
 
 For "consume from A → enqueue to B" relay flows, a fourth path is
 available: returning `OutboxResponse(...)` from a handler. See [Chained
@@ -37,7 +37,7 @@ await broker.publish(
     body,
     *,
     queue: str,
-    session: AsyncSession,
+    session: AsyncSession | AsyncConnection,
     headers: dict[str, str] | None = None,
     correlation_id: str | None = None,
     activate_in: timedelta | None = None,
@@ -50,7 +50,26 @@ Returns the inserted row's `id`, or `None` if a `timer_id` conflict made
 the insert a no-op. See [Timers](./timers.md) for `activate_in` /
 `activate_at` / `timer_id`.
 
-Passing anything that is not an `AsyncSession` raises `TypeError`.
+Passing anything other than an `AsyncSession` or `AsyncConnection` raises
+`TypeError`.
+
+### Publishing on a Core connection
+
+If your code uses SQLAlchemy Core without the ORM, pass the `AsyncConnection`
+your domain writes run on. The parameter is still called `session`:
+
+```python
+async with engine.begin() as conn:
+    await conn.execute(insert(orders).values(id=1))  # domain write
+    await broker.publish({"order_id": 1}, queue="orders", session=conn)
+```
+
+Everything else works the same: the row commits or rolls back with `conn`'s
+transaction, a savepoint from `conn.begin_nested()` scopes it like a session
+savepoint, and a connection opened with `engine.connect()` without `begin()`
+starts its transaction on the first publish, so you still have to call
+`await conn.commit()`. `publish_batch`, `cancel_timer`, `fetch_unprocessed`,
+`OutboxPublisher.publish` and `OutboxResponse` accept a connection too.
 
 ## `broker.publish_batch`
 
@@ -73,7 +92,7 @@ Full signature:
 await broker.publish_batch(
     *bodies,
     queue: str,
-    session: AsyncSession,
+    session: AsyncSession | AsyncConnection,
     headers: dict[str, str] | None = None,
     activate_in: timedelta | None = None,
     activate_at: datetime | None = None,
