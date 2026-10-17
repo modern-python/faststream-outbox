@@ -55,7 +55,11 @@ app = AsgiFastStream(
 `AsgiFastStream` accepts any ASGI sub-app under `asgi_routes`; mount
 `make_asgi_app(REGISTRY)` to expose Prometheus exposition without
 pulling FastAPI in. `make_ping_asgi(broker)` is FastStream's built-in
-liveness probe, handy for Kubernetes.
+health probe, handy for Kubernetes. It calls `broker.ping()`, which
+takes a connection from the engine's pool, so it also fails while the
+application's own sessions hold every pooled connection. Use it as a
+readiness probe, or leave the pool room for it if it backs a liveness
+probe.
 
 The `broker` label is always `"outbox"`; add `broker="outbox"` to the
 PromQL filter to scope dashboards to outbox traffic.
