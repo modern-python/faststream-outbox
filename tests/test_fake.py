@@ -2317,3 +2317,29 @@ async def test_loop_mode_consumes_after_an_earlier_stop_consume_on_the_same_brok
         payload, hdrs = encode_payload("again")
         test_broker.feed("orders", payload, headers=hdrs)
         await _wait_until(lambda: handled == ["again"])
+
+
+async def test_fetch_loop_does_not_claim_after_stop_took_the_claim_lock() -> None:
+    """INVARIANT: the fetch loop re-checks for a stop after taking the claim lock.
+
+    ``stop()`` takes the claim lock before draining. A fetch loop that was already waiting on the
+    lock would otherwise claim rows right after the drain finished, and those rows would sit leased
+    with no worker left to handle them.
+    """
+    broker = _make_broker()
+    sub = broker.subscriber("orders", min_fetch_interval=30.0, max_fetch_interval=30.0)
+
+    @sub
+    async def handle(body: str) -> None: ...
+
+    test_broker = TestOutboxBroker(broker, run_loops=True)
+    async with test_broker:
+        await asyncio.sleep(0.05)
+        async with sub._claim_lock:  # noqa: SLF001
+            payload, hdrs = encode_payload("x")
+            test_broker.feed("orders", payload, headers=hdrs)
+            await asyncio.sleep(0.05)
+            sub._stopping = True  # noqa: SLF001
+        await asyncio.sleep(0.05)
+        [row] = test_broker.fake_client.rows
+        assert row.acquired_token is None
