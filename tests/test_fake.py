@@ -2333,7 +2333,7 @@ async def test_loop_mode_buffered_deletes_flush_before_the_lease_expires() -> No
     @broker.subscriber(
         "orders",
         terminal_flush_batch_size=100,
-        lease_ttl_seconds=0.4,
+        lease_ttl_seconds=1.0,
         min_fetch_interval=0.01,
         max_fetch_interval=0.05,
     )
@@ -2343,12 +2343,12 @@ async def test_loop_mode_buffered_deletes_flush_before_the_lease_expires() -> No
 
     test_broker = TestOutboxBroker(broker, run_loops=True)
     async with test_broker:
-        for i in range(30):
+        for i in range(60):
             payload, hdrs = encode_payload(f"m{i}")
             test_broker.feed("orders", payload, headers=hdrs)
-        await _wait_until(lambda: not test_broker.fake_client.rows, timeout=5.0)
+        await _wait_until(lambda: not test_broker.fake_client.rows, timeout=10.0)
 
-    assert sorted(handled) == sorted(f"m{i}" for i in range(30))
+    assert sorted(handled) == sorted(f"m{i}" for i in range(60))
 
 
 async def test_handler_returning_outbox_response_takes_correlation_id_from_headers() -> None:

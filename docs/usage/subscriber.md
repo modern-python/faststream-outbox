@@ -340,12 +340,15 @@ The base strategy also enforces `max_attempts` and
 Each subscriber holds `max_workers + 1` long-lived SQLAlchemy pool
 connections (one writer per worker + one fetch), plus one raw asyncpg
 connection for `LISTEN` when available. Size your engine pool for
-`Σ subscribers × (max_workers + 1)`. An undersized pool does not block
-`broker.start()`, because `start()` only schedules the loop tasks and returns.
-Instead the fetch/worker loops stall on pool checkout and surface as
-repeating reconnect ERROR logs with dispatch silently starved. SQLAlchemy's
-default `pool_size=5, max_overflow=10` covers a handful of single-worker
-subscribers; raise it for larger fleets.
+`Σ subscribers × (max_workers + 1)`. With a fixed-size pool (SQLAlchemy's
+default `QueuePool`), `broker.start()` raises `RuntimeError` when
+`pool_size + max_overflow` is below that sum. `NullPool` and an unlimited
+`max_overflow=-1` aren't checked. The check counts only the subscribers, so
+leave room for the application's own sessions: if those take the remaining
+connections, the fetch and worker loops stall on pool checkout and show up as
+repeating reconnect ERROR logs. SQLAlchemy's default `pool_size=5,
+max_overflow=10` covers a handful of single-worker subscribers; raise it for
+larger fleets.
 
 Server-side, the footprint is one larger: the raw asyncpg `LISTEN`
 connection lives outside the pool, so each subscriber consumes

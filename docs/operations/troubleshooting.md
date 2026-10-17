@@ -10,7 +10,8 @@ owns the underlying design.
 | [Outbox row count grows + `lease_lost` spike](#outbox-row-count-grows-lease_lost-spike) | DLQ CTE failing (DLQ schema drift) |
 | [Outbox row count grows, no `lease_lost`](#outbox-row-count-grows-no-lease_lost) | Fetch loop not running, or rows future-dated |
 | [Idle dispatch latency > `max_fetch_interval`](#idle-dispatch-latency-max_fetch_interval) | LISTEN setup failed, so the subscriber falls back to polling |
-| [Subscriber dispatch never starts; rows pile up](#subscriber-blocks-at-brokerstart) | Engine pool exhausted on writer-connection checkout |
+| [`broker.start()` raises "Outbox subscribers need N pooled connections"](#subscriber-blocks-at-brokerstart) | Engine pool smaller than the subscribers hold |
+| [Subscriber dispatch never starts; rows pile up](#subscriber-blocks-at-brokerstart) | Pool fits the subscribers, but the application's sessions take the rest |
 | [Duplicate handler invocations](#duplicate-handler-invocations) | Lease expired before handler returned, or handler not idempotent |
 | [Rolling deploy leaks rows](#rolling-deploy-leaks-rows) | `graceful_timeout` < handler P99, or k8s grace too short |
 | [`activate_in` / `activate_at` fires immediately in tests](#activate_in-activate_at-fires-immediately-in-tests) | `TestOutboxBroker(run_loops=False)` ignores scheduling |
@@ -129,22 +130,25 @@ Fetch loop](../introduction/how-it-works.md#subscriber-two-async-loops).
 
 ## Subscriber dispatch never starts; rows pile up { #subscriber-blocks-at-brokerstart }
 
-Rows are published but never dispatched (the table grows), and the
-subscriber's loops emit repeating reconnect ERROR logs. `broker.start()`
-(or the FastAPI `include_router` lifespan) returns normally because it
-only schedules the loop tasks, so the failure shows up *after* startup
-and does not look like a hang.
+Each subscriber holds `max_workers + 1` pool connections for as long as it
+runs, and the default pool is `pool_size=5, max_overflow=10`. A handful of
+single-worker subscribers fits; a fleet of high-`max_workers` subscribers
+does not.
 
-The likely cause is an exhausted SQLAlchemy pool on the per-worker writer
-connection checkout. The fetch and worker loops can't acquire their
-connections, so each cycle errors and backs off. Each subscriber needs
-`max_workers + 1` pool connections, and the default pool is `pool_size=5,
-max_overflow=10`. A handful of single-worker subscribers fits; a fleet
-of high-`max_workers` subscribers does not.
+With a fixed-size pool, `broker.start()` (or the FastAPI `include_router`
+lifespan) checks this first and raises `RuntimeError: Outbox subscribers
+need N pooled connections ...`, naming the number required and what the
+pool allows.
 
-To confirm, inspect the engine pool. Compute `Σ subs × (max_workers
-+ 1)` from your subscriber registrations and compare it to
-`pool_size + max_overflow`.
+If startup succeeds but rows are published and never dispatched, and the
+subscriber's loops emit repeating reconnect ERROR logs, the pool fits the
+subscribers but the application's own sessions are taking the remaining
+connections. The fetch and worker loops can't check out a connection, so
+each cycle errors and backs off.
+
+To confirm, compute `Σ subs × (max_workers + 1)` from your subscriber
+registrations, add the connections your application's sessions use at
+peak, and compare it to `pool_size + max_overflow`.
 
 To fix it, raise `pool_size` / `max_overflow` on the engine, or lower
 `max_workers` per subscriber. Also confirm that Postgres has
