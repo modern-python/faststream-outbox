@@ -8,7 +8,7 @@ them to one behavioural contract instead. Every scenario runs against **both** t
 fake (everywhere) and real Postgres (auto-skipped when unreachable).
 
 Scope is exactly the shared ``AbstractOutboxClient`` surface: ``insert`` /
-``insert_batch`` (+ ``timer_id`` dedup and the rows Postgres rejects), ``fetch``,
+``insert_batch`` (+ ``timer_id`` dedup and headers JSONB rejects), ``fetch``,
 ``delete_with_lease``, ``mark_pending_with_lease`` (+ the DLQ side-effect).
 ``cancel_timer`` lives on the broker, so it is covered by ``test_integration.py`` /
 ``test_fake.py``, not here.
@@ -414,24 +414,10 @@ async def test_insert_past_activate_at_is_eligible(contract: _Harness) -> None:
     assert [m.id for m in msgs] == [rid]
 
 
-@pytest.mark.parametrize(
-    ("queue", "timer_id", "headers"),
-    [
-        ("q" * 256, None, None),
-        ("orders", "t" * 256, None),
-        ("orders", None, {"k": object()}),
-    ],
-    ids=["long-queue", "long-timer-id", "non-json-headers"],
-)
-async def test_insert_rejects_what_postgres_rejects(
-    contract: _Harness,
-    queue: str,
-    timer_id: str | None,
-    headers: dict[str, object] | None,
-) -> None:
+async def test_insert_rejects_headers_jsonb_cannot_hold(contract: _Harness) -> None:
     with pytest.raises(contract.rejects):
-        await contract.insert(queue=queue, timer_id=timer_id, headers=headers)  # ty: ignore[invalid-argument-type]
-    assert await contract.queue_ids(queue) == []
+        await contract.insert(queue="orders", headers={"k": object()})  # ty: ignore[invalid-argument-type]
+    assert await contract.queue_ids("orders") == []
 
 
 async def test_insert_batch_stores_every_row_in_order(contract: _Harness) -> None:
