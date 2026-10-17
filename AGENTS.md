@@ -16,8 +16,9 @@ run `just --list`, or read it. Every recipe carries its intent as a comment. The
 - `just test [args]` forwards args **unquoted**, so a spaced `-k` expression word-splits and fails.
   Run one keyword per invocation, or a substring matching all targets.
 - `tests/test_unit.py` + `tests/test_fake.py` need no Postgres and run directly under `uv run
-  pytest`; `tests/test_integration.py` skips if `POSTGRES_DSN` is unreachable. The coverage gate is
-  on by default, so a partial run trips it; pass `--no-cov` while iterating.
+  pytest`; `tests/test_integration.py` skips if `POSTGRES_DSN` is unreachable. The compose Postgres
+  publishes no host port, so run the DB tests through `just test`. The coverage gate is on by
+  default, so a partial run trips it; pass `--no-cov` while iterating.
 - Nothing validates Markdown links outside `docs/`. `just docs-build` runs `mkdocs --strict` over
   the site only; root Markdown, `.github/`, and `docs/agents/` are unchecked.
 
