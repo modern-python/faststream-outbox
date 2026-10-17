@@ -620,7 +620,7 @@ async def test_broker_publish_executes_one_insert_that_notifies() -> None:
     insert_stmt, params = session.execute.await_args_list[0].args
     compiled = insert_stmt.compile(dialect=postgresql.dialect())
     assert "INSERT INTO" in str(compiled)
-    assert "pg_notify(%(param_1)s::VARCHAR, outbox.queue)" in str(compiled)
+    assert re.search(r"RETURNING outbox\.id, pg_notify\(%\(param_1\)s(::VARCHAR)?, outbox\.queue\)", str(compiled))
     assert compiled.params["param_1"] == "outbox_outbox"
     assert params["queue"] == "orders"
     assert json.loads(params["payload"]) == {"order_id": 1}
