@@ -110,6 +110,7 @@ class OutboxInnerMessage:
     outcome: "Outcome | None" = field(default=None, init=False)
     # Built right after the claim, so this bounds how long a buffered delete may wait.
     claimed_at_monotonic: float = field(default_factory=time.monotonic, init=False, repr=False, compare=False)
+    handler_duration_seconds: float | None = field(default=None, init=False, repr=False, compare=False)
 
     @property
     def state_set(self) -> bool:

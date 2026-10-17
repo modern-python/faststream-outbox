@@ -81,10 +81,16 @@ broken recorder never poisons the dispatch loop.
 | `acked` | `queue`, `subscriber`, `deliveries_count`, `duration_seconds` | | Handler returned successfully |
 | `nacked_retried` | `queue`, `subscriber`, `deliveries_count`, `duration_seconds`, `next_delay_seconds` | `exception_type` | Retry scheduled |
 | `nacked_terminal` | `queue`, `subscriber`, `deliveries_count`, `reason` | `duration_seconds`, `exception_type` | Row terminally failed (`duration_seconds` absent for `max_deliveries`, which never ran the handler) |
-| `lease_lost` | `queue`, `subscriber`, `phase`, `row_id`, `deliveries_count` | | Terminal or retry write found `rowcount == 0` (`phase` = `terminal` \| `retry`) |
+| `lease_lost` | `queue`, `subscriber`, `phase`, `row_id`, `deliveries_count` | `duration_seconds` | Terminal or retry write found `rowcount == 0` (`phase` = `terminal` \| `retry`). `duration_seconds` is present when the handler ran |
+| `dispatch_abandoned` | `queue`, `subscriber`, `deliveries_count`, `duration_seconds` | | A dispatched row was left to lease-expiry retry with no outcome written: an error escaped the handler pipeline, the subscriber stopped mid-dispatch, or the outcome write failed |
 | `published` | `queue`, `status`, `count`, `size_bytes`, `duration_seconds` | `exception_type` | Producer, after the INSERT executes (pre-commit; also fires on error with `status="error"`) |
 | `dlq_written` | `queue`, `subscriber`, `deliveries_count`, `failure_reason` | `exception_type` | DLQ CTE wrote an audit row. `exception_type` is omitted (not set to `None`) when the terminal had no exception (`max_deliveries`, or a manual `reject()` without one) |
 | `drain_timeout` | `queue`, `subscriber`, `drain_timeout_seconds` | | A `stop()` drain exceeded `graceful_timeout`; in-flight rows were abandoned to lease-expiry retry. `queue` is the subscriber's first queue |
+
+Every `dispatched` is closed by exactly one later event that carries
+`duration_seconds`: `acked`, `nacked_retried`, `nacked_terminal`,
+`lease_lost` or `dispatch_abandoned`. An in-flight gauge goes up on
+`dispatched` and down on that tag.
 
 `reason` on `nacked_terminal` is one of `max_deliveries`,
 `retry_terminal`, `rejected`. The same value lands in the DLQ

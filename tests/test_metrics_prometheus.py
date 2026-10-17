@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from faststream_outbox import NoRetry, OutboxBroker, TestOutboxBroker, make_outbox_table
 from faststream_outbox.metrics.prometheus import PrometheusRecorder
+from faststream_outbox.prometheus import OutboxPrometheusMiddleware
 
 
 def _sample(reg: CollectorRegistry, name: str, labels: dict[str, str]) -> float | None:
@@ -367,6 +368,57 @@ async def test_prometheus_e2e_handler_raises_with_noretry_emits_nacked_terminal_
         )
         == 1.0
     )
+
+
+def test_prometheus_without_bus_metrics_shares_a_registry_with_the_middleware() -> None:
+    reg = CollectorRegistry()
+    OutboxPrometheusMiddleware(registry=reg)
+    rec = PrometheusRecorder(registry=reg, include_bus_metrics=False)
+    rec("dispatched", {"queue": "q", "subscriber": "h", "deliveries_count": 1, "size_bytes": 8})
+    rec("acked", {"queue": "q", "subscriber": "h", "deliveries_count": 1, "duration_seconds": 0.02})
+    rec("lease_lost", {"queue": "q", "subscriber": "h", "phase": "terminal", "duration_seconds": 0.02})
+    rec("published", {"queue": "q", "status": "success", "count": 1, "duration_seconds": 0.01})
+    assert _sample(reg, "faststream_received_messages_total", _base_labels()) is None
+    assert _sample(reg, "faststream_received_messages_in_process", _base_labels()) is None
+    assert _sample(reg, "faststream_received_processed_messages_total", {**_base_labels(), "status": "error"}) is None
+    published = {"app_name": "", "broker": "outbox", "destination": "q", "status": "success"}
+    assert _sample(reg, "faststream_published_messages_total", published) is None
+    assert _sample(reg, "faststream_outbox_lease_lost_total", {**_base_labels(), "phase": "terminal"}) == 1.0
+
+
+def test_prometheus_custom_label_resolvers_run_once_per_published_event() -> None:
+    calls: list[str] = []
+
+    def tenant(tags: typing.Mapping[str, typing.Any]) -> str:
+        calls.append(tags["queue"])
+        return "t"
+
+    reg, rec = _make_recorder(custom_labels={"tenant": tenant})
+    rec("published", {"queue": "q", "status": "success", "count": 1})
+    assert calls == ["q"]
+    labels = {"app_name": "", "broker": "outbox", "destination": "q", "tenant": "t", "status": "success"}
+    assert _sample(reg, "faststream_published_messages_total", labels) == 1.0
+
+
+def test_prometheus_lease_lost_after_the_handler_ran_decrements_in_process() -> None:
+    reg, rec = _make_recorder()
+    rec("dispatched", {"queue": "q", "subscriber": "h", "deliveries_count": 1, "size_bytes": 8})
+    rec("lease_lost", {"queue": "q", "subscriber": "h", "phase": "terminal", "duration_seconds": 0.5})
+    assert _sample(reg, "faststream_received_messages_in_process", _base_labels()) == 0.0
+
+
+def test_prometheus_lease_lost_without_a_handler_run_leaves_in_process_alone() -> None:
+    reg, rec = _make_recorder()
+    rec("dispatched", {"queue": "q", "subscriber": "h", "deliveries_count": 1, "size_bytes": 8})
+    rec("lease_lost", {"queue": "q", "subscriber": "h", "phase": "terminal"})
+    assert _sample(reg, "faststream_received_messages_in_process", _base_labels()) == 1.0
+
+
+def test_prometheus_dispatch_abandoned_decrements_in_process() -> None:
+    reg, rec = _make_recorder()
+    rec("dispatched", {"queue": "q", "subscriber": "h", "deliveries_count": 1, "size_bytes": 8})
+    rec("dispatch_abandoned", {"queue": "q", "subscriber": "h", "deliveries_count": 1, "duration_seconds": 0.5})
+    assert _sample(reg, "faststream_received_messages_in_process", _base_labels()) == 0.0
 
 
 def test_prometheus_recorder_raises_friendly_error_when_extra_missing() -> None:

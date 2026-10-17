@@ -728,28 +728,33 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             # from outbox.publish; the worker loop's outer except re-raises it via
             # _run_with_reconnect so it's logged at ERROR level with a reconnect
             # backoff rather than silently ignored.
+            row.handler_duration_seconds = time.perf_counter() - start_perf
+            self._emit_dispatch_abandoned(row)
             raise
         except Exception as e:  # noqa: BLE001
-            # No metric emitted here intentionally: the row was never marked
-            # terminal/retry, so its state is undefined — flushing or emitting an
-            # ack/nack would lie. The lease will expire and the row will be
-            # reclaimed; the ERROR log is the operator signal.
+            # No ack/nack metric here: the row was never marked terminal/retry, so
+            # its state is undefined — flushing or emitting an ack/nack would lie.
+            # The lease will expire and the row will be reclaimed; the ERROR log is
+            # the operator signal.
             self._log(
                 log_level=logging.ERROR,
                 message=f"Outbox handler error escaped consume(); row left to lease-expiry retry: {e!r}",
                 exc_info=e,
             )
+            row.handler_duration_seconds = time.perf_counter() - start_perf
+            self._emit_dispatch_abandoned(row)
             return False
+        row.handler_duration_seconds = time.perf_counter() - start_perf
         # Shutdown race: SubscriberUsecase.consume() returns None without invoking
         # process_message when self.running has been flipped to False by stop().
         # Detecting that here lets us preserve the row instead of falling through
         # to assert_state_set → reject() → _safe_flush → DELETE. The row's lease
         # expires after lease_ttl_seconds and is reclaimed on next start.
         if not row.state_set and not self.running:
+            self._emit_dispatch_abandoned(row)
             return False
         await row.assert_state_set(logger)
-        duration_seconds = time.perf_counter() - start_perf
-        common = {**base, "deliveries_count": row.deliveries_count, "duration_seconds": duration_seconds}
+        common = {**base, "deliveries_count": row.deliveries_count, "duration_seconds": row.handler_duration_seconds}
         # Match on the disjoint ``Outcome`` variant recorded by ack/nack/reject:
         # Terminal -> nacked_terminal (delete + DLQ), Retry -> reschedule, Ack -> delete.
         # The variants are mutually exclusive, so there is no ordering dependence between
@@ -798,17 +803,18 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         connection and reopen a fresh one.
         """
         flush = self._flush_terminal if terminal else self._flush_retry
-        if writer_conn is None:
-            try:
-                return await flush(row, writer_conn=None)
-            except Exception as e:  # noqa: BLE001
-                self._log(
-                    log_level=logging.ERROR,
-                    message=f"Outbox terminal-flush error (swallowed; no writer connection): {e!r}",
-                    exc_info=e,
-                )
-                return False
-        return await flush(row, writer_conn=writer_conn)
+        try:
+            return await flush(row, writer_conn=writer_conn)
+        except BaseException as e:
+            self._emit_dispatch_abandoned(row)
+            if writer_conn is not None or not isinstance(e, Exception):
+                raise
+            self._log(
+                log_level=logging.ERROR,
+                message=f"Outbox terminal-flush error (swallowed; no writer connection): {e!r}",
+                exc_info=e,
+            )
+            return False
 
     async def _flush_or_buffer(
         self,
@@ -851,7 +857,8 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         try:
             deleted = await self._client.delete_batch_with_lease(writer_conn, pairs)
         except BaseException:  # incl. CancelledError from the exit-flush timeout: balance task_done before re-raising
-            for _ in buffer:
+            for pending in buffer:
+                self._emit_dispatch_abandoned(pending.row)
                 self._inflight.task_done()
             buffer.clear()
             raise
@@ -882,13 +889,26 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                 "deliveries_count": row.deliveries_count,
             },
         )
+        tags: dict[str, typing.Any] = {
+            **self._base_tags(row.queue),
+            "phase": phase,
+            "row_id": row.id,
+            "deliveries_count": row.deliveries_count,
+        }
+        if row.handler_duration_seconds is not None:
+            tags["duration_seconds"] = row.handler_duration_seconds
+        self._emit_metric("lease_lost", tags)
+
+    def _emit_dispatch_abandoned(self, row: OutboxInnerMessage) -> None:
+        """Record a dispatched row left to lease expiry without an outcome write, closing its ``dispatched``."""
+        if row.handler_duration_seconds is None:
+            return
         self._emit_metric(
-            "lease_lost",
+            "dispatch_abandoned",
             {
                 **self._base_tags(row.queue),
-                "phase": phase,
-                "row_id": row.id,
                 "deliveries_count": row.deliveries_count,
+                "duration_seconds": row.handler_duration_seconds,
             },
         )
 

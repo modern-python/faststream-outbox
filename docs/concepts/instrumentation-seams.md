@@ -107,7 +107,8 @@ to attach to.
 The "Both seams together" recipe in [Setup Prometheus and OpenTelemetry
 ](../usage/setup-prometheus-opentelemetry.md#both-seams-together)
 wires the recommended layout: native middleware on the broker, plus a
-`metrics_recorder` for the outbox-internal events.
+`metrics_recorder` with `include_bus_metrics=False` for the outbox-internal
+events, so the handler and publish metrics are recorded once.
 
 A service that registers only the middleware seam loses every
 `lease_lost`, `fetched`, and `max_deliveries`-terminal signal. A
