@@ -44,7 +44,7 @@ op.create_index(
 op.create_index(
     "outbox_pending_idx",
     "outbox",
-    ["queue", "next_attempt_at"],
+    ["queue", "next_attempt_at", "id"],
     unique=False,
     postgresql_where=sa.text("acquired_token IS NULL"),
 )
@@ -56,14 +56,15 @@ op.create_index(
 
 The three indexes carry load-bearing partial predicates:
 
-- `outbox_pending_idx`: `(queue, next_attempt_at) WHERE acquired_token IS NULL`.
-  Branch A of the fetch CTE (unleased rows) is served by this index. The
-  WHERE clause is written so Postgres' planner recognizes the implied
-  predicate and uses the partial index; drop the predicate and the planner
-  falls back to a seq-scan as the table grows.
+- `outbox_pending_idx`: `(queue, next_attempt_at, id) WHERE acquired_token IS NULL`.
+  The fetch's unleased branch reads this index in order, one queue at a
+  time, and stops after `limit` unlocked rows. `id` is in the key because
+  rows published in one transaction share `next_attempt_at`; without it a
+  fetch reads the whole tie group. Drop the predicate and the planner falls
+  back to a seq-scan as the table grows.
 - `outbox_lease_idx`: `(queue, acquired_at) WHERE acquired_token IS NOT NULL`.
-  Branch B of the fetch CTE (expired-lease reclaim) is served by this
-  index. Here too, the predicate is load-bearing for fetch performance.
+  The fetch's expired-lease branch is served by this index. Here too, the
+  predicate is load-bearing for fetch performance.
 - `outbox_timer_id_uq`: unique `(queue, timer_id) WHERE timer_id IS NOT NULL`.
   Backs the `timer_id` dedup contract via
   `pg_insert(...).on_conflict_do_nothing(...)`. Without the partial
@@ -91,6 +92,60 @@ indexes are exactly what the broker depends on. When you wire the
 [`validate_schema()`](../usage/schema-validation.md) check into a
 `/health` probe or CI gate, it fails when the live DB drifts from
 this declaration. (It is opt-in; it never runs at `broker.start()`.)
+
+## Upgrading to 0.15: rebuild `outbox_pending_idx` { #upgrading-to-015 }
+
+0.15 claims rows with an ordered scan of `outbox_pending_idx` per queue
+(see [ADR 0003](https://github.com/modern-python/faststream-outbox/blob/main/docs/adr/0003-fetch-query-shape.md)),
+and the index gains `id` as its last column. A table migrated before 0.15
+still has `(queue, next_attempt_at)`, and `validate_schema()` reports it as
+drift.
+
+Rebuild the index without blocking writes, and run the migration **before**
+deploying 0.15. Earlier versions work on the new index, so the order is
+safe; 0.15 on the old index works too, but each fetch then reads every row
+that shares the oldest `next_attempt_at`.
+
+```python
+import sqlalchemy as sa
+from alembic import op
+
+
+def upgrade() -> None:
+    with op.get_context().autocommit_block():
+        op.create_index(
+            "outbox_pending_idx_new",
+            "outbox",
+            ["queue", "next_attempt_at", "id"],
+            postgresql_where=sa.text("acquired_token IS NULL"),
+            postgresql_concurrently=True,
+        )
+        op.drop_index("outbox_pending_idx", table_name="outbox", postgresql_concurrently=True)
+        op.execute("ALTER INDEX outbox_pending_idx_new RENAME TO outbox_pending_idx")
+
+
+def downgrade() -> None:
+    with op.get_context().autocommit_block():
+        op.create_index(
+            "outbox_pending_idx_old",
+            "outbox",
+            ["queue", "next_attempt_at"],
+            postgresql_where=sa.text("acquired_token IS NULL"),
+            postgresql_concurrently=True,
+        )
+        op.drop_index("outbox_pending_idx", table_name="outbox", postgresql_concurrently=True)
+        op.execute("ALTER INDEX outbox_pending_idx_old RENAME TO outbox_pending_idx")
+```
+
+`CONCURRENTLY` can't run inside a transaction, hence `autocommit_block()`.
+For a table in a non-default schema, pass `schema=` to both index calls and
+qualify the name in the `ALTER INDEX`. If a concurrent build fails, it
+leaves an `INVALID` index behind: drop it and run the migration again.
+
+Don't apply what `alembic revision --autogenerate` produces for this
+change. It drops and recreates the index in one transaction without
+`CONCURRENTLY`, which blocks every publish and fetch on the table for the
+whole build.
 
 ## Adding the DLQ after the fact
 
@@ -296,7 +351,7 @@ three indexes and their expected shape:
 
 | Index | Columns | Unique | `postgresql_where` |
 | --- | --- | --- | --- |
-| `outbox_pending_idx` | `queue, next_attempt_at` | no | `acquired_token IS NULL` |
+| `outbox_pending_idx` | `queue, next_attempt_at, id` | no | `acquired_token IS NULL` |
 | `outbox_lease_idx` | `queue, acquired_at` | no | `acquired_token IS NOT NULL` |
 | `outbox_timer_id_uq` | `queue, timer_id` | yes | `timer_id IS NOT NULL` |
 

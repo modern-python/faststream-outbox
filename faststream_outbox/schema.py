@@ -121,13 +121,15 @@ def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table
             name=f"{table_name}{_LEASE_CK_SUFFIX}",
         ),
     )
-    # Partial index that backs the fetch query's hot branch
-    # (`WHERE acquired_token IS NULL AND queue = ? AND next_attempt_at <= now()`).
+    # Partial index that backs the fetch query's unleased branch: an ordered scan per queue on
+    # (next_attempt_at, id) that stops after `limit` unlocked rows. `id` is part of the key because
+    # rows published in one transaction share `next_attempt_at`. See ADR 0003.
     # The expired-lease branch is covered by `_lease_idx` below.
     Index(
         f"{table_name}{_PENDING_IDX_SUFFIX}",
         table.c.queue,
         table.c.next_attempt_at,
+        table.c.id,
         postgresql_where=table.c.acquired_token.is_(None),
     )
     # Partial unique index that backs `publish(..., timer_id=...)`'s ON CONFLICT DO NOTHING

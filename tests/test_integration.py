@@ -12,7 +12,7 @@ from unittest import mock
 import pytest
 from faststream import BaseMiddleware, Context, Depends
 from faststream.kafka import KafkaBroker, TestKafkaBroker
-from sqlalchemy import MetaData, Table, event, insert, select, text
+from sqlalchemy import MetaData, Table, event, func, insert, literal, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
@@ -100,6 +100,22 @@ async def test_validate_schema_detects_non_unique_timer_id_index(
         )
     client = OutboxClient(pg_engine, outbox_table)
     with pytest.raises(RuntimeError, match="not UNIQUE"):
+        await client.validate_schema()
+
+
+async def test_validate_schema_reports_the_pre_0_15_pending_index_shape(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+) -> None:
+    """An outbox migrated before 0.15 has ``_pending_idx`` on ``(queue, next_attempt_at)`` and must fail validation."""
+    idx = f"{outbox_table.name}_pending_idx"
+    async with pg_engine.begin() as conn:
+        await conn.execute(text(f'DROP INDEX "{idx}"'))
+        await conn.execute(
+            text(f'CREATE INDEX "{idx}" ON {outbox_table.name} (queue, next_attempt_at) WHERE acquired_token IS NULL'),
+        )
+    client = OutboxClient(pg_engine, outbox_table)
+    with pytest.raises(RuntimeError, match="pending_idx"):
         await client.validate_schema()
 
 
@@ -557,6 +573,62 @@ async def test_outbox_response_on_a_middleware_scoped_session_commits_the_follow
     async with pg_engine.connect() as conn:
         queues = (await conn.execute(select(outbox_table.c.queue))).scalars().all()
     assert queues == ["downstream"]
+
+
+def _scanned_rows(plan: dict[str, Any], table: str) -> list[float]:
+    """Rows each plan node read from *table* (actual rows times loops), skipping the UPDATE target itself."""
+    found = []
+    if plan.get("Relation Name") == table and plan.get("Node Type") != "ModifyTable":
+        found.append(plan["Actual Rows"] * plan["Actual Loops"])
+    for child in plan.get("Plans", []):
+        found.extend(_scanned_rows(child, table))
+    return found
+
+
+async def test_fetch_reads_only_the_rows_it_claims_from_a_backlog(
+    pg_engine: AsyncEngine,
+    outbox_table: Table,
+) -> None:
+    """INVARIANT: a fetch reads about ``limit`` rows from the outbox, however large the ready backlog is.
+
+    The claim must come off an ordered scan of ``_pending_idx`` that stops after ``limit`` unlocked rows.
+    An OR across the pending and expired-lease branches, ``queue = ANY(...)``, or an index without
+    ``id`` (rows published in one transaction share ``next_attempt_at``) each force Postgres to read
+    and sort every ready row, so draining a backlog slows down with the square of its size.
+    """
+    limit = 10
+    async with pg_engine.begin() as conn:
+        backlog = select(literal("orders"), literal(b"x")).select_from(func.generate_series(1, 20000))
+        await conn.execute(insert(outbox_table).from_select(["queue", "payload"], backlog))
+        await conn.execute(text(f"ANALYZE {outbox_table.name}"))
+
+    captured: list[tuple[str, Any]] = []
+
+    def capture(_conn: Any, _cursor: Any, statement: str, parameters: Any, _context: Any, _many: bool) -> None:
+        if "FOR UPDATE SKIP LOCKED" in statement:
+            captured.append((statement, parameters))
+
+    client = OutboxClient(pg_engine, outbox_table)
+    event.listen(pg_engine.sync_engine, "before_cursor_execute", capture)
+    try:
+        async with pg_engine.connect() as conn:
+            await client.fetch(conn, ["orders"], limit=limit, lease_ttl_seconds=60.0)
+    finally:
+        event.remove(pg_engine.sync_engine, "before_cursor_execute", capture)
+    statement, parameters = captured[0]
+
+    async with pg_engine.connect() as conn:
+        raw = (await conn.get_raw_connection()).driver_connection
+        assert raw is not None
+        tx = raw.transaction()
+        await tx.start()
+        try:
+            explained = await raw.fetchval(f"EXPLAIN (ANALYZE, FORMAT JSON) {statement}", *parameters)
+        finally:
+            await tx.rollback()
+    plan = explained[0]["Plan"]
+
+    assert max(_scanned_rows(plan, outbox_table.name)) <= 2 * limit
 
 
 async def test_publish_payload_is_decodable_by_subscriber(pg_engine, outbox_table) -> None:
