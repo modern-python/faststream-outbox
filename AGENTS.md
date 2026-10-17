@@ -41,8 +41,10 @@ will **not** tell you:
   seams, deliberately. Each fires for events the other physically cannot observe — `fetched` has no
   `StreamMessage`, `lease_lost` fires after `consume_scope` exits. **Don't collapse them.**
 
-`TestOutboxBroker` swaps in `FakeOutboxClient`. Sync mode is the default; `run_loops=True` runs the
-real fetch and worker loops against the fake, which retry, lease-expiry, and scheduling tests need.
+`TestOutboxBroker` swaps in `FakeOutboxClient` and nothing else on the publish side: the real producer
+and publish middlewares run, and a thin wrapper dispatches what the fake stored once the producer
+returns. Sync mode is the default; `run_loops=True` runs the real fetch and worker loops against the
+fake, which retry, lease-expiry, and scheduling tests need.
 
 ## Workflow
 

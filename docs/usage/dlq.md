@@ -209,6 +209,7 @@ audit dict is appended to `fake_client.dlq_rows` in the same call.
 from sqlalchemy import MetaData
 
 from faststream_outbox import NoRetry, OutboxBroker, TestOutboxBroker, make_dlq_table, make_outbox_table
+from faststream_outbox.testing import fake_session
 
 
 metadata = MetaData()
@@ -224,7 +225,7 @@ async def handle(body: dict) -> None:
 
 test_broker = TestOutboxBroker(broker)
 async with test_broker:
-    await broker.publish({"order_id": 1}, queue="orders")
+    await broker.publish({"order_id": 1}, queue="orders", session=fake_session())
 
 assert test_broker.fake_client.rows == []
 assert len(test_broker.fake_client.dlq_rows) == 1

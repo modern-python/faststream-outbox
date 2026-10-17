@@ -37,7 +37,7 @@ from faststream_outbox.fastapi import (
 from faststream_outbox.fastapi import (
     OutboxRouter,
 )
-from faststream_outbox.testing import TestOutboxBroker
+from faststream_outbox.testing import TestOutboxBroker, fake_session
 
 
 def _make_outbox_table() -> Any:
@@ -72,7 +72,7 @@ async def test_subscriber_registered_via_outbox_router_runs_when_published() -> 
 
     app = _make_app_with_router(router)
     with TestClient(app):
-        await router.broker.publish({"x": 1}, queue="orders")  # ty: ignore[missing-argument]
+        await router.broker.publish({"x": 1}, queue="orders", session=fake_session())
 
     assert received == [{"x": 1}]
 
@@ -121,7 +121,7 @@ async def test_subscriber_receives_fastapi_depends_session() -> None:
 
     app = _make_app_with_router(router)
     with TestClient(app):
-        await router.broker.publish({"x": 1}, queue="orders")  # ty: ignore[missing-argument]
+        await router.broker.publish({"x": 1}, queue="orders", session=fake_session())
 
     assert seen_session == [sentinel_session]
 
@@ -148,7 +148,7 @@ async def test_http_and_subscriber_routes_coexist_on_router() -> None:
         assert resp.json() == {"ok": True}
 
         # Subscriber works through the same router
-        await router.broker.publish("via-subscriber", queue="orders")  # ty: ignore[missing-argument]
+        await router.broker.publish("via-subscriber", queue="orders", session=fake_session())
 
     assert subscriber_fired == ["via-subscriber"]
 
@@ -174,24 +174,26 @@ async def test_annotated_context_shortcuts_resolve_in_router_handler() -> None:
         captured["client"] = client
 
     test_broker = TestOutboxBroker(router.broker)
+    swapped: dict[str, object] = {}
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         del app
         async with test_broker:
+            swapped["producer"] = router.broker.config.broker_config.producer
             yield
 
     app = FastAPI(lifespan=lifespan)
     app.include_router(router)
     with TestClient(app):
-        await router.broker.publish({"x": 1}, queue="orders")  # ty: ignore[missing-argument]
+        await router.broker.publish({"x": 1}, queue="orders", session=fake_session())
 
     assert isinstance(captured["msg"], OutboxMessage)
     assert captured["broker"] is router.broker
     # F7-10: identity-check the injected producer/client against the swapped fakes — the
     # ``Context("broker.config.broker_config.client")`` annotation *string* is the load-bearing
     # artifact, and an isinstance check would pass even if it resolved to a different instance.
-    assert captured["producer"] is test_broker.fake_producer
+    assert captured["producer"] is swapped["producer"]
     assert captured["client"] is test_broker.fake_client
 
 
@@ -244,8 +246,8 @@ async def test_fastapi_handler_chains_via_outbox_response_with_per_delivery_sess
 
     app = _make_app_with_router(router)
     with TestClient(app):
-        await router.broker.publish({"id": 1}, queue="orders")  # ty: ignore[missing-argument]
-        await router.broker.publish({"id": 2}, queue="orders")  # ty: ignore[missing-argument]
+        await router.broker.publish({"id": 1}, queue="orders", session=fake_session())
+        await router.broker.publish({"id": 2}, queue="orders", session=fake_session())
 
     # OutboxResponse chaining works through the FastAPI wrapper: the bridged Depends session is
     # the one the follow-on row is published with.
@@ -285,7 +287,7 @@ async def test_outbox_router_forwards_dlq_table_and_metrics_recorder_to_inner_br
     # ...and the forwarded recorder actually fires on the inner broker's dispatch path.
     app = _make_app_with_router(router)
     with TestClient(app):
-        await router.broker.publish({"x": 1}, queue="orders")  # ty: ignore[missing-argument]
+        await router.broker.publish({"x": 1}, queue="orders", session=fake_session())
 
     assert events  # the recorder seam is live under the FastAPI router
 
@@ -315,7 +317,7 @@ async def test_included_broker_router_subscriber_resolves_fastapi_depends() -> N
 
     app = _make_app_with_router(router)
     with TestClient(app) as client:
-        await router.broker.publish({"x": 1}, queue="orders")  # ty: ignore[missing-argument]
+        await router.broker.publish({"x": 1}, queue="orders", session=fake_session())
         schema = client.get("/asyncapi.json").json()
 
     assert seen == [({"x": 1}, "tenant-a")]

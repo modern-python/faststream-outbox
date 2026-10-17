@@ -206,15 +206,9 @@ def test_outbox_telemetry_provider_publish_destination_name() -> None:
     assert provider.get_publish_destination_name(cmd) == "dst-q"
 
 
-async def test_outbox_telemetry_middleware_publish_scope_does_not_fire_under_test_broker() -> None:
-    """``TestOutboxBroker`` patches ``broker.publish`` directly, bypassing ``_basic_publish``.
-
-    The middleware's ``publish_scope`` therefore must not fire. The recorder seam
-    (via ``FakeOutboxProducer`` / ``_build_fake_publish``) is the publish-side
-    metrics path in test mode. Negative-assert here so a future refactor that
-    routes test-broker publishes through ``_basic_publish`` (and thus through
-    the publish-scope middleware) trips this guardrail.
-    """
+@pytest.mark.parametrize("path", ["broker", "publisher"])
+async def test_outbox_telemetry_middleware_records_publishes_under_test_broker(path: str) -> None:
+    """``TestOutboxBroker`` publishes through ``_basic_publish``, so the middleware's ``publish_scope`` records them."""
     reader = InMemoryMetricReader()
     broker = _make_broker(reader)
 
@@ -223,13 +217,13 @@ async def test_outbox_telemetry_middleware_publish_scope_does_not_fire_under_tes
         pass
 
     async with TestOutboxBroker(broker):
-        await broker.publish({"x": 1}, queue="orders", session=_session_mock())
+        if path == "publisher":
+            await broker.publisher("orders").publish({"x": 1}, session=_session_mock())
+        else:
+            await broker.publish({"x": 1}, queue="orders", session=_session_mock())
 
-    instruments = _instruments(reader)
-    # Publish-scope middleware would create messaging.publish.duration; under
-    # the test broker the publish path bypasses _basic_publish, so the instrument
-    # must be absent.
-    assert "messaging.publish.duration" not in instruments
+    duration = _instruments(reader)["messaging.publish.duration"]
+    assert [point.count for point in duration.data_points] == [1]
 
 
 def test_outbox_telemetry_middleware_raises_friendly_error_when_extra_missing() -> None:
@@ -266,7 +260,12 @@ async def test_outbox_telemetry_middleware_emits_consume_span_with_outbox_attrib
         await broker.publish({"x": 1}, queue="orders", session=_session_mock())
 
     spans = span_exporter.get_finished_spans()
-    outbox_spans = [sp for sp in spans if dict(sp.attributes or {}).get("messaging.system") == "outbox"]
+    outbox_spans = [
+        sp
+        for sp in spans
+        if dict(sp.attributes or {}).get("messaging.system") == "outbox"
+        and dict(sp.attributes or {}).get("messaging.operation") == "process"
+    ]
     assert outbox_spans, f"no outbox consume span emitted; spans={[sp.name for sp in spans]}"
     attrs = dict(outbox_spans[0].attributes or {})
     assert attrs["messaging.system"] == "outbox"
