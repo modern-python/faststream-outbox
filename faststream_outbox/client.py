@@ -187,6 +187,11 @@ _NO_DLQ_TABLE_MSG = (
 )
 
 
+def _seconds(name: str) -> "ColumnElement[typing.Any]":
+    """``make_interval(secs => :name)``, computed by Postgres so worker/DB clock skew can't shift it."""
+    return func.make_interval(0, 0, 0, 0, 0, 0, bindparam(name, type_=Float))
+
+
 def _build_fetch_stmt(outbox: "Table") -> "Update":
     """Build the claim statement once; queues, limit, lease TTL and the new token are bind parameters.
 
@@ -196,8 +201,7 @@ def _build_fetch_stmt(outbox: "Table") -> "Update":
     """
     t = outbox
     limit = bindparam("limit", type_=Integer)
-    # ``make_interval(secs => :lease_ttl)`` keeps the cutoff server-side, immune to worker/DB clock skew.
-    lease_cutoff = func.now() - func.make_interval(0, 0, 0, 0, 0, 0, bindparam("lease_ttl", type_=Float))
+    lease_cutoff = func.now() - _seconds("lease_ttl")
     queue_array = ARRAY(String)
     queue_name = func.unnest(cast(bindparam("queues", type_=queue_array), queue_array)).label("name")
     queues = select(queue_name).distinct().cte("queues")
@@ -252,9 +256,7 @@ def _build_insert_stmts(table: "Table", channel: str) -> "dict[tuple[bool, bool,
     The notify variants call ``pg_notify`` in ``RETURNING``, so the NOTIFY costs no extra round trip and
     fires only when a row actually landed (an ``ON CONFLICT DO NOTHING`` skip returns no row).
     """
-    # Server-side compute keeps timing immune to worker/DB clock skew (mirrors
-    # client.mark_pending_with_lease).
-    activate_in = func.now() + func.make_interval(0, 0, 0, 0, 0, 0, bindparam("activate_in_seconds", type_=Float))
+    activate_in = func.now() + _seconds("activate_in_seconds")
     plain = insert(table)
     timer = pg_insert(table).on_conflict_do_nothing(
         index_elements=[table.c.queue, table.c.timer_id],
@@ -604,7 +606,7 @@ class OutboxClient(AbstractOutboxClient):
             msg = "OutboxClient.mark_pending_with_lease requires a live AsyncConnection (got None)"
             raise TypeError(msg)
         t = self._table
-        next_attempt_at_expr = func.now() + func.make_interval(0, 0, 0, 0, 0, 0, bindparam("delay", type_=Float))
+        next_attempt_at_expr = func.now() + _seconds("delay")
         stmt = (
             update(t)
             .where(t.c.id == message_id, t.c.acquired_token == acquired_token)
