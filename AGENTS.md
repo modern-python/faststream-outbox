@@ -55,6 +55,10 @@ description, and PyPI does not rewrite relative links, so a relative one 404s on
 `tests/test_invariant_census.py` checks every invariant test's docstring for a second paragraph naming
 what breaks it.
 
+Before pushing a raised dependency floor, run the `floors` steps from
+[`_checks.yml`](.github/workflows/_checks.yml) locally. If resolution fails, raise the direct floor
+it names.
+
 ## Code Style
 
 - **Never use local/inline imports**, tests included, with no `if TYPE_CHECKING` exception. `ruff`
