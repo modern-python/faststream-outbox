@@ -55,6 +55,8 @@ jobs:
           - "3.13"
           - "3.14"
           - "3.14t"
+          - "3.15"
+          - "3.15t"
     services:
       postgres:
         image: postgres:17
@@ -80,7 +82,7 @@ jobs:
       - run: uv python pin ${{ matrix.python-version }}
       - run: just install
       - name: Assert the GIL is actually disabled
-        if: matrix.python-version == '3.14t'
+        if: endsWith(matrix.python-version, 't')
         run: uv run --no-sync python -c "import sys, asyncpg, sqlalchemy, pydantic_core, faststream, faststream_outbox; assert not sys._is_gil_enabled(), 'GIL re-enabled - a dependency lacks free-threaded support'"
       - run: just test-ci
         env:
