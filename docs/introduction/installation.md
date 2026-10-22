@@ -32,7 +32,7 @@
 ## Free-threaded Python
 
 `faststream-outbox` supports free-threaded (no-GIL) CPython. CI runs the full
-test suite on the 3.14t interpreter, and a separate CI step asserts that
+test suite on the 3.14t and 3.15t interpreters, and a separate CI step asserts that
 importing the outbox and its runtime dependencies keeps the GIL disabled. The
 package is pure-Python
 asyncio, so nothing in it depends on the GIL; installing on a `python3.14t`
@@ -58,7 +58,7 @@ process. To use more cores, run more subscriber processes, the same scaling
 lever as on a GIL build.
 
 Free-threaded wheels for the compiled dependencies currently exist for 3.14t
-only (there are no `cp313t` wheels), so 3.13t is not a supported target.
+and 3.15t only (there are no `cp313t` wheels), so 3.13t is not a supported target.
 
 ## Postgres
 
