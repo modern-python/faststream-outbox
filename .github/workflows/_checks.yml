@@ -94,9 +94,8 @@ jobs:
     # The declared floors are part of what we ship, and nothing else in CI installs
     # them: `pytest` and `scheduled-dep-check` both resolve highest. That is how
     # `sqlalchemy[asyncio]>=2.0` stayed declared after 3.13 made it fail at import.
-    # This leg resolves the lower bound instead, on every supported interpreter:
-    # a floor's wheel coverage is per-interpreter, so two interpreters resolving
-    # the same versions can still disagree on whether those versions install.
+    # This leg installs them exactly on the floor Python, and the lowest versions with
+    # a wheel on every other entry (CI10).
     # 3.14t is out: the dev group's `faststream[kafka]` pulls aiokafka, which ships no cp314t
     # wheel, so under --no-build this leg would measure upstream's gap rather than a floor.
     # PostgreSQL 13 is the server floor: outbox_autovacuum_ddl sets the insert-triggered
@@ -135,7 +134,10 @@ jobs:
       - run: uv python pin ${{ matrix.python-version }}
       - run: uv venv
       # Pinned with builds allowed, so a floor with no wheel fails the wheel-only install below.
-      - run: uv pip compile pyproject.toml --all-extras --no-deps --resolution lowest-direct -o floors.txt
+      - if: matrix.python-version == '3.11'
+        run: uv pip compile pyproject.toml --all-extras --no-deps --resolution lowest-direct -o floors.txt
+      - if: matrix.python-version != '3.11'
+        run: uv pip compile pyproject.toml --all-extras --resolution lowest-direct --no-build -o floors.txt
       - run: uv pip install -r pyproject.toml --all-extras --group dev --constraints floors.txt --no-build
       # fastapi's floor pulls a starlette whose TestClient predates httpx2 support.
       # Installed here rather than declared in the dev group: at the resolved-highest
