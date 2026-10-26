@@ -1,6 +1,7 @@
 """Workload configuration for a single benchmark run."""
 
 import dataclasses
+import typing
 
 
 # Matches the payload size in Tsvettsikh's «50 оттенков Transactional Outbox»
@@ -9,6 +10,10 @@ DEFAULT_PAYLOAD_BYTES = 256
 
 # The DSN the harness runs against. Overridden by POSTGRES_DSN in compose.
 DEFAULT_DSN = "postgresql+asyncpg://outbox:outbox@localhost:5432/outbox"
+
+# How an extend point's table is vacuumed: no reloptions, outbox_autovacuum_ddl's defaults,
+# or those defaults with autovacuum's cost throttle turned off.
+VacuumVariant = typing.Literal["untuned", "tuned", "unthrottled"]
 
 # Tags the harness' own connections so the probe can assert it owns the database.
 APPLICATION_NAME = "faststream-outbox-bench"
@@ -49,8 +54,17 @@ class ExtendConfig:
     pool_size: int = 20
     max_fetch_interval: float = 1.0
     queue: str = "timeouts"
+    vacuum: VacuumVariant = "tuned"
+    # Seconds between table-health samples taken while the load runs.
+    sample_interval: float = 10.0
 
     def __post_init__(self) -> None:
+        if self.vacuum not in typing.get_args(VacuumVariant):
+            msg = f"{self.name}: vacuum must be one of {typing.get_args(VacuumVariant)}, got {self.vacuum!r}"
+            raise ValueError(msg)
+        if self.sample_interval <= 0:
+            msg = f"{self.name}: sample_interval must be positive, got {self.sample_interval}"
+            raise ValueError(msg)
         if self.ping_interval >= self.timeout_seconds:
             msg = f"{self.name}: each identity pings every {self.ping_interval:.2f}s, not before its timeout"
             raise ValueError(msg)
