@@ -141,11 +141,19 @@ it.
   will run when an expired lease is reclaimed, for the deadline it claimed.
   Publishing again does not help while that row exists.
 
-If a late heartbeat must win over an expiry that is already running, the
-library cannot decide that for you. Have the handler re-check, in the same
-transaction as its side effects, whether the timeout still applies (for
-example against a last-activity column the heartbeat writes), and publish a
-fresh timer from the heartbeat once the old row is gone.
+For a heartbeat, `None` costs at most one expiry. The handler finishes, its
+row is deleted, and the next heartbeat inserts a fresh timer. The case to
+think about is a heartbeat that lands while the expiry runs and is then the
+last one: the expiry has already fired, and no timer is left to fire again.
+If your app marks the operator as active on every heartbeat, that mark can
+outlive the expiry handler's write and stay until the next heartbeat. When
+that matters, either:
+
+- have the handler re-check, in the same transaction as its side effects,
+  whether the timeout still applies (for example against a last-activity
+  column the heartbeat writes), or
+- retry the publish after a short delay when it returns `None`, by which time
+  the old row is usually gone.
 
 Every extend writes a new row version, even when the deadline does not
 move. `next_attempt_at` is indexed, so these updates are not HOT updates:

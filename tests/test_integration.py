@@ -1125,6 +1125,50 @@ async def test_extended_timer_fires_once_with_the_latest_payload(pg_engine: Asyn
     assert received == [{"ping": 2}]
 
 
+async def test_heartbeat_after_an_extend_on_a_running_timer_arms_a_new_one(
+    pg_engine: AsyncEngine, outbox_table: Table
+) -> None:
+    received: list[dict] = []
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    handler_started = asyncio.Event()
+    release_handler = asyncio.Event()
+
+    @broker.subscriber("orders", min_fetch_interval=0.05, max_fetch_interval=0.1)
+    async def handle(body: dict) -> None:
+        received.append(body)
+        handler_started.set()
+        await release_handler.wait()
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+
+    async def _ping(n: int, activate_in: dt.timedelta) -> int | None:
+        async with session_factory() as session, session.begin():
+            return await broker.publish(
+                {"ping": n},
+                queue="orders",
+                session=session,
+                activate_in=activate_in,
+                timer_id="op-1",
+                timer_conflict="extend",
+            )
+
+    async with broker:
+        await _ping(1, dt.timedelta(0))
+        await asyncio.wait_for(handler_started.wait(), timeout=3.0)
+        lost = await _ping(2, dt.timedelta(seconds=0.3))
+        release_handler.set()
+        healed = None
+        for _ in range(60):
+            healed = await _ping(3, dt.timedelta(seconds=0.3))
+            if healed is not None:
+                break
+            await asyncio.sleep(0.05)  # pragma: no cover - only while the finished handler's DELETE is in flight
+        await _wait_until(lambda: len(received) == 2, timeout=3.0)
+    assert lost is None
+    assert healed is not None
+    assert received == [{"ping": 1}, {"ping": 3}]
+
+
 async def test_cancel_timer_before_fire_prevents_delivery(pg_engine, outbox_table) -> None:
     received: list[dict] = []
     broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
