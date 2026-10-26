@@ -1,5 +1,6 @@
 import asyncio
 import datetime as dt
+import json
 import logging
 import typing
 import uuid
@@ -282,6 +283,60 @@ async def test_fake_broker_publish_with_timer_id_dedups() -> None:
     assert first is not None
     assert second is None
     assert len(test_broker.fake_client.rows) == 1
+
+
+async def test_fake_broker_publish_with_timer_conflict_extend_updates_the_row() -> None:
+    broker = _make_broker()
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        first = await broker.publish("x", queue="timers", timer_id="op-1", session=fake_session())
+        second = await broker.publish(
+            "y",
+            queue="timers",
+            timer_id="op-1",
+            timer_conflict="extend",
+            activate_in=dt.timedelta(minutes=10),
+            session=fake_session(),
+        )
+    assert first is not None
+    assert second == first
+    [row] = test_broker.fake_client.rows
+    assert row.payload == encode_payload("y")[0]
+    assert row.next_attempt_at > dt.datetime.now(tz=dt.UTC)
+
+
+async def test_extend_of_a_stored_timer_is_not_dispatched_again() -> None:
+    broker = _make_broker()
+    received: list[str] = []
+
+    @broker.subscriber("timers")
+    async def handle(body: str) -> None:
+        received.append(body)  # pragma: no cover  # the extend must not dispatch
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        rid = test_broker.feed("timers", b"x", timer_id="op-1")
+        extended = await broker.publish(
+            "y", queue="timers", timer_id="op-1", timer_conflict="extend", session=fake_session()
+        )
+    assert extended == rid
+    assert received == []
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"timer_conflict": "extend"}, "timer_conflict='extend' requires a timer_id"),
+        ({"timer_id": "op-1", "timer_conflict": "replace"}, "timer_conflict must be one of"),
+    ],
+)
+async def test_fake_broker_publish_rejects_a_bad_timer_conflict(kwargs: dict[str, typing.Any], match: str) -> None:
+    broker = _make_broker()
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        with pytest.raises(ValueError, match=match):
+            await broker.publish("x", queue="timers", session=fake_session(), **kwargs)
+    assert test_broker.fake_client.rows == []
 
 
 async def test_fake_broker_publish_with_activate_in_dispatches_immediately() -> None:
@@ -1596,6 +1651,18 @@ async def test_publisher_with_timer_id_dedups() -> None:
     assert len(test_broker.fake_client.rows) == 1
 
 
+async def test_publisher_forwards_timer_conflict() -> None:
+    broker = _make_broker()
+    pub = broker.publisher("orders")
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        first = await pub.publish(b"a", session=fake_session(), timer_id="op-1")
+        second = await pub.publish(b"b", session=fake_session(), timer_id="op-1", timer_conflict="extend")
+    assert second == first
+    [row] = test_broker.fake_client.rows
+    assert row.payload == b"b"
+
+
 async def test_publisher_with_activate_in_records_next_attempt() -> None:
     """Future-dated rows are stored with next_attempt_at; sync mode dispatches immediately."""
     broker = _make_broker()
@@ -1825,6 +1892,28 @@ async def test_handler_returning_outbox_response_with_timer_id_dedups() -> None:
     downstream = [r for r in test_broker.fake_client.rows if r.queue == "downstream"]
     assert len(downstream) == 1
     assert downstream[0].timer_id == "dedupe-key"
+
+
+async def test_handler_returning_outbox_response_forwards_timer_conflict() -> None:
+    broker = _make_broker()
+
+    @broker.subscriber("orders")
+    async def handle(body: dict) -> OutboxResponse:
+        return OutboxResponse(
+            body=body,
+            queue="downstream",
+            session=fake_session(),
+            timer_id="op-1",
+            timer_conflict="extend",
+        )
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish({"x": 1}, queue="orders", session=fake_session())
+        await broker.publish({"x": 2}, queue="orders", session=fake_session())
+
+    [downstream] = [r for r in test_broker.fake_client.rows if r.queue == "downstream"]
+    assert json.loads(downstream.payload) == {"x": 2}
 
 
 async def test_handler_returning_plain_value_does_not_publish_followup_row() -> None:

@@ -28,11 +28,13 @@ from sqlalchemy import (
     Integer,
     String,
     bindparam,
+    case,
     cast,
     delete,
     func,
     insert,
     literal,
+    null,
     select,
     text,
     true,
@@ -46,7 +48,7 @@ from faststream_outbox import schema_validation
 from faststream_outbox._scheduling import is_future_dated, resolve_next_attempt_client_side
 from faststream_outbox._session import SessionOrConnection, require_session_or_connection
 from faststream_outbox._time import utcnow
-from faststream_outbox.message import OutboxInnerMessage
+from faststream_outbox.message import OutboxInnerMessage, TimerConflict
 from faststream_outbox.schema import (
     _DLQ_INJECTED_COLUMNS,
     _DLQ_PROJECTION,
@@ -99,10 +101,13 @@ class AbstractOutboxClient(abc.ABC):
         activate_in: dt.timedelta | None = None,
         activate_at: dt.datetime | None = None,
         timer_id: str | None = None,
+        timer_conflict: TimerConflict = "ignore",
     ) -> int | None:
         """Insert one encoded row on *session* and NOTIFY its queue if the row is eligible now.
 
         Returns the row id, or ``None`` when a live row already holds *timer_id* on *queue*.
+        With ``timer_conflict="extend"``, an unleased row is updated in place and its id is
+        returned; ``None`` then means a worker holds the lease.
         Application code should call ``broker.publish`` instead: this skips the publish
         middlewares and the ``published`` metric.
         """
@@ -250,24 +255,45 @@ def _build_dlq_cte(outbox: "Table", dlq: "Table") -> "Insert":
     return insert(dlq).from_select([*(col for _, col in _DLQ_PROJECTION), *_DLQ_INJECTED_COLUMNS], archived)
 
 
-def _build_insert_stmts(table: "Table", channel: str) -> "dict[tuple[bool, bool, bool], Insert]":
-    """Build the single-row INSERT once per ``(timer_id set, activate_in set, notify)``; values arrive as parameters.
+def _build_insert_stmts(table: "Table", channel: str) -> "dict[tuple[TimerConflict | None, bool, bool], Insert]":
+    """Build the single-row INSERT once per ``(timer conflict, activate_in set, notify)``; values arrive as parameters.
 
     The notify variants call ``pg_notify`` in ``RETURNING``, so the NOTIFY costs no extra round trip and
-    fires only when a row actually landed (an ``ON CONFLICT DO NOTHING`` skip returns no row).
+    fires only when a row actually landed or was extended (a skipped conflict returns no row).
     """
     activate_in = func.now() + _seconds("activate_in_seconds")
-    plain = insert(table)
-    timer = pg_insert(table).on_conflict_do_nothing(
-        index_elements=[table.c.queue, table.c.timer_id],
-        index_where=table.c.timer_id.is_not(None),
+    index_elements = [table.c.queue, table.c.timer_id]
+    index_where = table.c.timer_id.is_not(None)
+    excluded = pg_insert(table).excluded
+    later = excluded.next_attempt_at > table.c.next_attempt_at
+
+    def _if_later(name: str, value: "ColumnElement[typing.Any]") -> "ColumnElement[typing.Any]":
+        return case((later, value), else_=table.c[name])
+
+    extend = pg_insert(table).on_conflict_do_update(
+        index_elements=index_elements,
+        index_where=index_where,
+        set_={
+            "next_attempt_at": func.greatest(table.c.next_attempt_at, excluded.next_attempt_at),
+            "payload": _if_later("payload", excluded.payload),
+            "headers": _if_later("headers", excluded.headers),
+            "attempts_count": _if_later("attempts_count", literal(0)),
+            "first_attempt_at": _if_later("first_attempt_at", null()),
+            "last_attempt_at": _if_later("last_attempt_at", null()),
+        },
+        where=table.c.acquired_token.is_(None),
     )
+    bases: dict[TimerConflict | None, Insert] = {
+        None: insert(table),
+        "ignore": pg_insert(table).on_conflict_do_nothing(index_elements=index_elements, index_where=index_where),
+        "extend": extend,
+    }
     notify = func.pg_notify(literal(channel), table.c.queue)
-    stmts: dict[tuple[bool, bool, bool], Insert] = {}
-    for has_timer, base in ((False, plain), (True, timer)):
+    stmts: dict[tuple[TimerConflict | None, bool, bool], Insert] = {}
+    for conflict, base in bases.items():
         for has_activate_in, stmt in ((False, base), (True, base.values(next_attempt_at=activate_in))):
-            stmts[has_timer, has_activate_in, False] = stmt.returning(table.c.id)
-            stmts[has_timer, has_activate_in, True] = stmt.returning(table.c.id, notify)
+            stmts[conflict, has_activate_in, False] = stmt.returning(table.c.id)
+            stmts[conflict, has_activate_in, True] = stmt.returning(table.c.id, notify)
     return stmts
 
 
@@ -293,6 +319,7 @@ class _OutboxInserter:
         activate_in: dt.timedelta | None = None,
         activate_at: dt.datetime | None = None,
         timer_id: str | None = None,
+        timer_conflict: TimerConflict = "ignore",
     ) -> int | None:
         params: dict[str, typing.Any] = {"queue": queue, "payload": payload, "headers": headers}
         if activate_in is not None:
@@ -307,7 +334,8 @@ class _OutboxInserter:
         # polling fires them at the next tick.
         emitted = self._notified_queues(session)
         notify = not is_future_dated(activate_in, activate_at, utcnow()) and (emitted is None or queue not in emitted)
-        stmt = self._insert_stmts[timer_id is not None, activate_in is not None, notify]
+        conflict = None if timer_id is None else timer_conflict
+        stmt = self._insert_stmts[conflict, activate_in is not None, notify]
         result = await session.execute(stmt, params)
         row_id: int | None = result.scalar()
         if row_id is not None and notify:
@@ -422,6 +450,7 @@ class OutboxClient(AbstractOutboxClient):
         activate_in: dt.timedelta | None = None,
         activate_at: dt.datetime | None = None,
         timer_id: str | None = None,
+        timer_conflict: TimerConflict = "ignore",
     ) -> int | None:
         return await self._inserter.insert(
             session,
@@ -431,6 +460,7 @@ class OutboxClient(AbstractOutboxClient):
             activate_in=activate_in,
             activate_at=activate_at,
             timer_id=timer_id,
+            timer_conflict=timer_conflict,
         )
 
     async def insert_batch(

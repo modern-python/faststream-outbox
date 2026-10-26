@@ -32,7 +32,7 @@ from typing_extensions import override
 from faststream_outbox._session import SessionOrConnection, require_session_or_connection
 from faststream_outbox.client import AbstractOutboxClient, OutboxClient
 from faststream_outbox.configs import LastExceptionRenderer, OutboxBrokerConfig
-from faststream_outbox.message import OutboxInnerMessage
+from faststream_outbox.message import OutboxInnerMessage, TimerConflict
 from faststream_outbox.metrics import MetricsRecorder, _noop_recorder
 from faststream_outbox.publisher.producer import OutboxProducer
 from faststream_outbox.registrator import OutboxRegistrator
@@ -419,6 +419,7 @@ class OutboxBroker(
         activate_in: dt.timedelta | None = None,
         activate_at: dt.datetime | None = None,
         timer_id: str | None = None,
+        timer_conflict: TimerConflict = "ignore",
     ) -> int | None:
         """Insert one outbox row using *session*'s open transaction.
 
@@ -433,8 +434,16 @@ class OutboxBroker(
         ``(queue, timer_id)`` — re-publishing with the same id is a no-op (returns
         ``None``). Cancel a not-yet-leased timer with :meth:`cancel_timer`.
 
-        Returns the inserted row's ``id`` (BigInt PK), or ``None`` if a timer with
-        the same ``(queue, timer_id)`` already exists.
+        *timer_conflict* picks what a re-publish does when a live row holds the same
+        ``(queue, timer_id)``. ``"ignore"`` (the default) leaves that row alone and
+        returns ``None``. ``"extend"`` updates a row no worker has leased, in place:
+        its deadline becomes the later of the stored and the requested one, and only
+        when the requested one is later does the row take the new payload and
+        headers and drop its retry history. Either way it returns the row id. It
+        returns ``None`` only when a worker holds the lease: that worker's handler
+        runs for the deadline it claimed, and the caller has to handle that case.
+
+        Returns the row's ``id`` (BigInt PK), or ``None`` as described above.
         """
         cmd = OutboxPublishCommand(
             body,
@@ -445,6 +454,7 @@ class OutboxBroker(
             activate_in=activate_in,
             activate_at=activate_at,
             timer_id=timer_id,
+            timer_conflict=timer_conflict,
         )
         result = await self._basic_publish(cmd, producer=self.config.producer)
         return typing.cast("int | None", result)

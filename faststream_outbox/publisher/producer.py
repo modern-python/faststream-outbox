@@ -90,6 +90,7 @@ class OutboxProducer:
                 activate_in=cmd.activate_in,
                 activate_at=cmd.activate_at,
                 timer_id=cmd.timer_id,
+                timer_conflict=cmd.timer_conflict,
             )
         except Exception as exc:
             self._emit_metric(

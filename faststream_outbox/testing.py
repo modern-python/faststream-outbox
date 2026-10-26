@@ -29,7 +29,7 @@ from faststream_outbox._session import SessionOrConnection, require_session_or_c
 from faststream_outbox._time import utcnow
 from faststream_outbox.broker import OutboxBroker
 from faststream_outbox.client import _NO_DLQ_TABLE_MSG, AbstractOutboxClient
-from faststream_outbox.message import OutboxInnerMessage
+from faststream_outbox.message import OutboxInnerMessage, TimerConflict
 from faststream_outbox.response import _MAX_QUEUE_LENGTH, _REQUEST_UNSUPPORTED_MSG, OutboxPublishCommand
 from faststream_outbox.schema import _DLQ_INJECTED_COLUMNS, _DLQ_PROJECTION
 
@@ -148,19 +148,42 @@ class FakeOutboxClient(AbstractOutboxClient):
         activate_in: dt.timedelta | None = None,
         activate_at: dt.datetime | None = None,
         timer_id: str | None = None,
+        timer_conflict: TimerConflict = "ignore",
     ) -> int | None:
         del session  # ignored (no real DB)
         _validate_like_postgres(queue=queue, timer_id=timer_id, headers=headers)
+        next_attempt_at = resolve_next_attempt_client_side(activate_in, activate_at, utcnow()) or utcnow()
+        live = next(
+            (r for r in self._rows if timer_id is not None and r.queue == queue and r.timer_id == timer_id), None
+        )
+        if live is not None and timer_conflict == "extend":
+            return self._extend(live, payload=payload, headers=headers, next_attempt_at=next_attempt_at)
         row = self._store(
             queue=queue,
             payload=payload,
             headers=headers,
-            next_attempt_at=resolve_next_attempt_client_side(activate_in, activate_at, utcnow()),
+            next_attempt_at=next_attempt_at,
             timer_id=timer_id,
         )
         if row is None:
             return None
         self._dispatchable.append(row)
+        return row.id
+
+    @staticmethod
+    def _extend(
+        row: _FakeRow, *, payload: bytes, headers: dict[str, str] | None, next_attempt_at: dt.datetime
+    ) -> int | None:
+        """Mirror the real ``ON CONFLICT DO UPDATE ... WHERE acquired_token IS NULL`` extend."""
+        if row.acquired_token is not None:
+            return None
+        if next_attempt_at > row.next_attempt_at:
+            row.next_attempt_at = next_attempt_at
+            row.payload = payload
+            row.headers = dict(headers) if headers is not None else None
+            row.attempts_count = 0
+            row.first_attempt_at = None
+            row.last_attempt_at = None
         return row.id
 
     async def insert_batch(

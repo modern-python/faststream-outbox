@@ -15,6 +15,7 @@ from faststream._internal.endpoint.publisher import PublisherUsecase
 from typing_extensions import override
 
 from faststream_outbox._session import SessionOrConnection
+from faststream_outbox.message import TimerConflict
 from faststream_outbox.publisher.config import OutboxPublisherConfig
 from faststream_outbox.publisher.specification import OutboxPublisherSpecification
 from faststream_outbox.response import _REQUEST_UNSUPPORTED_MSG, OutboxPublishCommand
@@ -74,6 +75,7 @@ class OutboxPublisher(PublisherUsecase):
         activate_in: dt.timedelta | None = None,
         activate_at: dt.datetime | None = None,
         timer_id: str | None = None,
+        timer_conflict: TimerConflict = "ignore",
     ) -> int | None:
         """Insert one outbox row scoped to this publisher's queue.
 
@@ -81,7 +83,7 @@ class OutboxPublisher(PublisherUsecase):
         caller's session and commits with their transaction. Static *headers* on
         the publisher are merged with per-call headers (per-call wins on conflict).
 
-        Returns the inserted row's id, or ``None`` on a timer_id conflict.
+        Returns the row id, or ``None`` when the *timer_conflict* policy left the row alone.
         """
         merged_headers = {**self.headers, **(headers or {})}
         cmd = OutboxPublishCommand(
@@ -93,6 +95,7 @@ class OutboxPublisher(PublisherUsecase):
             activate_in=activate_in,
             activate_at=activate_at,
             timer_id=timer_id,
+            timer_conflict=timer_conflict,
         )
         result = await self._basic_publish(
             cmd,

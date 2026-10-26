@@ -67,6 +67,11 @@ The dedup key for at most one *live* row per `(queue, timer_id)`. It is not a gl
 idempotency key; a delivered row's id is reusable.
 _Avoid_: idempotency key, message key
 
+**Extend**:
+Re-publishing a `timer_id` with `timer_conflict="extend"`: an unleased timer's deadline moves to
+the later of the stored and requested one, in place. A leased timer is left to its worker.
+_Avoid_: refresh, reschedule, upsert
+
 **Relay**:
 Forwarding a delivered row onward through a native FastStream publisher chain to a foreign broker.
 _Avoid_: bridge, forwarder
