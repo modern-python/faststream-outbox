@@ -46,12 +46,18 @@ explicit `ValueError` rather than guessing your intended zone.
 
 ### Server-side vs client-side scheduling
 
+The fetch query compares `next_attempt_at` with the database's `now()`, so
+the database clock decides when a row is due.
+
 For `publish` with `activate_in`, `next_attempt_at` is computed server-side
-via `now() + make_interval(secs => :s)` to stay clock-skew-safe. With
-`activate_at`, you supply an absolute instant, so it is stored verbatim and
-compared against the *worker's* clock at fetch time. Only `activate_in` is
-skew-safe; `activate_at` is as accurate as your producers' and workers'
-clocks agree. For `publish_batch`, `activate_in` is also client-side
+via `now() + make_interval(secs => :s)` to stay clock-skew-safe. In
+PostgreSQL, `now()` is the start time of the current transaction, so the
+deadline counts from when the caller's transaction began, not from the
+`publish` call. Keep publishing transactions short if that gap matters.
+With `activate_at`, you supply an absolute instant, so it is stored verbatim
+and compared against the database clock. Only `activate_in` is skew-safe;
+`activate_at` is as accurate as your producers' and the database's clocks
+agree. For `publish_batch`, `activate_in` is also client-side
 (`datetime.now(UTC) + activate_in`) because executemany doesn't compose
 cleanly with column-level SQL expressions, and the few-ms drift is harmless
 for user-supplied scheduling.
