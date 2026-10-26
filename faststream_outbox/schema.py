@@ -50,6 +50,7 @@ _PENDING_IDX_SUFFIX = "_pending_idx"
 _TIMER_ID_UQ_SUFFIX = "_timer_id_uq"
 _LEASED_IDX_SUFFIX = "_leased_idx"
 _LEASE_CK_SUFFIX = "_lease_ck"
+_REARM_CK_SUFFIX = "_rearm_ck"
 
 
 def validate_table_identifiers(table_name: str) -> None:
@@ -70,6 +71,7 @@ def validate_table_identifiers(table_name: str) -> None:
             f"{table_name}{_TIMER_ID_UQ_SUFFIX}",
             f"{table_name}{_LEASED_IDX_SUFFIX}",
             f"{table_name}{_LEASE_CK_SUFFIX}",
+            f"{table_name}{_REARM_CK_SUFFIX}",
         )
     )
     longest = max(derived, key=len)
@@ -112,6 +114,10 @@ def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table
         Column("acquired_at", DateTime(timezone=True), nullable=True),
         Column("acquired_token", Uuid, nullable=True),
         Column("timer_id", String(255), nullable=True),
+        # A timer extend that arrives while a worker holds the lease, applied when the run ends.
+        Column("rearm_at", DateTime(timezone=True), nullable=True),
+        Column("rearm_payload", LargeBinary, nullable=True),
+        Column("rearm_headers", JSONB, nullable=True),
         # P8: a lease is either fully set or fully unset. A half-set lease (e.g. a
         # manual UPDATE that sets acquired_at but not acquired_token) would be
         # permanently invisible to fetch, cancel_timer, and the metrics — this
@@ -119,6 +125,11 @@ def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table
         CheckConstraint(
             "(acquired_token IS NULL) = (acquired_at IS NULL)",
             name=f"{table_name}{_LEASE_CK_SUFFIX}",
+        ),
+        # Only a running timer can carry a queued rearm; on an unleased row nothing would apply it.
+        CheckConstraint(
+            "rearm_at IS NULL OR acquired_token IS NOT NULL",
+            name=f"{table_name}{_REARM_CK_SUFFIX}",
         ),
     )
     # Partial index that backs the fetch query's unleased branch: an ordered scan per queue on

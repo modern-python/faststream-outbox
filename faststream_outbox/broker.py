@@ -439,9 +439,10 @@ class OutboxBroker(
         returns ``None``. ``"extend"`` updates a row no worker has leased, in place:
         its deadline becomes the later of the stored and the requested one, and only
         when the requested one is later does the row take the new payload and
-        headers and drop its retry history. Either way it returns the row id. It
-        returns ``None`` only when a worker holds the lease: that worker's handler
-        runs for the deadline it claimed, and the caller has to handle that case.
+        headers and drop its retry history. On a leased row it queues the same
+        update as a rearm, which applies when the running handler finishes; see
+        the timers guide for how it interacts with retries and the DLQ. An extend
+        always returns the row id.
 
         Returns the row's ``id`` (BigInt PK), or ``None`` as described above.
         """
@@ -510,19 +511,18 @@ class OutboxBroker(
         timer_id: str,
         session: SessionOrConnection,
     ) -> bool:
-        """Delete a not-yet-leased timer row. Idempotent at the ``(queue, timer_id)`` level.
+        """Delete a not-yet-leased timer row, or drop the rearm queued on a leased one.
 
         Same transactional contract as :meth:`publish` — runs on the caller's session and
-        commits with their transaction.
+        commits with their transaction. Idempotent at the ``(queue, timer_id)`` level.
 
-        Returns ``True`` if *this call* deleted the row. ``False`` means the row is no
-        longer cancelable by you, which covers three cases:
+        Returns ``True`` if *this call* deleted the row or dropped its queued rearm.
+        ``False`` means there was nothing left for you to cancel, which covers three cases:
 
-        1. A worker has claimed the row (``acquired_token IS NOT NULL``). The
-           ``acquired_token IS NULL`` guard prevents this call from clobbering the
-           lease. Normally the delivery then completes. If that worker died, the lease
-           stays set until ``lease_ttl_seconds`` passes and the row is delivered again;
-           ``cancel_timer`` can't stop that redelivery.
+        1. A worker has claimed the row and no rearm is queued on it. The call never
+           deletes a leased row, so the delivery completes normally. If that worker
+           died, the lease stays set until ``lease_ttl_seconds`` passes and the row is
+           delivered again; ``cancel_timer`` can't stop that redelivery.
         2. Another caller already canceled the same ``(queue, timer_id)`` in a concurrent
            transaction.
         3. No row exists with that ``(queue, timer_id)`` — either the timer was never

@@ -323,6 +323,23 @@ async def test_extend_of_a_stored_timer_is_not_dispatched_again() -> None:
     assert received == []
 
 
+async def test_handler_extending_its_own_timer_leaves_it_pending_without_redispatch() -> None:
+    broker = _make_broker()
+    received: list[str] = []
+
+    @broker.subscriber("timers")
+    async def handle(body: str) -> None:
+        received.append(body)
+        await broker.publish("again", queue="timers", timer_id="op-1", timer_conflict="extend", session=fake_session())
+
+    test_broker = TestOutboxBroker(broker)
+    async with test_broker:
+        await broker.publish("first", queue="timers", timer_id="op-1", session=fake_session())
+    assert received == ["first"]
+    [row] = test_broker.fake_client.rows
+    assert (row.acquired_token, row.rearm_at, row.payload) == (None, None, encode_payload("again")[0])
+
+
 @pytest.mark.parametrize(
     ("kwargs", "match"),
     [

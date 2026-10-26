@@ -27,6 +27,7 @@ from sqlalchemy import (
     Float,
     Integer,
     String,
+    and_,
     bindparam,
     case,
     cast,
@@ -240,11 +241,33 @@ def _build_fetch_stmt(outbox: "Table") -> "Update":
     )
 
 
+def _rearm_values(outbox: "Table") -> "dict[str, typing.Any]":
+    """``SET`` values that turn a finished run with a queued rearm into a fresh pending timer."""
+    return {
+        "next_attempt_at": outbox.c.rearm_at,
+        "payload": outbox.c.rearm_payload,
+        "headers": outbox.c.rearm_headers,
+        "rearm_at": None,
+        "rearm_payload": None,
+        "rearm_headers": None,
+        "acquired_at": None,
+        "acquired_token": None,
+        "attempts_count": 0,
+        "deliveries_count": 0,
+        "first_attempt_at": None,
+        "last_attempt_at": None,
+    }
+
+
 def _build_dlq_cte(outbox: "Table", dlq: "Table") -> "Insert":
     """Build the DELETE-then-archive CTE once; the row id, lease token and failure context are bind parameters."""
     deleted = (
         delete(outbox)
-        .where(outbox.c.id == bindparam("message_id"), outbox.c.acquired_token == bindparam("acquired_token"))
+        .where(
+            outbox.c.id == bindparam("message_id"),
+            outbox.c.acquired_token == bindparam("acquired_token"),
+            outbox.c.rearm_at.is_(None),
+        )
         .returning(*(outbox.c[col] for col, _ in _DLQ_PROJECTION))
         .cte("deleted")
     )
@@ -255,33 +278,67 @@ def _build_dlq_cte(outbox: "Table", dlq: "Table") -> "Insert":
     return insert(dlq).from_select([*(col for _, col in _DLQ_PROJECTION), *_DLQ_INJECTED_COLUMNS], archived)
 
 
+def _build_dlq_rearm_cte(outbox: "Table", dlq: "Table") -> "Insert":
+    """Like :func:`_build_dlq_cte` for a run with a queued rearm: archive the run, then apply the rearm."""
+    run = (
+        select(*(outbox.c[col] for col, _ in _DLQ_PROJECTION))
+        .where(
+            outbox.c.id == bindparam("message_id"),
+            outbox.c.acquired_token == bindparam("acquired_token"),
+            outbox.c.rearm_at.is_not(None),
+        )
+        .cte("run")
+    )
+    rearmed = (
+        update(outbox)
+        .where(outbox.c.id == run.c.id, outbox.c.acquired_token == bindparam("acquired_token"))
+        .values(**_rearm_values(outbox))
+        .returning(outbox.c.id)
+        .cte("rearmed")
+    )
+    archived = select(
+        *(run.c[col] for col, _ in _DLQ_PROJECTION),
+        *(bindparam(col, type_=dlq.c[col].type) for col in _DLQ_INJECTED_COLUMNS),
+    ).select_from(run.join(rearmed, rearmed.c.id == run.c.id))
+    return insert(dlq).from_select([*(col for _, col in _DLQ_PROJECTION), *_DLQ_INJECTED_COLUMNS], archived)
+
+
 def _build_insert_stmts(table: "Table", channel: str) -> "dict[tuple[TimerConflict | None, bool, bool], Insert]":
     """Build the single-row INSERT once per ``(timer conflict, activate_in set, notify)``; values arrive as parameters.
 
     The notify variants call ``pg_notify`` in ``RETURNING``, so the NOTIFY costs no extra round trip and
-    fires only when a row actually landed or was extended (a skipped conflict returns no row).
+    fires only when a row actually landed or was extended (a skipped conflict returns no row). An extend
+    of a leased row writes only the ``rearm_*`` columns, which the run's terminal write applies.
     """
     activate_in = func.now() + _seconds("activate_in_seconds")
     index_elements = [table.c.queue, table.c.timer_id]
     index_where = table.c.timer_id.is_not(None)
     excluded = pg_insert(table).excluded
-    later = excluded.next_attempt_at > table.c.next_attempt_at
+    pending_later = and_(table.c.acquired_token.is_(None), excluded.next_attempt_at > table.c.next_attempt_at)
+    rearm_later = and_(
+        table.c.acquired_token.is_not(None),
+        excluded.next_attempt_at > func.coalesce(table.c.rearm_at, table.c.next_attempt_at),
+    )
 
-    def _if_later(name: str, value: "ColumnElement[typing.Any]") -> "ColumnElement[typing.Any]":
-        return case((later, value), else_=table.c[name])
+    def _when(
+        condition: "ColumnElement[bool]", name: str, value: "ColumnElement[typing.Any]"
+    ) -> "ColumnElement[typing.Any]":
+        return case((condition, value), else_=table.c[name])
 
     extend = pg_insert(table).on_conflict_do_update(
         index_elements=index_elements,
         index_where=index_where,
         set_={
-            "next_attempt_at": func.greatest(table.c.next_attempt_at, excluded.next_attempt_at),
-            "payload": _if_later("payload", excluded.payload),
-            "headers": _if_later("headers", excluded.headers),
-            "attempts_count": _if_later("attempts_count", literal(0)),
-            "first_attempt_at": _if_later("first_attempt_at", null()),
-            "last_attempt_at": _if_later("last_attempt_at", null()),
+            "next_attempt_at": _when(pending_later, "next_attempt_at", excluded.next_attempt_at),
+            "payload": _when(pending_later, "payload", excluded.payload),
+            "headers": _when(pending_later, "headers", excluded.headers),
+            "attempts_count": _when(pending_later, "attempts_count", literal(0)),
+            "first_attempt_at": _when(pending_later, "first_attempt_at", null()),
+            "last_attempt_at": _when(pending_later, "last_attempt_at", null()),
+            "rearm_at": _when(rearm_later, "rearm_at", excluded.next_attempt_at),
+            "rearm_payload": _when(rearm_later, "rearm_payload", excluded.payload),
+            "rearm_headers": _when(rearm_later, "rearm_headers", excluded.headers),
         },
-        where=table.c.acquired_token.is_(None),
     )
     bases: dict[TimerConflict | None, Insert] = {
         None: insert(table),
@@ -426,6 +483,7 @@ class OutboxClient(AbstractOutboxClient):
         self._fetch_stmt = _build_fetch_stmt(outbox_table)
         self._inserter = _OutboxInserter(outbox_table)
         self._dlq_cte = None if dlq_table is None else _build_dlq_cte(outbox_table, dlq_table)
+        self._dlq_rearm_cte = None if dlq_table is None else _build_dlq_rearm_cte(outbox_table, dlq_table)
 
     @property
     def table(self) -> "Table":
@@ -554,7 +612,7 @@ class OutboxClient(AbstractOutboxClient):
             msg = "OutboxClient.delete_with_lease requires a live AsyncConnection (got None)"
             raise TypeError(msg)
         if dlq_payload is not None:
-            if self._dlq_cte is None:
+            if self._dlq_cte is None or self._dlq_rearm_cte is None:
                 # P10: a dlq_payload with no dlq_table would silently degrade to a plain
                 # DELETE — losing the audit row. If the broker/client wiring ever desyncs,
                 # fail loudly rather than drop forensics.
@@ -567,10 +625,21 @@ class OutboxClient(AbstractOutboxClient):
                 "last_exception": dlq_payload["last_exception"],
             }
             result = await conn.execute(self._dlq_cte, params)
+            if (result.rowcount or 0) > 0:
+                return True
+            result = await conn.execute(self._dlq_rearm_cte, params)
             return (result.rowcount or 0) > 0
         t = self._table
-        del_stmt = delete(t).where(t.c.id == message_id, t.c.acquired_token == acquired_token)
+        del_stmt = delete(t).where(t.c.id == message_id, t.c.acquired_token == acquired_token, t.c.rearm_at.is_(None))
         result = await conn.execute(del_stmt)
+        if (result.rowcount or 0) > 0:
+            return True
+        rearm_stmt = (
+            update(t)
+            .where(t.c.id == message_id, t.c.acquired_token == acquired_token, t.c.rearm_at.is_not(None))
+            .values(**_rearm_values(t))
+        )
+        result = await conn.execute(rearm_stmt)
         return (result.rowcount or 0) > 0
 
     async def delete_batch_with_lease(
@@ -593,8 +662,32 @@ class OutboxClient(AbstractOutboxClient):
         if not pairs:
             return set()
         t = self._table
+        wanted = self._wanted_pairs(pairs)
+        stmt = (
+            delete(t)
+            .where(t.c.id == wanted.c.id, t.c.acquired_token == wanted.c.token, t.c.rearm_at.is_(None))
+            .returning(t.c.id, t.c.acquired_token)
+        )
+        result = await conn.execute(stmt)
+        done = {(row_id, token) for row_id, token in result.all()}
+        missing = [pair for pair in pairs if pair not in done]
+        if not missing:
+            return done
+        wanted = self._wanted_pairs(missing)
+        rearm_stmt = (
+            update(t)
+            .where(t.c.id == wanted.c.id, t.c.acquired_token == wanted.c.token, t.c.rearm_at.is_not(None))
+            .values(**_rearm_values(t))
+            .returning(t.c.id, wanted.c.token)
+        )
+        result = await conn.execute(rearm_stmt)
+        return done | {(row_id, token) for row_id, token in result.all()}
+
+    def _wanted_pairs(self, pairs: "Sequence[tuple[int, uuid.UUID]]") -> typing.Any:
+        """``unnest(:ids, :tokens) AS wanted(id, token)``, so the SQL text doesn't depend on ``len(pairs)``."""
+        t = self._table
         ids_type, tokens_type = ARRAY(t.c.id.type), ARRAY(t.c.acquired_token.type)
-        wanted = (
+        return (
             func.unnest(
                 cast(bindparam("ids", [pid for pid, _ in pairs], type_=ids_type), ids_type),
                 cast(bindparam("tokens", [ptok for _, ptok in pairs], type_=tokens_type), tokens_type),
@@ -602,13 +695,6 @@ class OutboxClient(AbstractOutboxClient):
             .table_valued("id", "token")
             .render_derived(name="wanted")
         )
-        stmt = (
-            delete(t)
-            .where(t.c.id == wanted.c.id, t.c.acquired_token == wanted.c.token)
-            .returning(t.c.id, t.c.acquired_token)
-        )
-        result = await conn.execute(stmt)
-        return {(row_id, token) for row_id, token in result.all()}
 
     async def mark_pending_with_lease(
         self,
@@ -636,15 +722,24 @@ class OutboxClient(AbstractOutboxClient):
             msg = "OutboxClient.mark_pending_with_lease requires a live AsyncConnection (got None)"
             raise TypeError(msg)
         t = self._table
-        next_attempt_at_expr = func.now() + _seconds("delay")
+        rearm = t.c.rearm_at.is_not(None)
+
+        def _unless_rearm(name: str, value: "ColumnElement[typing.Any]") -> "ColumnElement[typing.Any]":
+            return case((rearm, _rearm_values(t)[name]), else_=value)
+
         stmt = (
             update(t)
             .where(t.c.id == message_id, t.c.acquired_token == acquired_token)
             .values(
-                next_attempt_at=next_attempt_at_expr,
-                attempts_count=attempts_count,
-                first_attempt_at=first_attempt_at,
-                last_attempt_at=last_attempt_at,
+                next_attempt_at=_unless_rearm("next_attempt_at", func.now() + _seconds("delay")),
+                payload=_unless_rearm("payload", t.c.payload),
+                headers=_unless_rearm("headers", t.c.headers),
+                attempts_count=case((rearm, 0), else_=attempts_count),
+                first_attempt_at=case((rearm, null()), else_=literal(first_attempt_at, t.c.first_attempt_at.type)),
+                last_attempt_at=case((rearm, null()), else_=literal(last_attempt_at, t.c.last_attempt_at.type)),
+                rearm_at=None,
+                rearm_payload=None,
+                rearm_headers=None,
                 acquired_at=None,
                 acquired_token=None,
             )
@@ -653,15 +748,28 @@ class OutboxClient(AbstractOutboxClient):
         return (result.rowcount or 0) > 0
 
     async def cancel_timer(self, *, queue: str, timer_id: str, session: SessionOrConnection) -> bool:
-        """Delete a not-yet-leased ``(queue, timer_id)`` row on the caller's session."""
+        """Delete an unleased ``(queue, timer_id)`` row, or drop a leased one's queued rearm, on *session*.
+
+        The row is locked first, so a run that finishes concurrently either completes before the
+        cancel reads it or waits for the cancel to commit; its rearm can't slip past in between.
+        """
         require_session_or_connection(session, "OutboxClient.cancel_timer")
         t = self._table
-        stmt = delete(t).where(
-            t.c.queue == queue,
-            t.c.timer_id == timer_id,
-            t.c.acquired_token.is_(None),
+        locked = (
+            select(t.c.id, t.c.acquired_token).where(t.c.queue == queue, t.c.timer_id == timer_id).with_for_update()
         )
-        result = await session.execute(stmt)
+        row = (await session.execute(locked)).first()
+        if row is None:
+            return False
+        if row.acquired_token is None:
+            await session.execute(delete(t).where(t.c.id == row.id))
+            return True
+        clear = (
+            update(t)
+            .where(t.c.id == row.id, t.c.rearm_at.is_not(None))
+            .values(rearm_at=None, rearm_payload=None, rearm_headers=None)
+        )
+        result = await session.execute(clear)
         return (result.rowcount or 0) > 0  # ty: ignore[unresolved-attribute]
 
     async def fetch_unprocessed(

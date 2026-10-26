@@ -57,6 +57,21 @@ class _FakeRow:
     acquired_at: dt.datetime | None = None
     acquired_token: uuid.UUID | None = None
     timer_id: str | None = None
+    rearm_at: dt.datetime | None = None
+    rearm_payload: bytes | None = None
+    rearm_headers: dict[str, str] | None = None
+
+
+def _apply_rearm(row: _FakeRow) -> bool:
+    """Turn a finished run with a queued rearm into a fresh pending timer; False when none is queued."""
+    if row.rearm_at is None or row.rearm_payload is None:
+        return False
+    row.next_attempt_at, row.payload, row.headers = row.rearm_at, row.rearm_payload, row.rearm_headers
+    row.rearm_at = row.rearm_payload = row.rearm_headers = None
+    row.acquired_at = row.acquired_token = None
+    row.attempts_count = row.deliveries_count = 0
+    row.first_attempt_at = row.last_attempt_at = None
+    return True
 
 
 def _claim_fake_row(row: _FakeRow, *, now: dt.datetime, token: uuid.UUID) -> None:
@@ -174,9 +189,13 @@ class FakeOutboxClient(AbstractOutboxClient):
     def _extend(
         row: _FakeRow, *, payload: bytes, headers: dict[str, str] | None, next_attempt_at: dt.datetime
     ) -> int | None:
-        """Mirror the real ``ON CONFLICT DO UPDATE ... WHERE acquired_token IS NULL`` extend."""
+        """Mirror the real ``ON CONFLICT DO UPDATE`` extend, which queues a rearm on a leased row."""
         if row.acquired_token is not None:
-            return None
+            if next_attempt_at > (row.rearm_at or row.next_attempt_at):
+                row.rearm_at = next_attempt_at
+                row.rearm_payload = payload
+                row.rearm_headers = dict(headers) if headers is not None else None
+            return row.id
         if next_attempt_at > row.next_attempt_at:
             row.next_attempt_at = next_attempt_at
             row.payload = payload
@@ -321,7 +340,8 @@ class FakeOutboxClient(AbstractOutboxClient):
                     for col in _DLQ_INJECTED_COLUMNS:
                         dlq_row[col] = dlq_payload[col]
                     self._dlq_rows.append(dlq_row)
-                del self._rows[i]
+                if not _apply_rearm(row):
+                    del self._rows[i]
                 return True
         return False
 
@@ -340,7 +360,8 @@ class FakeOutboxClient(AbstractOutboxClient):
             row = self._rows[i]
             if row.acquired_token is not None and (row.id, row.acquired_token) in wanted:
                 deleted.add((row.id, row.acquired_token))
-                del self._rows[i]
+                if not _apply_rearm(row):
+                    del self._rows[i]
         return deleted
 
     async def mark_pending_with_lease(
@@ -356,6 +377,10 @@ class FakeOutboxClient(AbstractOutboxClient):
     ) -> bool:
         for row in self._rows:
             if row.id == message_id and _lease_token_matches(row.acquired_token, acquired_token):
+                deliveries = row.deliveries_count
+                if _apply_rearm(row):
+                    row.deliveries_count = deliveries
+                    return True
                 row.next_attempt_at = utcnow() + dt.timedelta(seconds=max(0.0, delay_seconds))
                 row.attempts_count = attempts_count
                 row.first_attempt_at = first_attempt_at
@@ -366,12 +391,16 @@ class FakeOutboxClient(AbstractOutboxClient):
         return False
 
     async def cancel_timer(self, *, queue: str, timer_id: str, session: SessionOrConnection) -> bool:
-        """Mirror :meth:`OutboxBroker.cancel_timer` — drop a not-yet-leased timer row."""
+        """Mirror :meth:`OutboxBroker.cancel_timer` — drop an unleased timer row or a leased one's queued rearm."""
         require_session_or_connection(session, "FakeOutboxClient.cancel_timer")
         for i, row in enumerate(self._rows):
-            if row.queue == queue and row.timer_id == timer_id and row.acquired_token is None:
-                del self._rows[i]
-                return True
+            if row.queue == queue and row.timer_id == timer_id:
+                if row.acquired_token is None:
+                    del self._rows[i]
+                    return True
+                queued = row.rearm_at is not None
+                row.rearm_at = row.rearm_payload = row.rearm_headers = None
+                return queued
         return False
 
     async def fetch_unprocessed(
