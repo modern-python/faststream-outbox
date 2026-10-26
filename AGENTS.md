@@ -34,10 +34,7 @@ will **not** tell you:
   runs in the database and one in the process. They cannot share an implementation, so
   `tests/test_client_contract.py` couples them by behaviour. A change to either adapter's insert, fetch,
   terminal, or DLQ semantics belongs in that suite.
-- `schema.py`: the three partial indexes and the `<table>_lease_ck` and `<table>_rearm_ck` CHECKs are
-  load-bearing.
-- Every terminal write (delete, batched delete, DLQ, retry) must apply a queued rearm instead of
-  dropping it; `tests/test_client_contract.py` holds the rearm scenarios for both adapters.
+- `schema.py`: the three partial indexes and the `<table>_lease_ck` CHECK are load-bearing.
 - `message.py`: the `DLQFailureReason` `Literal` is a **public contract**; operator queries key off
   those strings, so changing one is API-breaking.
 - `metrics/` (the recorder seam) and `prometheus/` + `opentelemetry/` (native middleware) are two

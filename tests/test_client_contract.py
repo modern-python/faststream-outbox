@@ -41,7 +41,7 @@ from faststream_outbox import TimerConflict, make_dlq_table, make_outbox_table
 from faststream_outbox._time import utcnow
 from faststream_outbox.client import OutboxClient
 from faststream_outbox.message import OutboxInnerMessage
-from faststream_outbox.testing import FakeOutboxClient, fake_session
+from faststream_outbox.testing import FakeOutboxClient
 
 
 pytestmark = pytest.mark.asyncio
@@ -169,16 +169,10 @@ class _FakeHarness:
             "deliveries_count": row.deliveries_count,
             "next_attempt_at": row.next_attempt_at,
             "timer_id": row.timer_id,
-            "rearm_at": row.rearm_at,
-            "rearm_payload": row.rearm_payload,
-            "rearm_headers": row.rearm_headers,
         }
 
     async def dlq_rows(self) -> list[dict[str, object]]:
         return [dict(r) for r in self._client.dlq_rows]
-
-    async def cancel(self, *, queue: str, timer_id: str) -> bool:
-        return await self._client.cancel_timer(queue=queue, timer_id=timer_id, session=fake_session())
 
     async def call(self, method: str, **kwargs: object) -> object:
         return await getattr(self._client, method)(**kwargs)
@@ -313,13 +307,7 @@ class _RealHarness:
                 return None
             row = dict(mapping)
             row["payload"] = bytes(row["payload"])
-            if row["rearm_payload"] is not None:
-                row["rearm_payload"] = bytes(row["rearm_payload"])
             return row
-
-    async def cancel(self, *, queue: str, timer_id: str) -> bool:
-        async with self._sessions() as session, session.begin():
-            return await self._client.cancel_timer(queue=queue, timer_id=timer_id, session=session)
 
     async def dlq_rows(self) -> list[dict[str, object]]:
         async with self._engine.connect() as conn:
@@ -504,156 +492,30 @@ async def test_insert_extend_resets_the_retry_history(contract: _Harness) -> Non
     assert row["deliveries_count"] == 1
 
 
-async def _claimed_timer(contract: _Harness, *, payload: bytes = b"old") -> tuple[int, uuid.UUID]:
-    rid = await contract.insert(queue="orders", payload=payload, timer_id="t1")
-    assert rid is not None
-    [msg] = await contract.fetch(["orders"], limit=10, lease_ttl_seconds=60.0)
-    assert msg.acquired_token is not None
-    return rid, msg.acquired_token
-
-
-async def _extend(
-    contract: _Harness, *, payload: bytes, minutes: float, headers: dict[str, str] | None = None
-) -> int | None:
-    return await contract.insert(
-        queue="orders",
-        payload=payload,
-        headers=headers,
-        activate_at=utcnow() + dt.timedelta(minutes=minutes),
-        timer_id="t1",
-        timer_conflict="extend",
-    )
-
-
 @pytest.mark.parametrize("acquired_age", [0.0, 3600.0])
-async def test_insert_extend_queues_a_rearm_on_a_leased_timer(contract: _Harness, acquired_age: float) -> None:
-    """INVARIANT: an extend on a leased timer queues a rearm and leaves the running instance alone.
+async def test_insert_extend_leaves_a_leased_timer_to_its_worker(contract: _Harness, acquired_age: float) -> None:
+    """INVARIANT: an extend never touches a leased timer and returns ``None`` for it.
 
-    The worker's handler may already have acted on the deadline it claimed, so the extend must not
-    touch the lease, the claimed deadline or the payload the handler sees. Dropping the extend instead
-    would lose a heartbeat that arrived while the expiry ran; clearing the lease so the update lands
-    would let the stale completion delete the refreshed timer. An expired lease is still a lease.
+    Once a worker holds the lease, its handler may already have acted on the old deadline. Rewriting
+    the row, or clearing the lease so the upsert lands, would report a refresh the handler never saw
+    and let a stale completion delete the refreshed timer. An expired lease is still a lease: the
+    fetch loop reclaims the row, so the caller must handle ``None`` the same way.
     """
     token = uuid.uuid4()
     rid = await contract.seed(
         queue="orders", payload=b"old", timer_id="t1", leased_token=token, acquired_age=acquired_age
     )
     before = await contract.get_row(rid)
-    assert before is not None
-    at = utcnow() + dt.timedelta(minutes=10)
     extended = await contract.insert(
-        queue="orders", payload=b"new", headers={"k": "v"}, activate_at=at, timer_id="t1", timer_conflict="extend"
+        queue="orders",
+        payload=b"new",
+        activate_at=utcnow() + dt.timedelta(minutes=10),
+        timer_id="t1",
+        timer_conflict="extend",
     )
-    assert extended == rid
-    after = await contract.get_row(rid)
-    assert after is not None
-    assert (after["rearm_at"], after["rearm_payload"], after["rearm_headers"]) == (at, b"new", {"k": "v"})
-    running = ("acquired_token", "acquired_at", "next_attempt_at", "payload", "headers", "deliveries_count")
-    assert {k: after[k] for k in running} == {k: before[k] for k in running}
-
-
-async def test_insert_extend_never_moves_a_queued_rearm_earlier(contract: _Harness) -> None:
-    rid, _ = await _claimed_timer(contract)
-    assert await _extend(contract, payload=b"later", minutes=10) == rid
-    queued = await contract.get_row(rid)
-    assert queued is not None
-    assert await _extend(contract, payload=b"stale", minutes=1) == rid
-    row = await contract.get_row(rid)
-    assert row is not None
-    assert (row["rearm_at"], row["rearm_payload"]) == (queued["rearm_at"], b"later")
-
-
-async def test_insert_extend_queues_nothing_behind_a_later_claimed_deadline(contract: _Harness) -> None:
-    token = uuid.uuid4()
-    rid = await contract.seed(queue="orders", timer_id="t1", next_attempt_offset=600.0, leased_token=token)
-    assert await _extend(contract, payload=b"stale", minutes=1) == rid
-    row = await contract.get_row(rid)
-    assert row is not None
-    assert row["rearm_at"] is None
-
-
-async def test_delete_applies_a_queued_rearm(contract: _Harness) -> None:
-    rid, token = await _claimed_timer(contract)
-    assert await _extend(contract, payload=b"new", minutes=10, headers={"k": "v"}) == rid
-    queued = await contract.get_row(rid)
-    assert queued is not None
+    assert extended is None
+    assert await contract.get_row(rid) == before
     assert await contract.delete(rid, token)
-    row = await contract.get_row(rid)
-    assert row is not None
-    assert row["acquired_token"] is None
-    assert row["acquired_at"] is None
-    assert (row["next_attempt_at"], row["payload"], row["headers"]) == (queued["rearm_at"], b"new", {"k": "v"})
-    assert (row["rearm_at"], row["rearm_payload"], row["rearm_headers"]) == (None, None, None)
-    assert (row["attempts_count"], row["deliveries_count"]) == (0, 0)
-
-
-async def test_delete_with_a_lost_lease_keeps_the_queued_rearm(contract: _Harness) -> None:
-    rid, _ = await _claimed_timer(contract)
-    assert await _extend(contract, payload=b"new", minutes=10) == rid
-    assert not await contract.delete(rid, uuid.uuid4())
-    row = await contract.get_row(rid)
-    assert row is not None
-    assert row["rearm_payload"] == b"new"
-
-
-async def test_delete_batch_applies_a_queued_rearm(contract: _Harness) -> None:
-    rid, token = await _claimed_timer(contract)
-    other = await contract.seed(queue="orders", leased_token=token)
-    assert await _extend(contract, payload=b"new", minutes=10) == rid
-    assert await contract.delete_batch([(rid, token), (other, token)]) == {(rid, token), (other, token)}
-    assert await contract.queue_ids("orders") == [rid]
-    row = await contract.get_row(rid)
-    assert row is not None
-    assert (row["acquired_token"], row["payload"], row["rearm_at"]) == (None, b"new", None)
-
-
-async def test_delete_with_dlq_archives_the_failed_run_and_applies_a_queued_rearm(contract: _Harness) -> None:
-    rid, token = await _claimed_timer(contract, payload=b"failed")
-    assert await _extend(contract, payload=b"new", minutes=10) == rid
-    assert await contract.delete(rid, token, dlq_payload={"failure_reason": "rejected", "last_exception": "boom"})
-    [archived] = await contract.dlq_rows()
-    assert (archived["original_id"], archived["payload"], archived["failure_reason"]) == (rid, b"failed", "rejected")
-    row = await contract.get_row(rid)
-    assert row is not None
-    assert (row["acquired_token"], row["payload"], row["deliveries_count"]) == (None, b"new", 0)
-
-
-async def test_mark_pending_lets_a_queued_rearm_win(contract: _Harness) -> None:
-    """INVARIANT: a retry yields to a queued rearm, and keeps the run's delivery count.
-
-    The rearm is newer work than the failed run, so the timer moves to the rearm deadline and
-    payload with a fresh retry history. ``deliveries_count`` is not reset, so ``max_deliveries``
-    still stops a handler that fails on every run while heartbeats keep rearming it.
-    """
-    rid, token = await _claimed_timer(contract)
-    assert await _extend(contract, payload=b"new", minutes=10) == rid
-    queued = await contract.get_row(rid)
-    assert queued is not None
-    now = utcnow()
-    assert await contract.mark_pending(
-        rid, token, delay_seconds=5.0, attempts_count=2, first_attempt_at=now, last_attempt_at=now
-    )
-    row = await contract.get_row(rid)
-    assert row is not None
-    assert (row["next_attempt_at"], row["payload"], row["rearm_at"]) == (queued["rearm_at"], b"new", None)
-    assert (row["attempts_count"], row["first_attempt_at"], row["last_attempt_at"]) == (0, None, None)
-    assert (row["acquired_token"], row["deliveries_count"]) == (None, 1)
-
-
-async def test_cancel_timer_drops_a_queued_rearm(contract: _Harness) -> None:
-    rid, token = await _claimed_timer(contract)
-    assert await _extend(contract, payload=b"new", minutes=10) == rid
-    assert await contract.cancel(queue="orders", timer_id="t1")
-    row = await contract.get_row(rid)
-    assert row is not None
-    assert (row["acquired_token"], row["rearm_at"]) == (token, None)
-    assert await contract.delete(rid, token)
-    assert await contract.queue_ids("orders") == []
-
-
-async def test_cancel_timer_on_a_leased_timer_without_a_rearm_returns_false(contract: _Harness) -> None:
-    await _claimed_timer(contract)
-    assert not await contract.cancel(queue="orders", timer_id="t1")
 
 
 async def test_insert_extend_same_timer_id_on_another_queue_lands(contract: _Harness) -> None:

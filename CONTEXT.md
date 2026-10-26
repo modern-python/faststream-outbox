@@ -69,13 +69,8 @@ _Avoid_: idempotency key, message key
 
 **Extend**:
 Re-publishing a `timer_id` with `timer_conflict="extend"`: an unleased timer's deadline moves to
-the later of the stored and requested one, in place. On a leased timer it queues a rearm.
+the later of the stored and requested one, in place. A leased timer is left to its worker.
 _Avoid_: refresh, reschedule, upsert
-
-**Rearm**:
-An extend queued on a leased timer, held in the `rearm_*` columns. The run's terminal write applies
-it, turning the row back into a pending timer instead of deleting it.
-_Avoid_: successor, follow-up timer
 
 **Relay**:
 Forwarding a delivered row onward through a native FastStream publisher chain to a foreign broker.

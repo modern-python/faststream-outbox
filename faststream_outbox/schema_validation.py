@@ -24,7 +24,6 @@ from faststream_outbox.schema import (
     _LEASE_CK_SUFFIX,
     _LEASED_IDX_SUFFIX,
     _PENDING_IDX_SUFFIX,
-    _REARM_CK_SUFFIX,
     _TIMER_ID_UQ_SUFFIX,
     make_dlq_table,
     make_outbox_table,
@@ -193,12 +192,11 @@ _CHECK_CONSTRAINT_QUERY = text(
     "AND con.contype = 'c'",
 )
 
-# Expected CHECK-constraint predicates and the invariant each enforces, keyed by the
-# constraint-name suffix make_outbox_table uses. Predicates are in normalized form
-# (lowercased, parens/whitespace collapsed, leading ``check`` stripped).
+# Expected CHECK-constraint predicates, keyed by the constraint-name suffix make_outbox_table
+# uses. Normalized form (lowercased, parens/whitespace collapsed, leading ``check`` stripped)
+# of ``(acquired_token IS NULL) = (acquired_at IS NULL)``.
 _EXPECTED_CHECK_CONSTRAINTS = {
-    _LEASE_CK_SUFFIX: ("acquired_token is null = acquired_at is null", "the lease invariant"),
-    _REARM_CK_SUFFIX: ("rearm_at is null or acquired_token is not null", "the queued-rearm invariant"),
+    _LEASE_CK_SUFFIX: "acquired_token is null = acquired_at is null",
 }
 
 
@@ -231,10 +229,10 @@ def _validate_check_constraints_sync(connection: "Connection", table: "Table", s
     # leading ``check`` keyword after normalizing away parens/case/whitespace.
     live_predicates = {_normalize_predicate(row["definition"]).removeprefix("check ").strip() for row in rows}
     errors: list[str] = []
-    for suffix, (want, invariant) in _EXPECTED_CHECK_CONSTRAINTS.items():
+    for suffix, want in _EXPECTED_CHECK_CONSTRAINTS.items():
         if want not in live_predicates:
             errors.append(
-                f"missing CHECK constraint enforcing '{want}' ({invariant}; name it e.g. {table.name}{suffix})",
+                f"missing CHECK constraint enforcing '{want}' (the lease invariant; name it e.g. {table.name}{suffix})",
             )
     return errors
 
@@ -254,8 +252,6 @@ _AUTOGEN_BLIND_HINT = (
 
 _PENDING_IDX_UPGRADE_URL = "https://faststream-outbox.modern-python.org/operations/alembic/#upgrading-to-015"
 _LEASED_IDX_UPGRADE_URL = "https://faststream-outbox.modern-python.org/operations/alembic/#upgrading-to-017"
-_REARM_UPGRADE_URL = "https://faststream-outbox.modern-python.org/operations/alembic/#upgrading-to-019"
-_REARM_COLUMNS = frozenset({"rearm_at", "rearm_payload", "rearm_headers"})
 
 
 def _compose_schema_mismatch_message(errors: list[str], *, has_blind_drift: bool) -> str:
@@ -392,10 +388,7 @@ def _drift_entry_to_error(entry: "tuple[typing.Any, ...]", table_name: str) -> s
         return f"table '{table_name}' does not exist"
     if op == "add_column":
         col = entry[3]
-        error = f"table '{table_name}' missing column '{col.name}'"
-        if col.name in _REARM_COLUMNS:
-            error += f"; a table created before 0.19 needs the rearm columns added: {_REARM_UPGRADE_URL}"
-        return error
+        return f"table '{table_name}' missing column '{col.name}'"
     if op == "modify_type":
         col_name = entry[3]
         existing_type = entry[5]

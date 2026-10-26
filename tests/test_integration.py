@@ -959,7 +959,7 @@ async def test_extend_holds_off_a_claim_until_it_commits(pg_engine: AsyncEngine,
     assert row["acquired_token"] is None
 
 
-async def test_extend_waits_for_an_uncommitted_claim_and_queues_a_rearm(
+async def test_extend_waits_for_an_uncommitted_claim_and_returns_none(
     pg_engine: AsyncEngine, outbox_table: Table
 ) -> None:
     broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
@@ -987,118 +987,10 @@ async def test_extend_waits_for_an_uncommitted_claim_and_queues_a_rearm(
             extend = asyncio.create_task(_extend())
             await asyncio.sleep(0.3)
             assert not extend.done()
-        assert await extend is not None
+        assert await extend is None
     row = await _timer_row(pg_engine, outbox_table, "op-1")
     assert row["acquired_token"] == token
     assert json.loads(row["payload"]) == {"v": 1}
-    assert json.loads(row["rearm_payload"]) == {"v": 2}
-
-
-async def test_completion_waits_for_an_uncommitted_extend_and_applies_it(
-    pg_engine: AsyncEngine, outbox_table: Table
-) -> None:
-    """INVARIANT: a completion never deletes a timer whose rearm is being queued.
-
-    The extend locks the leased row, so the completion's ``DELETE ... WHERE rearm_at IS NULL`` waits
-    and re-checks the row once the extend commits, then falls through to applying the rearm. Reading
-    ``rearm_at`` before deleting, outside that single statement, would let a heartbeat that commits in
-    between vanish together with the finished run.
-    """
-    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
-    client = OutboxClient(pg_engine, outbox_table)
-    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
-    async with session_factory() as session, session.begin():
-        await broker.publish({"v": 1}, queue="orders", session=session, timer_id="op-1")
-    async with pg_engine.connect() as conn:
-        [msg] = await client.fetch(conn, ["orders"], limit=10, lease_ttl_seconds=60.0)
-    token = msg.acquired_token
-    assert token is not None
-
-    async def _complete() -> bool:
-        async with pg_engine.connect() as raw:
-            writer = await raw.execution_options(isolation_level="AUTOCOMMIT")
-            return await client.delete_with_lease(writer, msg.id, token)
-
-    async with session_factory() as session, session.begin():
-        await broker.publish(
-            {"v": 2},
-            queue="orders",
-            session=session,
-            activate_in=dt.timedelta(minutes=10),
-            timer_id="op-1",
-            timer_conflict="extend",
-        )
-        complete = asyncio.create_task(_complete())
-        await asyncio.sleep(0.3)
-        assert not complete.done()
-    assert await complete
-    row = await _timer_row(pg_engine, outbox_table, "op-1")
-    assert row["acquired_token"] is None
-    assert json.loads(row["payload"]) == {"v": 2}
-    assert row["rearm_at"] is None
-
-
-async def test_ping_during_a_running_expiry_fires_the_timer_again(pg_engine: AsyncEngine, outbox_table: Table) -> None:
-    received: list[dict] = []
-    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
-    handler_started = asyncio.Event()
-    release_handler = asyncio.Event()
-
-    @broker.subscriber("orders", min_fetch_interval=0.05, max_fetch_interval=0.1)
-    async def handle(body: dict) -> None:
-        received.append(body)
-        handler_started.set()
-        await release_handler.wait()
-
-    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
-
-    async def _ping(n: int, activate_in: dt.timedelta) -> int | None:
-        async with session_factory() as session, session.begin():
-            return await broker.publish(
-                {"ping": n},
-                queue="orders",
-                session=session,
-                activate_in=activate_in,
-                timer_id="op-1",
-                timer_conflict="extend",
-            )
-
-    async with broker:
-        await _ping(1, dt.timedelta(0))
-        await asyncio.wait_for(handler_started.wait(), timeout=3.0)
-        assert await _ping(2, dt.timedelta(seconds=0.3)) is not None
-        release_handler.set()
-        await _wait_until(lambda: len(received) == 2, timeout=3.0)
-    assert received == [{"ping": 1}, {"ping": 2}]
-    assert await _row_count(pg_engine, outbox_table) == 0
-
-
-async def test_handler_rearms_its_own_timer(pg_engine: AsyncEngine, outbox_table: Table) -> None:
-    received: list[int] = []
-    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
-    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
-
-    @broker.subscriber("ticks", min_fetch_interval=0.05, max_fetch_interval=0.1)
-    async def handle(body: dict) -> None:
-        received.append(body["n"])
-        if body["n"] < 3:
-            async with session_factory() as session, session.begin():
-                await broker.publish(
-                    {"n": body["n"] + 1},
-                    queue="ticks",
-                    session=session,
-                    activate_in=dt.timedelta(seconds=0.1),
-                    timer_id="tick",
-                    timer_conflict="extend",
-                )
-
-    async with broker:
-        async with session_factory() as session, session.begin():
-            await broker.publish({"n": 1}, queue="ticks", session=session, timer_id="tick")
-        await _wait_until(lambda: len(received) == 3, timeout=5.0)
-        await asyncio.sleep(0.3)
-    assert received == [1, 2, 3]
-    assert await _row_count(pg_engine, outbox_table) == 0
 
 
 async def test_concurrent_extends_keep_one_row_at_the_latest_deadline(
@@ -2650,26 +2542,6 @@ async def test_graceful_timeout_none_still_bounds_drain(
     assert elapsed < 0.7, f"broker.stop() took {elapsed:.3f}s — graceful_timeout=None did not clamp the drain"
     # Row preserved with its lease set; another replica reclaims after lease_ttl.
     assert await _row_count(pg_engine, outbox_table) == 1
-
-
-async def test_validate_schema_fails_when_rearm_check_constraint_missing(
-    pg_engine: AsyncEngine,
-    outbox_table: Table,
-) -> None:
-    drop_sql = f'ALTER TABLE "{outbox_table.name}" DROP CONSTRAINT "{outbox_table.name}_rearm_ck"'
-    async with pg_engine.begin() as conn:
-        await conn.exec_driver_sql(drop_sql)
-    client = OutboxClient(pg_engine, outbox_table)
-    with pytest.raises(RuntimeError, match="missing CHECK constraint enforcing 'rearm_at is null or acquired_token"):
-        await client.validate_schema()
-
-
-async def test_validate_schema_fails_when_rearm_columns_missing(pg_engine: AsyncEngine, outbox_table: Table) -> None:
-    async with pg_engine.begin() as conn:
-        await conn.exec_driver_sql(f'ALTER TABLE "{outbox_table.name}" DROP COLUMN rearm_headers')
-    client = OutboxClient(pg_engine, outbox_table)
-    with pytest.raises(RuntimeError, match=r"missing column 'rearm_headers'.*operations/alembic/#upgrading-to-019"):
-        await client.validate_schema()
 
 
 async def test_validate_schema_fails_when_lease_check_constraint_missing(

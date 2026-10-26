@@ -10,7 +10,6 @@ import uuid
 import warnings
 from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -126,9 +125,6 @@ def test_make_outbox_table_columns_present() -> None:
         "acquired_at",
         "acquired_token",
         "timer_id",
-        "rearm_at",
-        "rearm_payload",
-        "rearm_headers",
     }
     assert {c.name for c in t.columns} == expected
     assert t.name == "my_outbox"
@@ -1156,41 +1152,27 @@ async def test_broker_cancel_timer_rejects_non_async_session() -> None:
         await broker.cancel_timer(queue="orders", timer_id="x", session=object())  # ty: ignore[invalid-argument-type]
 
 
-def _cancel_session(row: object) -> AsyncMock:
-    session = AsyncMock(spec=AsyncSession)
-    result = MagicMock()
-    result.first.return_value = row
-    result.rowcount = 1
-    session.execute.return_value = result
-    return session
-
-
-async def test_broker_cancel_timer_never_deletes_a_leased_row() -> None:
-    """INVARIANT: ``cancel_timer`` deletes only an unleased row; on a leased one it only drops the queued rearm.
+async def test_broker_cancel_timer_emits_delete_with_lease_guard() -> None:
+    """INVARIANT: ``cancel_timer`` deletes only unleased rows -- the ``acquired_token IS NULL`` guard.
 
     Cancelling a row whose handler is already in flight would delete it out from under the worker,
     and the worker's terminal write would then find nothing: the delivery has happened but no
-    record of it survives. A leased row keeps its lease and its run; what the cancel removes is the
-    rearm that would have turned it back into a pending timer.
+    record of it survives. The guard makes an in-flight cancel a no-op returning ``False``, letting
+    the delivery complete normally. Dropping it turns a race that is currently invisible into
+    silent double-processing.
     """
     broker = _make_broker(engine=MagicMock())
-    session = _cancel_session(SimpleNamespace(id=7, acquired_token=uuid.uuid4()))
-    assert await broker.cancel_timer(queue="orders", timer_id="email-1", session=session) is True
-    locked, cleared = (call.args[0] for call in session.execute.await_args_list)
-    assert "FOR UPDATE" in str(locked.compile(dialect=postgresql.dialect()))
-    assert locked.compile().params == {"queue_1": "orders", "timer_id_1": "email-1"}
-    sql = str(cleared)
-    assert sql.startswith("UPDATE")
-    assert "rearm_at IS NOT NULL" in sql
-
-
-async def test_broker_cancel_timer_deletes_an_unleased_row() -> None:
-    broker = _make_broker(engine=MagicMock())
-    session = _cancel_session(SimpleNamespace(id=7, acquired_token=None))
-    assert await broker.cancel_timer(queue="orders", timer_id="email-1", session=session) is True
-    deleted = session.execute.await_args_list[1].args[0]
-    assert str(deleted).startswith("DELETE")
-    assert deleted.compile().params == {"id_1": 7}
+    session = AsyncMock(spec=AsyncSession)
+    session.execute.return_value.rowcount = 1
+    deleted = await broker.cancel_timer(queue="orders", timer_id="email-1", session=session)
+    assert deleted is True
+    delete_stmt = session.execute.await_args_list[0].args[0]
+    sql = str(delete_stmt)
+    assert "DELETE" in sql
+    assert "acquired_token IS NULL" in sql
+    params = delete_stmt.compile().params
+    assert params["queue_1"] == "orders"
+    assert params["timer_id_1"] == "email-1"
 
 
 async def test_broker_fetch_unprocessed_rejects_non_async_session() -> None:
@@ -1252,10 +1234,10 @@ async def test_broker_fetch_unprocessed_respects_explicit_limit() -> None:
 
 async def test_broker_cancel_timer_returns_false_when_nothing_deleted() -> None:
     broker = _make_broker(engine=MagicMock())
-    session = _cancel_session(None)
+    session = AsyncMock(spec=AsyncSession)
+    session.execute.return_value.rowcount = 0
     deleted = await broker.cancel_timer(queue="orders", timer_id="x", session=session)
     assert deleted is False
-    assert session.execute.await_count == 1
 
 
 async def test_broker_publish_batch_executes_single_insert_for_many_rows() -> None:
@@ -1434,11 +1416,6 @@ def test_compose_schema_mismatch_message_joins_multiple_errors() -> None:
 _CK_CONVENTION = {"ck": "ck_%(table_name)s_%(constraint_name)s"}
 _LEASE_CK_PREDICATE = "acquired_token is null = acquired_at is null"
 _LEASE_CK_DEFINITION = "CHECK (((acquired_token IS NULL) = (acquired_at IS NULL)))"
-_REARM_CK_PREDICATE = "rearm_at is null or acquired_token is not null"
-_REARM_CK_ROW = {
-    "name": "outbox_faststream_rearm_ck",
-    "definition": "CHECK (((rearm_at IS NULL) OR (acquired_token IS NOT NULL)))",
-}
 
 
 def _mock_check_constraint_connection(rows: list[dict[str, str]]) -> MagicMock:
@@ -1452,10 +1429,7 @@ def test_validate_check_constraints_passes_under_convention_resolved_name() -> N
     """A constraint carrying the convention-doubled name still passes — matched on predicate."""
     table = make_outbox_table(MetaData(naming_convention=_CK_CONVENTION), table_name="outbox_faststream")
     connection = _mock_check_constraint_connection(
-        [
-            {"name": "ck_outbox_faststream_outbox_faststream_lease_ck", "definition": _LEASE_CK_DEFINITION},
-            _REARM_CK_ROW,
-        ],
+        [{"name": "ck_outbox_faststream_outbox_faststream_lease_ck", "definition": _LEASE_CK_DEFINITION}],
     )
     assert _validate_check_constraints_sync(connection, table, None) == []
 
@@ -1464,7 +1438,7 @@ def test_validate_check_constraints_passes_under_literal_name() -> None:
     """The literal ``<table>_lease_ck`` a hand-written migration creates also passes — same predicate."""
     table = make_outbox_table(MetaData(naming_convention=_CK_CONVENTION), table_name="outbox_faststream")
     connection = _mock_check_constraint_connection(
-        [{"name": "outbox_faststream_lease_ck", "definition": _LEASE_CK_DEFINITION}, _REARM_CK_ROW],
+        [{"name": "outbox_faststream_lease_ck", "definition": _LEASE_CK_DEFINITION}],
     )
     assert _validate_check_constraints_sync(connection, table, None) == []
 
@@ -1472,16 +1446,12 @@ def test_validate_check_constraints_passes_under_literal_name() -> None:
 def test_validate_check_constraints_missing_describes_predicate() -> None:
     """When no live CHECK enforces the predicate, the error names the invariant, not a guessed name."""
     table = make_outbox_table(MetaData(), table_name="outbox_faststream")
-    connection = _mock_check_constraint_connection([])  # constraints absent from the live DB
+    connection = _mock_check_constraint_connection([])  # constraint absent from the live DB
     errors = _validate_check_constraints_sync(connection, table, None)
     assert errors == [
         (
             f"missing CHECK constraint enforcing '{_LEASE_CK_PREDICATE}' "
             f"(the lease invariant; name it e.g. outbox_faststream_lease_ck)"
-        ),
-        (
-            f"missing CHECK constraint enforcing '{_REARM_CK_PREDICATE}' "
-            f"(the queued-rearm invariant; name it e.g. outbox_faststream_rearm_ck)"
         ),
     ]
 
@@ -1491,7 +1461,7 @@ def test_validate_check_constraints_drifted_predicate_reported_as_missing() -> N
     table = make_outbox_table(MetaData(), table_name="outbox_faststream")
     drifted = "CHECK ((acquired_token IS NOT NULL OR acquired_at IS NULL))"
     connection = _mock_check_constraint_connection(
-        [{"name": "outbox_faststream_lease_ck", "definition": drifted}, _REARM_CK_ROW],
+        [{"name": "outbox_faststream_lease_ck", "definition": drifted}],
     )
     errors = _validate_check_constraints_sync(connection, table, None)
     assert errors == [

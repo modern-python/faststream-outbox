@@ -200,49 +200,6 @@ table in a non-default schema, drop an `INVALID` index left by a failed
 concurrent build before retrying, and don't apply what
 `alembic revision --autogenerate` produces for this change.
 
-## Upgrading to 0.19: add the rearm columns { #upgrading-to-019 }
-
-0.19 lets `publish(..., timer_conflict="extend")` reach a timer whose
-handler is running: the extend is queued in three new nullable columns,
-`rearm_at`, `rearm_payload` and `rearm_headers`, and applied when the run
-ends. A CHECK, `outbox_rearm_ck`, keeps a queued rearm off unleased rows.
-`validate_schema()` reports a table without them as drift.
-
-Run the migration **before** deploying 0.19, which reads and writes the new
-columns on every completion. Adding a nullable column without a default
-doesn't rewrite the table, and adding the CHECK as `NOT VALID` and
-validating it separately avoids holding an exclusive lock while the table is
-scanned.
-
-```python
-import sqlalchemy as sa
-from alembic import op
-from sqlalchemy.dialects import postgresql
-
-
-def upgrade() -> None:
-    op.add_column("outbox", sa.Column("rearm_at", sa.DateTime(timezone=True), nullable=True))
-    op.add_column("outbox", sa.Column("rearm_payload", sa.LargeBinary(), nullable=True))
-    op.add_column("outbox", sa.Column("rearm_headers", postgresql.JSONB(), nullable=True))
-    op.execute(
-        "ALTER TABLE outbox ADD CONSTRAINT outbox_rearm_ck "
-        "CHECK (rearm_at IS NULL OR acquired_token IS NOT NULL) NOT VALID"
-    )
-    op.execute("ALTER TABLE outbox VALIDATE CONSTRAINT outbox_rearm_ck")
-
-
-def downgrade() -> None:
-    op.drop_constraint("outbox_rearm_ck", "outbox", type_="check")
-    op.drop_column("outbox", "rearm_headers")
-    op.drop_column("outbox", "rearm_payload")
-    op.drop_column("outbox", "rearm_at")
-```
-
-Earlier versions ignore the new columns, and `validate_schema()` doesn't
-report extra columns, so deploying after the migration is safe. Don't
-downgrade while a rearm is queued: dropping the columns drops it, and the
-timer is deleted when its run ends.
-
 ## Adding the DLQ after the fact
 
 To opt into [Dead-letter queue](../usage/dlq.md) audit, add

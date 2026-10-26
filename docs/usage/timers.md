@@ -129,46 +129,23 @@ of order cannot pull a timer in. When the requested deadline is later, the
 row also takes the new payload and headers, and its retry history
 (`attempts_count`, `first_attempt_at`, `last_attempt_at`) is cleared. When
 it is not later, the row keeps everything it had and the call still returns
-its id. `deliveries_count` is not reset.
+its id. `deliveries_count` is never reset.
 
-Once your transaction commits, the timer will not fire before the deadline
-you asked for. Until the commit, workers skip the locked row; after it, they
-see the new deadline.
+An extend never touches a row a worker has leased, and returns `None` for
+it.
 
-### Extending a timer that is already running
+- An id means that once your transaction commits, the timer will not fire
+  before the deadline you asked for. Until the commit, workers skip the
+  locked row; after it, they see the new deadline.
+- `None` means a worker claimed the timer first. Its handler is running, or
+  will run when an expired lease is reclaimed, for the deadline it claimed.
+  Publishing again does not help while that row exists.
 
-When a worker has claimed the timer, its handler runs for the deadline it
-claimed, and the extend leaves that run alone. It queues a rearm on the row
-instead and still returns the row id. When the run ends, the rearm turns the
-row back into a pending timer with the queued deadline, payload and headers,
-so every accepted heartbeat leads to a firing at or after its deadline:
-
-- If the handler succeeds, the timer starts over at the rearm deadline, with
-  its retry history and `deliveries_count` cleared.
-- If the handler fails and would be retried, the rearm replaces the retry.
-  `deliveries_count` is kept, so `max_deliveries` still stops a handler that
-  fails on every run.
-- If the handler fails terminally, the failed run goes to the DLQ (when one
-  is configured) and the timer starts over at the rearm deadline.
-- If the worker dies, the expired lease is reclaimed and the run is
-  delivered again as usual; the rearm applies when that run ends.
-
-Queued rearms follow the same rule as pending timers: a rearm only moves
-later, and an extend whose deadline is not later than the running deadline
-queues nothing.
-
-A handler can rearm its own timer the same way, by publishing its own
-`timer_id` with `timer_conflict="extend"`, directly or through an
-`OutboxResponse`.
-
-The rearm doesn't undo what the running handler does. If a heartbeat must
-win over an expiry that is already running, have the handler re-check, in
-the same transaction as its side effects, whether the timeout still applies
-(for example against a last-activity column the heartbeat writes). The
-rearm then fires the handler again for the newer deadline.
-
-A rearm that becomes due when the run ends is picked up by polling, within
-the subscriber's `max_fetch_interval`. No NOTIFY is sent for it.
+If a late heartbeat must win over an expiry that is already running, the
+library cannot decide that for you. Have the handler re-check, in the same
+transaction as its side effects, whether the timeout still applies (for
+example against a last-activity column the heartbeat writes), and publish a
+fresh timer from the heartbeat once the old row is gone.
 
 Every extend writes a new row version, even when the deadline does not
 move. `next_attempt_at` is indexed, so these updates are not HOT updates:
@@ -178,24 +155,25 @@ Size autovacuum for your heartbeat rate (see
 
 ## Cancellation
 
-`broker.cancel_timer(*, queue, timer_id, session)` cancels a timer on the
-caller's session:
+`broker.cancel_timer(*, queue, timer_id, session)` issues a `DELETE` on
+the caller's session, but only if the row is not yet leased:
 
 ```python
-cancelled = await broker.cancel_timer(
+deleted = await broker.cancel_timer(
     queue="orders",
     timer_id="order-confirm-42",
     session=session,
 )
-# True if a pending timer or a queued rearm was dropped.
+# True if a row was deleted; False if it didn't exist or was already in flight.
 ```
 
-It locks the `(queue, timer_id)` row first. An unleased row is deleted. A
-leased row is never deleted, because its handler is already running: the
-cancel only drops a queued rearm, so the timer does not come back after the
-run, and returns `False` when there was none. If the timer fired in the race
-window between your application logic deciding to cancel and the cancel
-landing, the delivery completes normally.
+The underlying SQL is `DELETE WHERE queue=? AND timer_id=? AND
+acquired_token IS NULL`. The `acquired_token IS NULL` guard is
+load-bearing: it preserves the lease-token invariant by refusing to
+clobber a row whose handler is already running. If the timer fired in the
+race window between your application logic deciding to cancel and the
+`DELETE` landing, the delivery completes normally and `cancel_timer`
+returns `False`.
 
 ## Latency floor
 
@@ -220,7 +198,3 @@ on it, bind the `TestOutboxBroker` to a name and read
 `tb.fake_client.rows[0].next_attempt_at`.
 Pass `run_loops=True` if you need scheduled delivery to actually
 wait. See [Testing](./testing.md).
-
-A rearm applied when a run ends is not dispatched again in sync mode, so a
-handler that rearms its own timer runs once per publish. The rearmed row
-stays in `tb.fake_client.rows`.
