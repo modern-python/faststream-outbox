@@ -43,12 +43,19 @@ await broker.publish(
     activate_in: timedelta | None = None,
     activate_at: datetime | None = None,
     timer_id: str | None = None,
+    timer_conflict: Literal["ignore", "extend"] = "ignore",
 ) -> int | None
 ```
 
-Returns the inserted row's `id`, or `None` if a `timer_id` conflict made
-the insert a no-op. See [Timers](./timers.md) for `activate_in` /
-`activate_at` / `timer_id`.
+Returns the row's `id`, or `None` when a live row already holds the
+`(queue, timer_id)`. `timer_conflict` decides what happens on that conflict:
+
+- `"ignore"` (the default) leaves the existing row alone and returns `None`.
+- `"extend"` moves an unclaimed timer's deadline later in place and returns
+  its `id`. It returns `None` only when a worker has already claimed the
+  timer. See [Extending a timer](./timers.md#extending-a-timer).
+
+See [Timers](./timers.md) for `activate_in` / `activate_at` / `timer_id`.
 
 Passing anything other than an `AsyncSession` or `AsyncConnection` raises
 `TypeError`.
