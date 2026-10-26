@@ -19,7 +19,7 @@ from faststream.response.publish_type import PublishType
 from faststream.response.response import BatchPublishCommand, PublishCommand, Response
 
 from faststream_outbox._session import SessionOrConnection, require_session_or_connection
-from faststream_outbox.message import CORRELATION_ID_HEADER
+from faststream_outbox.message import CORRELATION_ID_HEADER, TimerConflict
 
 
 # Matches the ``queue`` and ``timer_id`` column width in ``make_outbox_table`` (``String(255)``).
@@ -38,6 +38,7 @@ def _validate_publish_args(
     activate_in: dt.timedelta | None,
     activate_at: dt.datetime | None,
     timer_id: str | None = None,
+    timer_conflict: TimerConflict = "ignore",
 ) -> None:
     """Fail-fast validation shared by every real outbox publish entry point.
 
@@ -70,6 +71,12 @@ def _validate_publish_args(
     if timer_id is not None and len(timer_id) > _MAX_QUEUE_LENGTH:
         msg = f"timer_id must be at most {_MAX_QUEUE_LENGTH} characters (got {len(timer_id)})"
         raise ValueError(msg)
+    if timer_conflict not in typing.get_args(TimerConflict):
+        msg = f"timer_conflict must be one of {typing.get_args(TimerConflict)} (got {timer_conflict!r})"
+        raise ValueError(msg)
+    if timer_conflict != "ignore" and timer_id is None:
+        msg = f"timer_conflict={timer_conflict!r} requires a timer_id"
+        raise ValueError(msg)
 
 
 # Marker exception raised by programming guards on the dispatch path (e.g. the
@@ -95,6 +102,7 @@ class OutboxPublishCommand(BatchPublishCommand):
         activate_in: dt.timedelta | None = None,
         activate_at: dt.datetime | None = None,
         timer_id: str | None = None,
+        timer_conflict: TimerConflict = "ignore",
         _publish_type: PublishType = PublishType.PUBLISH,
     ) -> None:
         _validate_publish_args(
@@ -104,6 +112,7 @@ class OutboxPublishCommand(BatchPublishCommand):
             activate_in=activate_in,
             activate_at=activate_at,
             timer_id=timer_id,
+            timer_conflict=timer_conflict,
         )
         # P4: timer_id / correlation_id are per-row single-publish concepts the batch
         # path silently drops (each batched row gets its own auto correlation_id and
@@ -123,6 +132,7 @@ class OutboxPublishCommand(BatchPublishCommand):
         self.activate_in = activate_in
         self.activate_at = activate_at
         self.timer_id = timer_id
+        self.timer_conflict = timer_conflict
 
     @property
     def queue(self) -> str:
@@ -199,6 +209,7 @@ class OutboxResponse(Response):
         activate_in: dt.timedelta | None = None,
         activate_at: dt.datetime | None = None,
         timer_id: str | None = None,
+        timer_conflict: TimerConflict = "ignore",
     ) -> None:
         _validate_publish_args(
             "OutboxResponse",
@@ -207,6 +218,7 @@ class OutboxResponse(Response):
             activate_in=activate_in,
             activate_at=activate_at,
             timer_id=timer_id,
+            timer_conflict=timer_conflict,
         )
         if correlation_id is None and headers:
             correlation_id = headers.get(CORRELATION_ID_HEADER)
@@ -216,6 +228,7 @@ class OutboxResponse(Response):
         self.activate_in = activate_in
         self.activate_at = activate_at
         self.timer_id = timer_id
+        self.timer_conflict = timer_conflict
 
     def as_publish_command(self) -> OutboxPublishCommand:
         return OutboxPublishCommand(
@@ -227,4 +240,5 @@ class OutboxResponse(Response):
             activate_in=self.activate_in,
             activate_at=self.activate_at,
             timer_id=self.timer_id,
+            timer_conflict=self.timer_conflict,
         )

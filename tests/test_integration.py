@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import datetime as dt
+import json
 import logging
 import uuid
 from collections.abc import Mapping
@@ -919,6 +920,253 @@ async def test_publish_timer_id_distinct_queues_are_independent(pg_engine, outbo
     assert a is not None
     assert b is not None
     assert await _row_count(pg_engine, outbox_table) == 2
+
+
+async def _timer_row(engine: AsyncEngine, table: Table, timer_id: str) -> dict[str, Any]:
+    async with engine.connect() as conn:
+        result = await conn.execute(select(table).where(table.c.timer_id == timer_id))
+        return dict(result.mappings().one())
+
+
+async def test_extend_holds_off_a_claim_until_it_commits(pg_engine: AsyncEngine, outbox_table: Table) -> None:
+    """INVARIANT: a fetch never claims a timer whose extend has not committed yet.
+
+    The extend locks the row it updates, and the claim skips locked rows. Once the extend commits the
+    claim sees the new deadline, so an extend that returned an id has stopped the old deadline from
+    firing. Dropping ``SKIP LOCKED`` from the claim, or extending through a read-then-write pair,
+    lets a worker fire the stale deadline while the heartbeat is in flight.
+    """
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with session_factory() as session, session.begin():
+        await broker.publish({"v": 1}, queue="orders", session=session, timer_id="op-1")
+
+    async with session_factory() as session, session.begin():
+        rid = await broker.publish(
+            {"v": 2},
+            queue="orders",
+            session=session,
+            activate_in=dt.timedelta(minutes=10),
+            timer_id="op-1",
+            timer_conflict="extend",
+        )
+        assert rid is not None
+        async with pg_engine.connect() as conn:
+            assert await broker.client.fetch(conn, ["orders"], limit=10, lease_ttl_seconds=60.0) == []
+    async with pg_engine.connect() as conn:
+        assert await broker.client.fetch(conn, ["orders"], limit=10, lease_ttl_seconds=60.0) == []
+    row = await _timer_row(pg_engine, outbox_table, "op-1")
+    assert row["acquired_token"] is None
+
+
+async def test_extend_waits_for_an_uncommitted_claim_and_returns_none(
+    pg_engine: AsyncEngine, outbox_table: Table
+) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    client = OutboxClient(pg_engine, outbox_table)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with session_factory() as session, session.begin():
+        await broker.publish({"v": 1}, queue="orders", session=session, timer_id="op-1")
+
+    async def _extend() -> int | None:
+        async with session_factory() as session, session.begin():
+            return await broker.publish(
+                {"v": 2},
+                queue="orders",
+                session=session,
+                activate_in=dt.timedelta(minutes=10),
+                timer_id="op-1",
+                timer_conflict="extend",
+            )
+
+    token = uuid.uuid4()
+    async with pg_engine.connect() as conn:
+        async with conn.begin():
+            params = {"queues": ["orders"], "limit": 10, "lease_ttl": 60.0, "token": token}
+            assert len((await conn.execute(client._fetch_stmt, params)).all()) == 1  # noqa: SLF001
+            extend = asyncio.create_task(_extend())
+            await asyncio.sleep(0.3)
+            assert not extend.done()
+        assert await extend is None
+    row = await _timer_row(pg_engine, outbox_table, "op-1")
+    assert row["acquired_token"] == token
+    assert json.loads(row["payload"]) == {"v": 1}
+
+
+async def test_concurrent_extends_keep_one_row_at_the_latest_deadline(
+    pg_engine: AsyncEngine, outbox_table: Table
+) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    base = dt.datetime.now(tz=dt.UTC) + dt.timedelta(minutes=10)
+    deadlines = [base + dt.timedelta(seconds=n) for n in (3, 9, 1, 7, 5, 8, 2, 6, 4, 0)]
+
+    async def _extend(at: dt.datetime) -> int | None:
+        async with session_factory() as session, session.begin():
+            return await broker.publish(
+                {"at": at.isoformat()},
+                queue="orders",
+                session=session,
+                activate_at=at,
+                timer_id="op-1",
+                timer_conflict="extend",
+            )
+
+    ids = await asyncio.gather(*(_extend(at) for at in deadlines))
+    assert len(set(ids)) == 1
+    assert None not in ids
+    row = await _timer_row(pg_engine, outbox_table, "op-1")
+    assert row["next_attempt_at"] == max(deadlines)
+    assert await _row_count(pg_engine, outbox_table) == 1
+
+
+async def test_rolled_back_extend_leaves_the_timer_as_it_was(pg_engine: AsyncEngine, outbox_table: Table) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with session_factory() as session, session.begin():
+        await broker.publish(
+            {"v": 1}, queue="orders", session=session, activate_in=dt.timedelta(minutes=1), timer_id="op-1"
+        )
+    before = await _timer_row(pg_engine, outbox_table, "op-1")
+    async with session_factory() as session:
+        await session.begin()
+        for timer_id in ("op-1", "op-2"):
+            await broker.publish(
+                {"v": 2},
+                queue="orders",
+                session=session,
+                activate_in=dt.timedelta(minutes=10),
+                timer_id=timer_id,
+                timer_conflict="extend",
+            )
+        await session.rollback()
+    assert await _timer_row(pg_engine, outbox_table, "op-1") == before
+    assert await _row_count(pg_engine, outbox_table) == 1
+
+
+async def test_extend_is_one_statement(pg_engine: AsyncEngine, outbox_table: Table) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with session_factory() as session, session.begin():
+        await broker.publish(
+            {"v": 1}, queue="orders", session=session, activate_in=dt.timedelta(minutes=1), timer_id="op-1"
+        )
+    statements: list[str] = []
+
+    def _listener(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ARG001
+        statements.append(statement)
+
+    async with session_factory() as session, session.begin():
+        await session.connection()
+        event.listen(pg_engine.sync_engine, "before_cursor_execute", _listener)
+        try:
+            await broker.publish(
+                {"v": 2},
+                queue="orders",
+                session=session,
+                activate_in=dt.timedelta(minutes=10),
+                timer_id="op-1",
+                timer_conflict="extend",
+            )
+        finally:
+            event.remove(pg_engine.sync_engine, "before_cursor_execute", _listener)
+    assert len(statements) == 1
+
+
+@pytest.mark.parametrize(("activate_in", "notifies"), [(dt.timedelta(0), 1), (dt.timedelta(minutes=10), 0)])
+async def test_extend_notifies_only_when_the_timer_is_due(
+    pg_engine: AsyncEngine, outbox_table: Table, activate_in: dt.timedelta, notifies: int
+) -> None:
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with session_factory() as session, session.begin():
+        await broker.publish({"v": 1}, queue="orders", session=session, timer_id="op-1")
+    with _count_pg_notify(pg_engine) as count:
+        async with session_factory() as session, session.begin():
+            await broker.publish(
+                {"v": 2},
+                queue="orders",
+                session=session,
+                activate_in=activate_in,
+                timer_id="op-1",
+                timer_conflict="extend",
+            )
+    assert count[0] == notifies
+
+
+async def test_extended_timer_fires_once_with_the_latest_payload(pg_engine: AsyncEngine, outbox_table: Table) -> None:
+    received: list[dict] = []
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+
+    @broker.subscriber("orders", min_fetch_interval=0.05, max_fetch_interval=0.1)
+    async def handle(body: dict) -> None:
+        received.append(body)
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+
+    async def _ping(n: int, activate_in: dt.timedelta) -> None:
+        async with session_factory() as session, session.begin():
+            await broker.publish(
+                {"ping": n},
+                queue="orders",
+                session=session,
+                activate_in=activate_in,
+                timer_id="op-1",
+                timer_conflict="extend",
+            )
+
+    async with broker:
+        await _ping(1, dt.timedelta(seconds=0.5))
+        await _ping(2, dt.timedelta(seconds=1.5))
+        await asyncio.sleep(1.0)
+        assert received == []
+        await _wait_until(lambda: received, timeout=3.0)
+        await asyncio.sleep(0.3)
+    assert received == [{"ping": 2}]
+
+
+async def test_heartbeat_after_an_extend_on_a_running_timer_arms_a_new_one(
+    pg_engine: AsyncEngine, outbox_table: Table
+) -> None:
+    received: list[dict] = []
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
+    handler_started = asyncio.Event()
+    release_handler = asyncio.Event()
+
+    @broker.subscriber("orders", min_fetch_interval=0.05, max_fetch_interval=0.1)
+    async def handle(body: dict) -> None:
+        received.append(body)
+        handler_started.set()
+        await release_handler.wait()
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+
+    async def _ping(n: int, activate_in: dt.timedelta) -> int | None:
+        async with session_factory() as session, session.begin():
+            return await broker.publish(
+                {"ping": n},
+                queue="orders",
+                session=session,
+                activate_in=activate_in,
+                timer_id="op-1",
+                timer_conflict="extend",
+            )
+
+    async with broker:
+        await _ping(1, dt.timedelta(0))
+        await asyncio.wait_for(handler_started.wait(), timeout=3.0)
+        lost = await _ping(2, dt.timedelta(seconds=0.3))
+        release_handler.set()
+        healed = None
+        for _ in range(60):
+            healed = await _ping(3, dt.timedelta(seconds=0.3))
+            if healed is not None:
+                break
+            await asyncio.sleep(0.05)  # pragma: no cover - only while the finished handler's DELETE is in flight
+        await _wait_until(lambda: len(received) == 2, timeout=3.0)
+    assert lost is None
+    assert healed is not None
+    assert received == [{"ping": 1}, {"ping": 3}]
 
 
 async def test_cancel_timer_before_fire_prevents_delivery(pg_engine, outbox_table) -> None:

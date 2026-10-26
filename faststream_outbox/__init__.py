@@ -1,6 +1,6 @@
 from faststream_outbox.autovacuum import outbox_autovacuum_ddl
 from faststream_outbox.broker import OutboxBroker
-from faststream_outbox.message import OutboxMessage
+from faststream_outbox.message import OutboxMessage, TimerConflict
 from faststream_outbox.metrics import MetricsRecorder
 from faststream_outbox.publisher.usecase import OutboxPublisher
 from faststream_outbox.response import OutboxResponse
@@ -29,6 +29,7 @@ __all__ = [
     "OutboxRouter",
     "RetryStrategyProto",
     "TestOutboxBroker",
+    "TimerConflict",
     "make_dlq_table",
     "make_outbox_table",
     "outbox_autovacuum_ddl",

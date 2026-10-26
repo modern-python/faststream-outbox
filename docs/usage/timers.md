@@ -107,6 +107,66 @@ fresh. So `timer_id` is a dedup key for in-flight / pending timers, not
 a permanent idempotency key: it won't stop a value from being re-published
 after the original delivery has completed.
 
+## Extending a timer
+
+Pass `timer_conflict="extend"` to push a pending timer's deadline later
+instead of leaving it alone. A heartbeat that keeps a per-operator timeout
+alive looks like this:
+
+```python
+rid = await broker.publish(
+    {"operator_id": operator_id},
+    queue="operator-timeouts",
+    session=session,
+    activate_in=dt.timedelta(minutes=10),
+    timer_id=f"operator-{operator_id}",
+    timer_conflict="extend",
+)
+```
+
+The first call inserts the timer. Later calls update the same row in one
+`INSERT ... ON CONFLICT DO UPDATE` statement, so the row id stays the same and
+there is never more than one live row per `(queue, timer_id)`. The default,
+`timer_conflict="ignore"`, keeps the behavior described above.
+
+The deadline only moves later. An extend sets `next_attempt_at` to the later
+of the stored deadline and the requested one, so heartbeats that commit out
+of order cannot pull a timer in. When the requested deadline is later, the
+row also takes the new payload and headers, and its retry history
+(`attempts_count`, `first_attempt_at`, `last_attempt_at`) is cleared. When
+it is not later, the row keeps everything it had and the call still returns
+its id. `deliveries_count` is never reset.
+
+An extend never touches a row a worker has leased, and returns `None` for
+it.
+
+- An id means that once your transaction commits, the timer will not fire
+  before the deadline you asked for. Until the commit, workers skip the
+  locked row; after it, they see the new deadline.
+- `None` means a worker claimed the timer first. Its handler is running, or
+  will run when an expired lease is reclaimed, for the deadline it claimed.
+  Publishing again does not help while that row exists.
+
+For a heartbeat, `None` costs at most one expiry. The handler finishes, its
+row is deleted, and the next heartbeat inserts a fresh timer. The case to
+think about is a heartbeat that lands while the expiry runs and is then the
+last one: the expiry has already fired, and no timer is left to fire again.
+If your app marks the operator as active on every heartbeat, that mark can
+outlive the expiry handler's write and stay until the next heartbeat. When
+that matters, either:
+
+- have the handler re-check, in the same transaction as its side effects,
+  whether the timeout still applies (for example against a last-activity
+  column the heartbeat writes), or
+- retry the publish after a short delay when it returns `None`, by which time
+  the old row is usually gone.
+
+Every extend writes a new row version, even when the deadline does not
+move. `next_attempt_at` is indexed, so these updates are not HOT updates:
+each one adds index entries and a dead tuple for autovacuum to clean up.
+Size autovacuum for your heartbeat rate (see
+[Alembic migrations](../operations/alembic.md), `outbox_autovacuum_ddl`).
+
 ## Cancellation
 
 `broker.cancel_timer(*, queue, timer_id, session)` issues a `DELETE` on

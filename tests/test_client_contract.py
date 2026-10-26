@@ -37,7 +37,7 @@ from sqlalchemy import MetaData, Table, insert, select, text
 from sqlalchemy.exc import StatementError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
-from faststream_outbox import make_dlq_table, make_outbox_table
+from faststream_outbox import TimerConflict, make_dlq_table, make_outbox_table
 from faststream_outbox._time import utcnow
 from faststream_outbox.client import OutboxClient
 from faststream_outbox.message import OutboxInnerMessage
@@ -67,6 +67,7 @@ class _FakeHarness:
         activate_in: dt.timedelta | None = None,
         activate_at: dt.datetime | None = None,
         timer_id: str | None = None,
+        timer_conflict: TimerConflict = "ignore",
     ) -> int | None:
         return await self._client.insert(
             AsyncMock(spec=AsyncSession),
@@ -76,6 +77,7 @@ class _FakeHarness:
             activate_in=activate_in,
             activate_at=activate_at,
             timer_id=timer_id,
+            timer_conflict=timer_conflict,
         )
 
     async def insert_batch(
@@ -158,9 +160,12 @@ class _FakeHarness:
             "id": row.id,
             "queue": row.queue,
             "payload": bytes(row.payload),
+            "headers": row.headers,
             "acquired_token": row.acquired_token,
             "acquired_at": row.acquired_at,
             "attempts_count": row.attempts_count,
+            "first_attempt_at": row.first_attempt_at,
+            "last_attempt_at": row.last_attempt_at,
             "deliveries_count": row.deliveries_count,
             "next_attempt_at": row.next_attempt_at,
             "timer_id": row.timer_id,
@@ -195,6 +200,7 @@ class _RealHarness:
         activate_in: dt.timedelta | None = None,
         activate_at: dt.datetime | None = None,
         timer_id: str | None = None,
+        timer_conflict: TimerConflict = "ignore",
     ) -> int | None:
         async with self._sessions() as session, session.begin():
             return await self._client.insert(
@@ -205,6 +211,7 @@ class _RealHarness:
                 activate_in=activate_in,
                 activate_at=activate_at,
                 timer_id=timer_id,
+                timer_conflict=timer_conflict,
             )
 
     async def insert_batch(
@@ -415,6 +422,108 @@ async def test_insert_reuses_timer_id_after_delivery(contract: _Harness) -> None
     second = await contract.insert(queue="orders", timer_id="t1")
     assert second is not None
     assert second != first
+
+
+async def test_insert_with_explicit_ignore_keeps_the_first_row(contract: _Harness) -> None:
+    first = await contract.insert(queue="orders", payload=b"a", timer_id="t1")
+    assert first is not None
+    assert await contract.insert(queue="orders", payload=b"b", timer_id="t1", timer_conflict="ignore") is None
+    row = await contract.get_row(first)
+    assert row is not None
+    assert row["payload"] == b"a"
+
+
+async def test_insert_extend_inserts_a_missing_timer(contract: _Harness) -> None:
+    rid = await contract.insert(queue="orders", timer_id="t1", timer_conflict="extend")
+    assert rid is not None
+    assert await contract.queue_ids("orders") == [rid]
+
+
+async def test_insert_extend_moves_a_pending_deadline_later_in_place(contract: _Harness) -> None:
+    rid = await contract.seed(queue="orders", payload=b"old", timer_id="t1", next_attempt_offset=60.0)
+    at = utcnow() + dt.timedelta(minutes=10)
+    extended = await contract.insert(
+        queue="orders", payload=b"new", headers={"k": "v"}, activate_at=at, timer_id="t1", timer_conflict="extend"
+    )
+    assert extended == rid
+    assert await contract.queue_ids("orders") == [rid]
+    row = await contract.get_row(rid)
+    assert row is not None
+    assert (row["next_attempt_at"], row["payload"], row["headers"]) == (at, b"new", {"k": "v"})
+
+
+async def test_insert_extend_never_moves_a_deadline_earlier(contract: _Harness) -> None:
+    """INVARIANT: an extend keeps the later of the stored and requested deadlines, with the stored payload.
+
+    Heartbeats commit out of order. If an older ping committing last could pull the deadline in, a timer
+    would fire while the caller is still alive. A mode that can move deadlines earlier is a different
+    contract and needs its own ``TimerConflict`` value.
+    """
+    rid = await contract.seed(queue="orders", payload=b"newer", timer_id="t1", next_attempt_offset=600.0)
+    before = await contract.get_row(rid)
+    assert before is not None
+    stale = await contract.insert(
+        queue="orders",
+        payload=b"older",
+        activate_at=utcnow() + dt.timedelta(minutes=1),
+        timer_id="t1",
+        timer_conflict="extend",
+    )
+    assert stale == rid
+    after = await contract.get_row(rid)
+    assert after is not None
+    assert (after["next_attempt_at"], after["payload"]) == (before["next_attempt_at"], b"newer")
+
+
+async def test_insert_extend_resets_the_retry_history(contract: _Harness) -> None:
+    rid = await contract.insert(queue="orders", timer_id="t1")
+    assert rid is not None
+    [msg] = await contract.fetch(["orders"], limit=10, lease_ttl_seconds=60.0)
+    assert msg.acquired_token is not None
+    now = utcnow()
+    assert await contract.mark_pending(
+        rid, msg.acquired_token, delay_seconds=60.0, attempts_count=2, first_attempt_at=now, last_attempt_at=now
+    )
+    at = utcnow() + dt.timedelta(minutes=10)
+    assert await contract.insert(queue="orders", activate_at=at, timer_id="t1", timer_conflict="extend") == rid
+    row = await contract.get_row(rid)
+    assert row is not None
+    assert (row["attempts_count"], row["first_attempt_at"], row["last_attempt_at"]) == (0, None, None)
+    assert row["deliveries_count"] == 1
+
+
+@pytest.mark.parametrize("acquired_age", [0.0, 3600.0])
+async def test_insert_extend_leaves_a_leased_timer_to_its_worker(contract: _Harness, acquired_age: float) -> None:
+    """INVARIANT: an extend never touches a leased timer and returns ``None`` for it.
+
+    Once a worker holds the lease, its handler may already have acted on the old deadline. Rewriting
+    the row, or clearing the lease so the upsert lands, would report a refresh the handler never saw
+    and let a stale completion delete the refreshed timer. An expired lease is still a lease: the
+    fetch loop reclaims the row, so the caller must handle ``None`` the same way.
+    """
+    token = uuid.uuid4()
+    rid = await contract.seed(
+        queue="orders", payload=b"old", timer_id="t1", leased_token=token, acquired_age=acquired_age
+    )
+    before = await contract.get_row(rid)
+    extended = await contract.insert(
+        queue="orders",
+        payload=b"new",
+        activate_at=utcnow() + dt.timedelta(minutes=10),
+        timer_id="t1",
+        timer_conflict="extend",
+    )
+    assert extended is None
+    assert await contract.get_row(rid) == before
+    assert await contract.delete(rid, token)
+
+
+async def test_insert_extend_same_timer_id_on_another_queue_lands(contract: _Harness) -> None:
+    first = await contract.insert(queue="orders", timer_id="t1", timer_conflict="extend")
+    second = await contract.insert(queue="audit", timer_id="t1", timer_conflict="extend")
+    assert first is not None
+    assert second is not None
+    assert first != second
 
 
 async def test_insert_activate_in_gates_the_row(contract: _Harness) -> None:

@@ -36,6 +36,9 @@ _logger = logging.getLogger("faststream_outbox.message")
 # API change. The DLQ column is sized to accommodate growth; see ``schema.py``.
 DLQFailureReason = Literal["max_deliveries", "retry_terminal", "rejected"]
 
+# What ``publish(..., timer_id=...)`` does when a live row already holds that ``(queue, timer_id)``.
+TimerConflict = Literal["ignore", "extend"]
+
 
 # Canonical delivery outcome. ``ack``/``nack``/``reject`` record exactly one of these
 # on ``OutboxInnerMessage.outcome``; the worker loop matches on the variant to pick the
