@@ -131,7 +131,7 @@ def make_outbox_table(metadata: "MetaData", table_name: str = "outbox") -> Table
         table.c.id,
         postgresql_where=table.c.acquired_token.is_(None),
     )
-    # Partial unique index that backs `publish(..., timer_id=...)`'s ON CONFLICT DO NOTHING
+    # Partial unique index that backs `publish(..., timer_id=...)`'s ON CONFLICT arbiter
     # and the (queue, timer_id) lookup in `cancel_timer`. Only enforced when timer_id is set,
     # so non-timer rows remain unconstrained.
     Index(
