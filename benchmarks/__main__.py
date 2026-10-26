@@ -1,17 +1,19 @@
-"""CLI: `python -m benchmarks run` / `python -m benchmarks check`.
+"""CLI: `python -m benchmarks run` / `check` / `extend`.
 
-Invoked through `just bench` / `just bench-check`, which run it inside docker compose
-so the postgres service has pg_stat_statements preloaded.
+Invoked through `just bench` / `just bench-check` / `just bench-extend`, which run it inside
+docker compose so the postgres service has pg_stat_statements preloaded.
 """
 
 import argparse
 import asyncio
+import dataclasses
 import json
 import os
 import pathlib
 import sys
 
-from benchmarks.config import DEFAULT_DSN, RunConfig
+from benchmarks.config import DEFAULT_DSN, ExtendConfig, RunConfig
+from benchmarks.extend import ExtendResult, format_extend, run_extend, to_json
 from benchmarks.report import compare, format_markdown, format_table, to_baseline
 from benchmarks.workload import RunResult, make_engine, run_consumer, run_producer
 
@@ -22,6 +24,19 @@ BASELINE_PATH = pathlib.Path(__file__).parent / "baseline.json"
 # the write path (two statements per publish).
 _WORKER_COUNTS = (1, 2, 4)
 _BATCH_SIZES = (10, 100)
+
+# The extend sweep: commit per ping against bounded batches at rising rates, with each identity
+# pinged every 2 s, plus two points where 60 identities share the load so pings to one timer collide.
+_EXTEND_POINTS = (
+    ExtendConfig(name="r1000-b1", rate=1_000, timers=2_000),
+    ExtendConfig(name="r3000-b1", rate=3_000, timers=6_000),
+    ExtendConfig(name="r3000-b10", rate=3_000, timers=6_000, pings_per_transaction=10),
+    ExtendConfig(name="r5000-b1", rate=5_000, timers=10_000),
+    ExtendConfig(name="r10000-b1", rate=10_000, timers=20_000),
+    ExtendConfig(name="r10000-b50", rate=10_000, timers=20_000, pings_per_transaction=50),
+    ExtendConfig(name="hot-r3000-b1", rate=3_000, timers=60),
+    ExtendConfig(name="hot-r3000-b10", rate=3_000, timers=60, pings_per_transaction=10),
+)
 
 
 def _median_by_wall(runs: list[RunResult]) -> RunResult:
@@ -107,6 +122,28 @@ def _run(dsn: str, messages: int, repeats: int, *, write_baseline: bool) -> int:
     return 0
 
 
+async def _run_extend_sweep(dsn: str, points: list[ExtendConfig]) -> list[ExtendResult]:
+    results = []
+    for cfg in points:
+        result = await run_extend(dsn, cfg)
+        sys.stdout.write(f"{cfg.name}: {result.committed} pings in {result.wall_seconds:.1f}s\n")
+        sys.stdout.flush()
+        results.append(result)
+    return results
+
+
+def _extend(dsn: str, *, seconds: float | None, only: list[str] | None, json_path: str | None) -> int:
+    """Run the extend sweep and print its tables; nothing is gated."""
+    points = [p for p in _EXTEND_POINTS if not only or p.name in only]
+    if seconds is not None:
+        points = [dataclasses.replace(p, seconds=seconds) for p in points]
+    results = asyncio.run(_run_extend_sweep(dsn, points))
+    sys.stdout.write("\n" + format_extend(results) + "\n")
+    if json_path is not None:
+        pathlib.Path(json_path).write_text(to_json(results) + "\n")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Two subcommands with their own flags, so a misplaced flag errors at parse.
 
@@ -126,6 +163,11 @@ def _build_parser() -> argparse.ArgumentParser:
     # only burns CI time -- it takes no --repeats/--messages (pinned to the baseline).
     check = subparsers.add_parser("check", help="gate the counters against baseline.json")
     check.add_argument("--markdown", action="store_true")
+
+    extend = subparsers.add_parser("extend", help="run the timer extend sweep and print the tables")
+    extend.add_argument("--seconds", type=float)
+    extend.add_argument("--only", nargs="+", choices=[p.name for p in _EXTEND_POINTS])
+    extend.add_argument("--json")
     return parser
 
 
@@ -136,6 +178,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "check":
         return _check(dsn, markdown=args.markdown)
+    if args.command == "extend":
+        return _extend(dsn, seconds=args.seconds, only=args.only, json_path=args.json)
     return _run(dsn, args.messages, args.repeats, write_baseline=args.write_baseline)
 
 

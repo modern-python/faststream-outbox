@@ -10,7 +10,8 @@ fetch loop's wall-clock polling.
 import pytest
 
 from benchmarks.__main__ import _build_parser
-from benchmarks.config import RunConfig
+from benchmarks.config import ExtendConfig, RunConfig
+from benchmarks.extend import ExtendResult, format_extend, percentiles
 from benchmarks.probes import ProbeResult
 from benchmarks.report import EXACT_KEYS, compare, format_markdown, format_table, normalize, to_baseline
 from benchmarks.workload import RunResult
@@ -334,3 +335,59 @@ def test_baseline_keys_name_the_interval_and_transaction_variants() -> None:
         "consumer/w1/b100/interval1-10",
         "producer/w1/b100/ppt1",
     }
+
+
+def test_percentiles_use_nearest_rank() -> None:
+    assert percentiles([float(n) for n in range(1, 101)]) == {"p50": 50.0, "p95": 95.0, "p99": 99.0, "max": 100.0}
+
+
+def test_percentiles_of_nothing_are_zero() -> None:
+    assert percentiles([]) == {"p50": 0.0, "p95": 0.0, "p99": 0.0, "max": 0.0}
+
+
+def test_extend_config_derives_the_ping_interval_and_silent_share() -> None:
+    cfg = ExtendConfig(name="p", rate=1_000, timers=2_000)
+    assert (cfg.ping_interval, cfg.silent_timers, cfg.silence_at) == (2.0, 100, 7.5)
+
+
+def test_extend_config_rejects_pings_slower_than_the_timeout() -> None:
+    with pytest.raises(ValueError, match=r"pings every 6\.00s"):
+        ExtendConfig(name="p", rate=1_000, timers=6_000)
+
+
+def test_extend_config_rejects_a_run_too_short_for_silent_timers_to_fire() -> None:
+    with pytest.raises(ValueError, match="too short"):
+        ExtendConfig(name="p", rate=1_000, timers=2_000, seconds=10.0)
+
+
+def test_format_extend_reports_saturation_and_per_ping_wal() -> None:
+    result = ExtendResult(
+        config=ExtendConfig(name="r1000-b1", rate=1_000, timers=2_000),
+        wall_seconds=30.0,
+        offered=30_000,
+        offered_seconds=30.0,
+        committed=30_000,
+        transactions=30_000,
+        leased=2,
+        errors={"TimeoutError": 5},
+        saturated=True,
+        latency={"p50": 0.002, "p95": 0.004, "p99": 0.017, "max": 0.05},
+        pool_wait={"p50": 0.0, "p95": 0.0, "p99": 0.0003, "max": 0.001},
+        lateness={"p50": 0.98, "p95": 1.0, "p99": 1.0, "max": 1.02},
+        expired_silent=100,
+        false_expiries=0,
+        statement_ms={"insert": (0.024, 0.5), "with": (0.1, 0.4)},
+        autovacuum_count=1,
+        live_tuples=2_000,
+        probe=_probe(insert_calls=30_000, wal_bytes=18_000_000, wal_records=199_000, tup_upd=30_000, tup_hot_upd=0),
+    )
+    table = format_extend([result])
+    assert "| r1000-b1 (saturated) | 1,000 | 1,000 | 1,000 | 2.0 / 4.0 / 17.0 |" in table
+    assert "TimeoutError 5" in table
+    assert "| r1000-b1 | 600 | 6.63 |" in table
+    assert "| 100 / 100 | 0 | 0.98 / 1.02 | 2 |" in table
+
+
+def test_extend_accepts_its_flags() -> None:
+    args = _build_parser().parse_args(["extend", "--seconds", "12", "--only", "r1000-b1", "--json", "out.json"])
+    assert (args.seconds, args.only, args.json) == (12.0, ["r1000-b1"], "out.json")

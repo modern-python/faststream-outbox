@@ -64,6 +64,10 @@ bench-check: down && down
 bench-report: down && down
     docker compose run -T application uv run python -m benchmarks check --markdown
 
+# Heartbeat load on timer extends: latency, WAL, dead tuples, expiry lateness. Not gated.
+bench-extend *args: down && down
+    docker compose run application uv run python -m benchmarks extend {{ args }}
+
 # Serve docs at http://127.0.0.1:8000 with hot-reload on save.
 docs-serve:
     uvx --with-requirements docs/requirements.txt mkdocs serve

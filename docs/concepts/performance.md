@@ -89,6 +89,41 @@ settings are applied. Full guidance, the eligibility-vs-throughput split, and th
 I/O caution on `vacuum_cost_delay=0` are in
 [Autovacuum tuning](../operations/alembic.md#autovacuum-tuning-recommended).
 
+## Timer extends under heartbeat load
+
+Each `publish(..., timer_conflict="extend")` is one statement, and Postgres
+runs it in about 0.02 ms. The cost is what comes with it:
+
+- a commit, if every ping has its own transaction;
+- about 550 to 650 bytes and 5 to 7 records of WAL;
+- one dead tuple. These are never HOT updates, because `next_attempt_at` is
+  indexed.
+
+So the ceiling is set by commits and round trips, not by the statement.
+
+One run of `just bench-extend`, on an Apple M2 with OrbStack, Postgres 17 at
+default settings, one Python client process and a 20-connection pool. Each
+identity pings every 2 seconds and has a 6-second timeout:
+
+| Offered pings/s | Pings per transaction | Kept up | Ping p99 | Expiry lateness max |
+|---|---|---|---|---|
+| 1,000 | 1 | yes | 12 ms | 0.2 s |
+| 3,000 | 1 | yes | 193 ms | 0.7 s |
+| 3,000 | 10 | yes | 14 ms | 1.2 s |
+| 5,000 | 1 | no | 17 s | 12.8 s |
+| 10,000 | 50 | yes | 618 ms | 3.2 s |
+
+Read this as a shape, not as capacity numbers for your setup. Once pings fall
+behind, live timers start to fire: thousands of false expiries in the
+saturated runs. Plan for a wide margin. Grouping pings into short transactions
+(sorted by `timer_id`, so concurrent transactions lock rows in the same order)
+raises the ceiling a lot, at the cost of latency.
+
+Dead tuples pile up at the ping rate, about 150,000 in a minute at 10,000
+pings/s, and autovacuum only runs once per `autovacuum_naptime`, which
+defaults to 60 seconds. The claim query slowed from about 0.2 to 1 ms over
+such a minute.
+
 ## Measuring it yourself
 
 The gated numbers above come from the repository's benchmark harness. Contributors
@@ -98,6 +133,8 @@ can run it against a local Postgres:
   DB counters (split by leading SQL keyword).
 - `just bench-check` gates the deterministic counts against
   `benchmarks/baseline.json`; this is what CI runs.
+- `just bench-extend` runs the timer extend sweep above and prints its tables.
+  Nothing in it is gated: every number depends on timing.
 
 The statement-count reductions (`select_calls`, `delete_calls`, `insert_calls`,
 …) are machine-independent and exact. Wall-clock throughput is not: it scales
