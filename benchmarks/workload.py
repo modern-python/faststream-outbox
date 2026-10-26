@@ -48,11 +48,13 @@ class RunResult:
     probe: ProbeResult
 
 
-def make_engine(dsn: str) -> AsyncEngine:
+def make_engine(dsn: str, *, pool_size: int | None = None) -> AsyncEngine:
     """Engine tagged with APPLICATION_NAME so the ownership check can recognize us."""
+    pool = {} if pool_size is None else {"pool_size": pool_size, "max_overflow": 0}
     return create_async_engine(
         dsn,
         connect_args={"server_settings": {"application_name": APPLICATION_NAME}},
+        **pool,
     )
 
 
