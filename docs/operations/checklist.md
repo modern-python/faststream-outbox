@@ -25,6 +25,11 @@ story.
   cutoff is server-side `make_interval(...)`, immune to clock skew.
   Tuning: [Subscriber § Slow handlers: dedicated
   queue](../usage/subscriber.md#slow-handlers-dedicated-queue).
+- [ ] Engine URL follows the primary across a failover (a proxy, or a
+  multi-host URL with `target_session_attrs=primary`). Subscribers with a
+  long lease set a shorter `query_timeout_seconds`; recovery from a primary
+  that went silent takes about twice that value. See [Subscriber § Database
+  failover](../usage/subscriber.md#database-failover).
 - [ ] Slow handlers segregated onto their own subscriber with a
   taller `lease_ttl_seconds`. Don't raise it globally; that delays
   reclaim of *actually* stuck rows everywhere.

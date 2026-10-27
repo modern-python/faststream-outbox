@@ -37,6 +37,7 @@ from faststream_outbox.fastapi import (
 from faststream_outbox.fastapi import (
     OutboxRouter,
 )
+from faststream_outbox.subscriber.usecase import OutboxSubscriber
 from faststream_outbox.testing import TestOutboxBroker, fake_session
 
 
@@ -90,6 +91,17 @@ def test_subscriber_misconfig_warning_attributed_to_user_via_fastapi_router() ->
         async def handle(body: dict) -> None: ...
 
     assert record[0].filename == __file__  # attributed to this test (the user), not a package frame
+
+
+def test_fastapi_router_forwards_query_timeout() -> None:
+    router = OutboxRouter(outbox_table=_make_outbox_table())
+
+    @router.subscriber("orders", query_timeout_seconds=5.0)
+    async def handle(body: dict) -> None: ...
+
+    sub = router.broker.subscribers[0]
+    assert isinstance(sub, OutboxSubscriber)
+    assert sub._config.query_timeout == 5.0  # noqa: SLF001
 
 
 async def test_subscriber_receives_fastapi_depends_session() -> None:

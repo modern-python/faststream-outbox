@@ -13,7 +13,7 @@ if typing.TYPE_CHECKING:
     from faststream_outbox.retry import RetryStrategyProto
 
 
-def create_subscriber(
+def create_subscriber(  # noqa: PLR0913
     *,
     queues: list[str],
     max_workers: int,
@@ -25,6 +25,7 @@ def create_subscriber(
     max_deliveries: int | None,
     terminal_flush_batch_size: int,
     config: "OutboxBrokerConfig",
+    query_timeout_seconds: float | None = None,
     ack_policy: AckPolicy | None = None,
     propagate_inbound_headers: bool = False,
     title_: str | None = None,
@@ -43,6 +44,7 @@ def create_subscriber(
         min_fetch_interval=min_fetch_interval,
         max_fetch_interval=max_fetch_interval,
         lease_ttl_seconds=lease_ttl_seconds,
+        query_timeout_seconds=query_timeout_seconds,
         max_deliveries=max_deliveries,
         terminal_flush_batch_size=terminal_flush_batch_size,
         propagate_inbound_headers=propagate_inbound_headers,
