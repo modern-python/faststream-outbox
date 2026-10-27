@@ -163,9 +163,25 @@ that matters, either:
 
 Every extend writes a new row version, even when the deadline does not
 move. `next_attempt_at` is indexed, so these updates are not HOT updates:
-each one adds index entries and a dead tuple for autovacuum to clean up.
-Size autovacuum for your heartbeat rate (see
-[Alembic migrations](../operations/alembic.md), `outbox_autovacuum_ddl`).
+each one leaves a dead tuple and dead index entries until autovacuum
+reclaims them.
+
+A table of heartbeat timers holds about one live row per timer, so Postgres'
+default autovacuum trigger, dead tuples above 20% of the live rows, is
+crossed within a minute as long as each timer is pinged more often than
+every five minutes. Autovacuum then runs once per `autovacuum_naptime`, a
+cluster setting that defaults to 60 seconds, and dead tuples peak at about
+the ping rate times that interval: around 600,000 at 10,000 pings/s. In
+15-minute benchmark runs at 1,000 and 10,000 pings/s, table size, dead
+tuples and claim time stopped growing within two minutes, and neither
+`outbox_autovacuum_ddl` nor `vacuum_cost_delay=0` made a measurable
+difference (see [Performance](../concepts/performance.md#timer-extends-under-heartbeat-load)).
+
+What limits a heartbeat is the commit rate. Group pings into short
+transactions once you are past about a thousand pings per second. If the
+same table also carries ordinary messages, the queue-table advice in
+[Alembic migrations](../operations/alembic.md#autovacuum-tuning-recommended)
+still applies.
 
 ## Cancellation
 

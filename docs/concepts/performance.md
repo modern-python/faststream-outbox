@@ -88,6 +88,9 @@ pass `vacuum_cost_delay` / `vacuum_cost_limit` to let vacuum keep pace. A
 settings are applied. Full guidance, the eligibility-vs-throughput split, and the
 I/O caution on `vacuum_cost_delay=0` are in
 [Autovacuum tuning](../operations/alembic.md#autovacuum-tuning-recommended).
+A table that only holds heartbeat timers is the exception: its live set stays
+small, and the tuning made no measurable difference there (see
+[below](#timer-extends-under-heartbeat-load)).
 
 ## Timer extends under heartbeat load
 
@@ -101,14 +104,15 @@ runs it in about 0.02 ms. The cost is what comes with it:
 
 So the ceiling is set by commits and round trips, not by the statement.
 
-One run of `just bench-extend`, on an Apple M2 with OrbStack, Postgres 17 at
-default settings, one Python client process and a 20-connection pool. Each
-identity pings every 2 seconds and has a 6-second timeout:
+One 60-second run of `just bench-extend` per point, on an Apple M2 with
+OrbStack, Postgres 17 at default settings, one Python client process and a
+20-connection pool. Each identity pings every 2 seconds and has a 6-second
+timeout:
 
 | Offered pings/s | Pings per transaction | Kept up | Ping p99 | Expiry lateness max |
 |---|---|---|---|---|
 | 1,000 | 1 | yes | 12 ms | 0.2 s |
-| 3,000 | 1 | yes | 193 ms | 0.7 s |
+| 3,000 | 1 | for 60 s only (see below) | 193 ms | 0.7 s |
 | 3,000 | 10 | yes | 14 ms | 1.2 s |
 | 5,000 | 1 | no | 17 s | 12.8 s |
 | 10,000 | 50 | yes | 618 ms | 3.2 s |
@@ -119,10 +123,42 @@ saturated runs. Plan for a wide margin. Grouping pings into short transactions
 (sorted by `timer_id`, so concurrent transactions lock rows in the same order)
 raises the ceiling a lot, at the cost of latency.
 
-Dead tuples pile up at the ping rate, about 150,000 in a minute at 10,000
-pings/s, and autovacuum only runs once per `autovacuum_naptime`, which
-defaults to 60 seconds. The claim query slowed from about 0.2 to 1 ms over
-such a minute.
+3,000 pings/s with a commit per ping is this machine's limit, not a safe
+rate. The 60-second run kept up, but three 15-minute runs at that rate fell
+behind after 50 to 85 seconds, whatever the autovacuum settings. One
+commit per ping held at 1,000 pings/s for 15 minutes, and 50 pings per
+commit held at 10,000 pings/s.
+
+### Over 15 minutes
+
+Each identity is one live row, so the table stays small, and Postgres'
+default autovacuum trigger (dead tuples above 20% of live rows) is crossed
+within every minute. Autovacuum ran once per `autovacuum_naptime`, which
+defaults to 60 seconds, in all of these runs, untuned ones included. Dead
+tuples peak at about the ping rate times that interval.
+
+One 15-minute run per row, same machine. *untuned* has no autovacuum
+reloptions, *tuned* applies `outbox_autovacuum_ddl()`, and *unthrottled*
+adds `vacuum_cost_delay=0`:
+
+| Pings/s | Pings per transaction | Autovacuum | Table MB, start / end | Index MB, start / end | Dead tuples, peak | Claim mean, last minute |
+|---|---|---|---|---|---|---|
+| 1,000 | 1 | untuned | 0.5 / 2.0 | 0.3 / 3.6 | 53,622 | 0.38 ms |
+| 1,000 | 1 | tuned | 0.5 / 1.9 | 0.3 / 3.5 | 53,771 | 0.42 ms |
+| 1,000 | 1 | unthrottled | 0.5 / 1.9 | 0.3 / 6.1 | 54,571 | 0.34 ms |
+| 10,000 | 50 | untuned | 5.0 / 25.5 | 2.4 / 46.8 | 590,515 | 3.27 ms |
+| 10,000 | 50 | tuned | 5.0 / 25.4 | 2.4 / 40.2 | 608,410 | 3.10 ms |
+| 10,000 | 50 | unthrottled | 5.0 / 25.4 | 2.4 / 60.4 | 523,700 | 2.79 ms |
+
+From the second minute on, table size held flat, dead tuples stayed in a band
+(about 22,000 to 23,500 sampled at 1,000 pings/s, 270,000 to 320,000 at
+10,000), and the claim query's per-minute mean stayed between about 0.3 and
+0.5 ms at 1,000 pings/s and mostly between 2.7 and 3.9 ms at 10,000, with
+one minute dipping to 1.3 to 1.9 ms in each 10,000 run. Index size rose
+in a step or two early on and then held. The differences between the three
+settings are within run-to-run noise: the largest index came from the
+unthrottled runs. For a table that only holds heartbeat timers, autovacuum
+tuning doesn't change the outcome; the commit rate does.
 
 ## Measuring it yourself
 
@@ -134,7 +170,9 @@ can run it against a local Postgres:
 - `just bench-check` gates the deterministic counts against
   `benchmarks/baseline.json`; this is what CI runs.
 - `just bench-extend` runs the timer extend sweep above and prints its tables.
-  Nothing in it is gated: every number depends on timing.
+  Nothing in it is gated: every number depends on timing. The 15-minute
+  table came from `just bench-extend --only r1000-b1 r10000-b50 --seconds 900
+  --vacuum untuned tuned unthrottled`; `--json` writes every sample.
 
 The statement-count reductions (`select_calls`, `delete_calls`, `insert_calls`,
 …) are machine-independent and exact. Wall-clock throughput is not: it scales
