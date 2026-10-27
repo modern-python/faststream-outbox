@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from faststream_outbox import OutboxBroker, make_outbox_table
 
 
-CLUSTER_DSN = os.environ.get("POSTGRES_DSN", "")
+CLUSTER_DSN = os.environ.get("DR_CLUSTER_DSN", "")
 PRIMARY_DSN = os.environ.get("PRIMARY_DSN", "")
 REPLICA_DSN = os.environ.get("REPLICA_DSN", "")
 DOCKER_SOCKET = "/var/run/docker.sock"
