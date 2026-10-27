@@ -9,9 +9,9 @@ fetch loop's wall-clock polling.
 
 import pytest
 
-from benchmarks.__main__ import _build_parser
+from benchmarks.__main__ import _build_parser, _extend_points
 from benchmarks.config import ExtendConfig, RunConfig
-from benchmarks.extend import ExtendResult, format_extend, percentiles
+from benchmarks.extend import ExtendResult, Sample, autovacuum_ddl, fetch_mean_ms, format_extend, percentiles
 from benchmarks.probes import ProbeResult
 from benchmarks.report import EXACT_KEYS, compare, format_markdown, format_table, normalize, to_baseline
 from benchmarks.workload import RunResult
@@ -360,9 +360,21 @@ def test_extend_config_rejects_a_run_too_short_for_silent_timers_to_fire() -> No
         ExtendConfig(name="p", rate=1_000, timers=2_000, seconds=10.0)
 
 
-def test_format_extend_reports_saturation_and_per_ping_wal() -> None:
-    result = ExtendResult(
-        config=ExtendConfig(name="r1000-b1", rate=1_000, timers=2_000),
+def _sample(elapsed: float, *, table_mb: float = 1.0, index_mb: float = 1.0, dead: int = 0, **kw: float) -> Sample:
+    fields: dict[str, float] = {"live_tuples": 2_000, "autovacuum_count": 0, "fetch_calls": 0, "fetch_ms": 0.0}
+    fields.update(kw)
+    return Sample(
+        elapsed=elapsed,
+        table_bytes=int(table_mb * 2**20),
+        index_bytes=int(index_mb * 2**20),
+        dead_tuples=dead,
+        **fields,
+    )
+
+
+def _extend_result(*, samples: tuple[Sample, ...] = (), **cfg_kwargs: object) -> ExtendResult:
+    return ExtendResult(
+        config=ExtendConfig(name="r1000-b1", rate=1_000, timers=2_000, **cfg_kwargs),  # ty: ignore[invalid-argument-type]
         wall_seconds=30.0,
         offered=30_000,
         offered_seconds=30.0,
@@ -380,14 +392,106 @@ def test_format_extend_reports_saturation_and_per_ping_wal() -> None:
         autovacuum_count=1,
         live_tuples=2_000,
         probe=_probe(insert_calls=30_000, wal_bytes=18_000_000, wal_records=199_000, tup_upd=30_000, tup_hot_upd=0),
+        samples=samples,
     )
-    table = format_extend([result])
-    assert "| r1000-b1 (saturated) | 1,000 | 1,000 | 1,000 | 2.0 / 4.0 / 17.0 |" in table
+
+
+def test_format_extend_reports_saturation_and_per_ping_wal() -> None:
+    table = format_extend([_extend_result()])
+    assert "| r1000-b1/tuned (saturated) | 1,000 | 1,000 | 1,000 | 2.0 / 4.0 / 17.0 |" in table
     assert "TimeoutError 5" in table
-    assert "| r1000-b1 | 600 | 6.63 |" in table
+    assert "| r1000-b1/tuned | 600 | 6.63 |" in table
     assert "| 100 / 100 | 0 | 0.98 / 1.02 | 2 |" in table
 
 
 def test_extend_accepts_its_flags() -> None:
     args = _build_parser().parse_args(["extend", "--seconds", "12", "--only", "r1000-b1", "--json", "out.json"])
     assert (args.seconds, args.only, args.json) == (12.0, ["r1000-b1"], "out.json")
+
+
+def test_extend_config_rejects_an_unknown_vacuum_variant() -> None:
+    with pytest.raises(ValueError, match="vacuum"):
+        ExtendConfig(name="p", rate=1_000, timers=2_000, vacuum="off")  # ty: ignore[invalid-argument-type]
+
+
+def test_extend_config_rejects_a_non_positive_sample_interval() -> None:
+    with pytest.raises(ValueError, match="sample_interval"):
+        ExtendConfig(name="p", rate=1_000, timers=2_000, sample_interval=0.0)
+
+
+@pytest.mark.parametrize(
+    ("variant", "expected"),
+    [
+        ("untuned", None),
+        (
+            "tuned",
+            (
+                "ALTER TABLE t SET (autovacuum_vacuum_scale_factor = 0, autovacuum_vacuum_threshold = 1000, "
+                "autovacuum_vacuum_insert_scale_factor = 0, autovacuum_vacuum_insert_threshold = 1000)"
+            ),
+        ),
+        (
+            "unthrottled",
+            (
+                "ALTER TABLE t SET (autovacuum_vacuum_scale_factor = 0, autovacuum_vacuum_threshold = 1000, "
+                "autovacuum_vacuum_insert_scale_factor = 0, autovacuum_vacuum_insert_threshold = 1000, "
+                "autovacuum_vacuum_cost_delay = 0)"
+            ),
+        ),
+    ],
+)
+def test_autovacuum_ddl_per_variant(variant: str, expected: str | None) -> None:
+    cfg = ExtendConfig(name="p", rate=1_000, timers=2_000, vacuum=variant)  # ty: ignore[invalid-argument-type]
+    assert autovacuum_ddl(cfg, "t") == expected
+
+
+def test_fetch_mean_ms_divides_the_window_deltas() -> None:
+    samples = [
+        _sample(0.0, fetch_calls=0, fetch_ms=0.0),
+        _sample(60.0, fetch_calls=100, fetch_ms=20.0),
+        _sample(120.0, fetch_calls=300, fetch_ms=120.0),
+    ]
+    assert fetch_mean_ms(samples, 0.0, 60.0) == pytest.approx(0.2)
+    assert fetch_mean_ms(samples, 60.0, 120.0) == pytest.approx(0.5)
+
+
+def test_fetch_mean_ms_is_zero_without_fetches_in_the_window() -> None:
+    assert fetch_mean_ms([_sample(0.0), _sample(60.0)], 0.0, 60.0) == 0.0
+    assert fetch_mean_ms([], 0.0, 60.0) == 0.0
+
+
+def test_format_extend_reports_drift_over_the_run() -> None:
+    samples = (
+        _sample(0.0, table_mb=1.0, index_mb=0.5, dead=0, fetch_calls=0, fetch_ms=0.0),
+        _sample(60.0, table_mb=3.0, index_mb=2.0, dead=50_000, autovacuum_count=1, fetch_calls=100, fetch_ms=25.0),
+        _sample(120.0, table_mb=2.5, index_mb=2.5, dead=10_000, autovacuum_count=2, fetch_calls=200, fetch_ms=125.0),
+    )
+    table = format_extend([_extend_result(vacuum="unthrottled", samples=samples)])
+    assert "| r1000-b1/unthrottled | 1.0 / 2.5 / 3.0 | 0.5 / 2.5 / 2.5 | 50,000 | 2 | 0.250 / 1.000 |" in table
+
+
+def test_format_extend_skips_drift_without_samples() -> None:
+    assert "table MB" not in format_extend([_extend_result()])
+
+
+def test_extend_accepts_vacuum_variants_and_sample_interval() -> None:
+    args = _build_parser().parse_args(["extend", "--vacuum", "untuned", "unthrottled", "--sample-interval", "5"])
+    assert (args.vacuum, args.sample_interval) == (["untuned", "unthrottled"], 5.0)
+
+
+def test_extend_points_cross_points_with_vacuum_variants() -> None:
+    points = _extend_points(
+        only=["r1000-b1", "r3000-b1"], seconds=900.0, vacuum=["untuned", "tuned"], sample_interval=5.0
+    )
+    assert [(p.name, p.vacuum, p.seconds, p.sample_interval) for p in points] == [
+        ("r1000-b1", "untuned", 900.0, 5.0),
+        ("r1000-b1", "tuned", 900.0, 5.0),
+        ("r3000-b1", "untuned", 900.0, 5.0),
+        ("r3000-b1", "tuned", 900.0, 5.0),
+    ]
+
+
+def test_extend_points_default_to_every_point_tuned() -> None:
+    points = _extend_points(only=None, seconds=None, vacuum=None, sample_interval=None)
+    assert {p.vacuum for p in points} == {"tuned"}
+    assert len(points) == 8

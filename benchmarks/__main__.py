@@ -11,8 +11,9 @@ import json
 import os
 import pathlib
 import sys
+import typing
 
-from benchmarks.config import DEFAULT_DSN, ExtendConfig, RunConfig
+from benchmarks.config import DEFAULT_DSN, ExtendConfig, RunConfig, VacuumVariant
 from benchmarks.extend import ExtendResult, format_extend, run_extend, to_json
 from benchmarks.report import compare, format_markdown, format_table, to_baseline
 from benchmarks.workload import RunResult, make_engine, run_consumer, run_producer
@@ -126,17 +127,35 @@ async def _run_extend_sweep(dsn: str, points: list[ExtendConfig]) -> list[Extend
     results = []
     for cfg in points:
         result = await run_extend(dsn, cfg)
-        sys.stdout.write(f"{cfg.name}: {result.committed} pings in {result.wall_seconds:.1f}s\n")
+        sys.stdout.write(f"{cfg.name}/{cfg.vacuum}: {result.committed} pings in {result.wall_seconds:.1f}s\n")
         sys.stdout.flush()
         results.append(result)
     return results
 
 
-def _extend(dsn: str, *, seconds: float | None, only: list[str] | None, json_path: str | None) -> int:
-    """Run the extend sweep and print its tables; nothing is gated."""
-    points = [p for p in _EXTEND_POINTS if not only or p.name in only]
+def _extend_points(
+    *,
+    only: list[str] | None,
+    seconds: float | None,
+    vacuum: list[VacuumVariant] | None,
+    sample_interval: float | None,
+) -> list[ExtendConfig]:
+    """Return the selected points, each crossed with every requested vacuum variant."""
+    overrides: dict[str, float] = {}
     if seconds is not None:
-        points = [dataclasses.replace(p, seconds=seconds) for p in points]
+        overrides["seconds"] = seconds
+    if sample_interval is not None:
+        overrides["sample_interval"] = sample_interval
+    return [
+        dataclasses.replace(p, **overrides, vacuum=variant)
+        for p in _EXTEND_POINTS
+        if not only or p.name in only
+        for variant in (vacuum or [p.vacuum])
+    ]
+
+
+def _extend(dsn: str, *, points: list[ExtendConfig], json_path: str | None) -> int:
+    """Run the extend sweep and print its tables; nothing is gated."""
     results = asyncio.run(_run_extend_sweep(dsn, points))
     sys.stdout.write("\n" + format_extend(results) + "\n")
     if json_path is not None:
@@ -168,6 +187,8 @@ def _build_parser() -> argparse.ArgumentParser:
     extend.add_argument("--seconds", type=float)
     extend.add_argument("--only", nargs="+", choices=[p.name for p in _EXTEND_POINTS])
     extend.add_argument("--json")
+    extend.add_argument("--vacuum", nargs="+", choices=typing.get_args(VacuumVariant))
+    extend.add_argument("--sample-interval", type=float)
     return parser
 
 
@@ -179,7 +200,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "check":
         return _check(dsn, markdown=args.markdown)
     if args.command == "extend":
-        return _extend(dsn, seconds=args.seconds, only=args.only, json_path=args.json)
+        points = _extend_points(
+            only=args.only, seconds=args.seconds, vacuum=args.vacuum, sample_interval=args.sample_interval
+        )
+        return _extend(dsn, points=points, json_path=args.json)
     return _run(dsn, args.messages, args.repeats, write_baseline=args.write_baseline)
 
 
