@@ -111,7 +111,7 @@ isort.no-lines-before = ["standard-library", "local-folder"]
 max-args = 15
 
 [tool.ruff.lint.extend-per-file-ignores]
-"tests/**" = [
+"{tests,tests_dr}/**" = [
     "S101", # allow asserts
     "PLR2004", # allow magic values
 ]
@@ -132,7 +132,7 @@ Issues = "https://github.com/modern-python/faststream-outbox/issues"
 Changelog = "https://github.com/modern-python/faststream-outbox/releases"
 
 [tool.coverage.run]
-omit = ["benchmarks/*"]
+omit = ["benchmarks/*", "tests_dr/*"]
 # SQLAlchemy's async layer runs statements in greenlets; untracked switches drop executed lines.
 concurrency = ["greenlet", "thread"]
 

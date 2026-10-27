@@ -9,6 +9,17 @@ sh:
 test *args: down && down
     docker compose run application uv run pytest {{ args }}
 
+# Primary/replica failover drills (kill, network blackhole), each on a fresh cluster. Not run in CI.
+test-dr:
+    #!/usr/bin/env sh
+    set -eu
+    compose="docker compose -f docker-compose.dr.yml"
+    trap '$compose down --remove-orphans --volumes' EXIT
+    for scenario in kill blackhole; do
+        $compose down --remove-orphans --volumes
+        $compose run --rm --build dr uv run pytest tests_dr -s -k "$scenario"
+    done
+
 test-ci:
     uv run --no-sync pytest --cov=. --cov-report term-missing --cov-report xml
 

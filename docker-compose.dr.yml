@@ -1,0 +1,52 @@
+name: outbox-dr
+
+services:
+  dr:
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+    user: root
+    volumes:
+      - .:/code
+      - /code/.venv
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      pg-replica:
+        condition: service_healthy
+    environment:
+      - DR_CLUSTER_DSN=postgresql+asyncpg://outbox:outbox@/outbox?host=pg-primary:5432&host=pg-replica:5432&target_session_attrs=primary
+      - PRIMARY_DSN=postgresql://outbox:outbox@pg-primary:5432/outbox
+      - REPLICA_DSN=postgresql://outbox:outbox@pg-replica:5432/outbox
+
+  pg-primary:
+    image: postgres:17
+    container_name: outbox-dr-primary
+    environment:
+      - POSTGRES_USER=outbox
+      - POSTGRES_PASSWORD=outbox
+      - POSTGRES_DB=outbox
+    volumes:
+      - ./tests_dr/primary-init.sh:/docker-entrypoint-initdb.d/primary-init.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U outbox -d outbox"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  pg-replica:
+    image: postgres:17
+    container_name: outbox-dr-replica
+    user: postgres
+    entrypoint: ["bash", "/replica-entrypoint.sh"]
+    environment:
+      - PGPASSWORD=outbox
+    volumes:
+      - ./tests_dr/replica-entrypoint.sh:/replica-entrypoint.sh:ro
+    depends_on:
+      pg-primary:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U outbox -d outbox"]
+      interval: 1s
+      timeout: 3s
+      retries: 60

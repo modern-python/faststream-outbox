@@ -3217,6 +3217,33 @@ def test_subscriber_rejects_non_positive_lease_ttl() -> None:
         _register_subscriber(broker, lease_ttl_seconds=0.0)
 
 
+@pytest.mark.parametrize("value", [0.0, -1.0])
+def test_subscriber_rejects_non_positive_query_timeout(value: float) -> None:
+    with pytest.raises(ValueError, match="query_timeout_seconds must be > 0"):
+        _register_subscriber(_make_broker(), query_timeout_seconds=value)
+
+
+def test_subscriber_rejects_query_timeout_above_lease_ttl() -> None:
+    """A fetch or terminal write that outlives the lease has already lost the row."""
+    with pytest.raises(ValueError, match=r"query_timeout_seconds \(61.0\) must be <= lease_ttl_seconds \(60.0\)"):
+        _register_subscriber(_make_broker(), query_timeout_seconds=61.0, lease_ttl_seconds=60.0)
+
+
+def test_subscriber_query_timeout_defaults_to_lease_ttl() -> None:
+    sub = _make_broker().subscriber("q", lease_ttl_seconds=42.0)
+    assert sub._config.query_timeout == 42.0  # noqa: SLF001
+
+
+def test_outbox_route_forwards_query_timeout() -> None:
+    async def handle(body: str) -> None: ...
+
+    broker = _make_broker()
+    broker.include_router(OutboxRouter(handlers=(OutboxRoute(handle, "orders", query_timeout_seconds=5.0),)))
+    sub = broker.subscribers[0]
+    assert isinstance(sub, OutboxSubscriber)
+    assert sub._config.query_timeout == 5.0  # noqa: SLF001
+
+
 def test_subscriber_rejects_ack_first() -> None:
     # ACK_FIRST has no legitimate outbox use — deletes before the handler runs, so a
     # handler crash silently drops the row. Better to refuse than warn-and-ship.
@@ -3300,7 +3327,9 @@ def test_subscriber_rejects_max_deliveries_below_one(max_deliveries: int) -> Non
         _register_subscriber(_make_broker(), max_deliveries=max_deliveries)
 
 
-@pytest.mark.parametrize("field", ["min_fetch_interval", "max_fetch_interval", "lease_ttl_seconds"])
+@pytest.mark.parametrize(
+    "field", ["min_fetch_interval", "max_fetch_interval", "lease_ttl_seconds", "query_timeout_seconds"]
+)
 @pytest.mark.parametrize("value", [math.nan, math.inf])
 def test_subscriber_rejects_non_finite_intervals(field: str, value: float) -> None:
     with pytest.raises(ValueError, match=f"{field} must be a finite number"):

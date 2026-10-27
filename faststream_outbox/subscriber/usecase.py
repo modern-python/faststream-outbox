@@ -103,6 +103,8 @@ _LISTEN_HEALTH_CHECK_TIMEOUT = 5.0
 # the kernel keepalive; cap it and fall back to an immediate terminate.
 _LISTEN_CLOSE_TIMEOUT = 5.0
 
+_T = typing.TypeVar("_T")
+
 
 def _compute_backoff(attempt: int, ceiling: float, *, base: float = 1.0) -> float:
     """Exponential backoff with ±50% jitter, capped at *ceiling*.
@@ -427,11 +429,14 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                 # fetch_conn is None only in the test-broker path against FakeOutboxClient
                 # (which ignores conn); the real OutboxClient raises if conn is None. The
                 # AbstractOutboxClient surface admits None so both implementations type-check.
-                rows = await self._client.fetch(
+                rows = await self._bounded(
                     fetch_conn,
-                    self._queues,
-                    limit=free,
-                    lease_ttl_seconds=self._config.lease_ttl_seconds,
+                    self._client.fetch(
+                        fetch_conn,
+                        self._queues,
+                        limit=free,
+                        lease_ttl_seconds=self._config.lease_ttl_seconds,
+                    ),
                 )
                 for row in rows:
                     self._inflight.put_nowait(row)
@@ -527,6 +532,20 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         payload = args[3] if len(args) >= 4 else None  # noqa: PLR2004
         if payload is None or payload in self._served_queues:
             self._notify_event.set()
+
+    async def _bounded(self, conn: "AsyncConnection | None", statement: Awaitable[_T]) -> _T:
+        """Cap a fetch/terminal write at ``query_timeout`` so a silently dropped socket raises.
+
+        On timeout the connection is invalidated (closed without a round-trip on the dead
+        socket) and the error propagates, so the outer loop reconnects.
+        """
+        try:
+            async with asyncio.timeout(self._config.query_timeout):
+                return await statement
+        except TimeoutError:
+            if conn is not None:
+                await conn.invalidate()
+            raise
 
     async def _worker_loop(self) -> None:
         """Thin wrapper around :meth:`_run_with_reconnect` for the worker path."""
@@ -862,7 +881,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             return
         pairs = [(p.row.id, p.row.acquired_token) for p in buffer if p.row.acquired_token is not None]
         try:
-            deleted = await self._client.delete_batch_with_lease(writer_conn, pairs)
+            deleted = await self._bounded(writer_conn, self._client.delete_batch_with_lease(writer_conn, pairs))
         except BaseException:  # incl. CancelledError from the exit-flush timeout: balance task_done before re-raising
             for pending in buffer:
                 self._emit_dispatch_abandoned(pending.row)
@@ -944,11 +963,9 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                     self._outer_config.last_exception_renderer,
                 ),
             }
-        deleted = await self._client.delete_with_lease(
+        deleted = await self._bounded(
             writer_conn,
-            row.id,
-            row.acquired_token,
-            dlq_payload=dlq_payload,
+            self._client.delete_with_lease(writer_conn, row.id, row.acquired_token, dlq_payload=dlq_payload),
         )
         if not deleted:
             self._emit_lease_lost(row, phase="terminal")
@@ -977,14 +994,17 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         # P19: first_attempt_at / last_attempt_at are the worker's clock; next_attempt_at
         # is computed server-side (now() + delay) inside mark_pending_with_lease, so the
         # reschedule time stays clock-skew-immune even though these audit timestamps don't.
-        updated = await self._client.mark_pending_with_lease(
+        updated = await self._bounded(
             writer_conn,
-            row.id,
-            row.acquired_token,
-            delay_seconds=row.pending_delay_seconds,
-            attempts_count=row.attempts_count,
-            first_attempt_at=row.first_attempt_at,  # ty: ignore[invalid-argument-type]
-            last_attempt_at=row.last_attempt_at,  # ty: ignore[invalid-argument-type]
+            self._client.mark_pending_with_lease(
+                writer_conn,
+                row.id,
+                row.acquired_token,
+                delay_seconds=row.pending_delay_seconds,
+                attempts_count=row.attempts_count,
+                first_attempt_at=row.first_attempt_at,  # ty: ignore[invalid-argument-type]
+                last_attempt_at=row.last_attempt_at,  # ty: ignore[invalid-argument-type]
+            ),
         )
         if not updated:
             self._emit_lease_lost(row, phase="retry")

@@ -6,7 +6,7 @@ import datetime as dt
 import json
 import logging
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 from unittest import mock
 
@@ -16,7 +16,7 @@ from faststream import BaseMiddleware, Context, Depends
 from faststream.kafka import KafkaBroker, TestKafkaBroker
 from sqlalchemy import MetaData, Table, case, event, func, insert, literal, select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from faststream_outbox import (
     ConstantRetry,
@@ -29,6 +29,7 @@ from faststream_outbox import (
 )
 from faststream_outbox.client import OutboxClient
 from faststream_outbox.envelope import _encode_payload as encode_payload
+from faststream_outbox.message import OutboxInnerMessage
 from faststream_outbox.publisher.fake import OutboxFakePublisher
 
 
@@ -813,6 +814,119 @@ async def test_fetch_uses_persistent_connection(pg_engine, outbox_table) -> None
 
     assert len(fetch_pids) >= 3, f"fetch should run multiple times, got {len(fetch_pids)}"
     assert len(set(fetch_pids)) == 1, f"persistent connection should hold one pid, saw {set(fetch_pids)}"
+
+
+async def test_hung_fetch_times_out_and_fetch_loop_reconnects(pg_engine, outbox_table) -> None:
+    """A fetch stuck on a silently dropped socket must not stall the subscriber forever."""
+    received: list[dict] = []
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table, graceful_timeout=2.0)
+    original_fetch = OutboxClient.fetch
+    hung: list[bool] = []
+
+    async def hang_once(
+        self: OutboxClient,
+        conn: AsyncConnection | None,
+        queues: Sequence[str],
+        *,
+        limit: int,
+        lease_ttl_seconds: float,
+    ) -> list[OutboxInnerMessage]:
+        if not hung:
+            hung.append(True)
+            await asyncio.Event().wait()
+        return await original_fetch(self, conn, queues, limit=limit, lease_ttl_seconds=lease_ttl_seconds)
+
+    @broker.subscriber("orders", min_fetch_interval=0.05, max_fetch_interval=0.2, lease_ttl_seconds=1.0)
+    async def handle(body: dict) -> None:
+        received.append(body)
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    with mock.patch.object(OutboxClient, "fetch", hang_once):
+        async with broker:
+            async with session_factory() as session, session.begin():
+                await broker.publish({"order_id": 1}, queue="orders", session=session)
+            await _wait_until(lambda: received, timeout=10.0)
+
+    assert received == [{"order_id": 1}]
+
+
+async def test_query_timeout_bounds_hung_fetch_below_lease_ttl(pg_engine, outbox_table) -> None:
+    """A long lease (slow handlers) must not delay detecting a silently dropped socket."""
+    received: list[dict] = []
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table, graceful_timeout=2.0)
+    original_fetch = OutboxClient.fetch
+    hung: list[bool] = []
+
+    async def hang_once(
+        self: OutboxClient,
+        conn: AsyncConnection | None,
+        queues: Sequence[str],
+        *,
+        limit: int,
+        lease_ttl_seconds: float,
+    ) -> list[OutboxInnerMessage]:
+        if not hung:
+            hung.append(True)
+            await asyncio.Event().wait()
+        return await original_fetch(self, conn, queues, limit=limit, lease_ttl_seconds=lease_ttl_seconds)
+
+    @broker.subscriber(
+        "orders",
+        min_fetch_interval=0.05,
+        max_fetch_interval=0.2,
+        lease_ttl_seconds=600.0,
+        query_timeout_seconds=0.5,
+    )
+    async def handle(body: dict) -> None:
+        received.append(body)
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    with mock.patch.object(OutboxClient, "fetch", hang_once):
+        async with broker:
+            async with session_factory() as session, session.begin():
+                await broker.publish({"order_id": 1}, queue="orders", session=session)
+            await _wait_until(lambda: received, timeout=10.0)
+
+    assert received == [{"order_id": 1}]
+
+
+async def test_hung_terminal_write_times_out_and_worker_reconnects(pg_engine, outbox_table) -> None:
+    """A terminal DELETE stuck on a silently dropped socket must not wedge the worker forever."""
+    received: list[dict] = []
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table, graceful_timeout=2.0)
+    original_delete = OutboxClient.delete_with_lease
+    hung: list[bool] = []
+    deleted: list[bool] = []
+
+    async def hang_once(
+        self: OutboxClient,
+        conn: AsyncConnection | None,
+        row_id: int,
+        token: uuid.UUID,
+        *,
+        dlq_payload: Mapping[str, Any] | None = None,
+    ) -> bool:
+        if not hung:
+            hung.append(True)
+            await asyncio.Event().wait()
+        result = await original_delete(self, conn, row_id, token, dlq_payload=dlq_payload)
+        deleted.append(result)
+        return result
+
+    @broker.subscriber("orders", min_fetch_interval=0.05, max_fetch_interval=0.2, lease_ttl_seconds=1.0)
+    async def handle(body: dict) -> None:
+        received.append(body)
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    with mock.patch.object(OutboxClient, "delete_with_lease", hang_once):
+        async with broker:
+            async with session_factory() as session, session.begin():
+                await broker.publish({"order_id": 1}, queue="orders", session=session)
+            await _wait_until(lambda: any(deleted), timeout=10.0)
+
+    assert len(received) >= 2
+    assert all(body == {"order_id": 1} for body in received)
+    assert await _row_count(pg_engine, outbox_table) == 0
 
 
 async def test_publish_with_activate_in_delays_delivery(pg_engine, outbox_table) -> None:

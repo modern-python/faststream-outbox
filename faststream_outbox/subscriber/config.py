@@ -74,6 +74,7 @@ class OutboxSubscriberConfig(SubscriberUsecaseConfig):
     min_fetch_interval: float
     max_fetch_interval: float
     lease_ttl_seconds: float
+    query_timeout_seconds: float | None = None
     max_deliveries: int | None
     terminal_flush_batch_size: int
     propagate_inbound_headers: bool
@@ -127,6 +128,7 @@ class OutboxSubscriberConfig(SubscriberUsecaseConfig):
         if self.lease_ttl_seconds <= 0:
             msg = f"lease_ttl_seconds must be > 0, got {self.lease_ttl_seconds}"
             raise ValueError(msg)
+        self._validate_query_timeout()
         if self.min_fetch_interval > self.max_fetch_interval:
             msg = (
                 f"min_fetch_interval ({self.min_fetch_interval}) must be <= max_fetch_interval "
@@ -169,6 +171,20 @@ class OutboxSubscriberConfig(SubscriberUsecaseConfig):
                 f"2 * max_fetch_interval + P99(handler).",
             )
 
+    def _validate_query_timeout(self) -> None:
+        if self.query_timeout_seconds is None:
+            return
+        if self.query_timeout_seconds <= 0:
+            msg = f"query_timeout_seconds must be > 0, got {self.query_timeout_seconds}"
+            raise ValueError(msg)
+        if self.query_timeout_seconds > self.lease_ttl_seconds:
+            msg = (
+                f"query_timeout_seconds ({self.query_timeout_seconds}) must be <= lease_ttl_seconds "
+                f"({self.lease_ttl_seconds}): a fetch or terminal write still running past the lease "
+                f"has already lost the row to reclaim."
+            )
+            raise ValueError(msg)
+
     def _validate_numbers(self) -> None:
         """Reject bools passed as counts, NaN or infinite intervals, and a ``max_deliveries`` below 1."""
         for name in ("max_workers", "fetch_batch_size", "terminal_flush_batch_size", "max_deliveries"):
@@ -178,13 +194,18 @@ class OutboxSubscriberConfig(SubscriberUsecaseConfig):
             if isinstance(value, bool) or not isinstance(value, int):
                 msg = f"{name} must be an int, got {value!r}"
                 raise TypeError(msg)
-        for name in ("min_fetch_interval", "max_fetch_interval", "lease_ttl_seconds"):
-            if not math.isfinite(getattr(self, name)):
+        for name in ("min_fetch_interval", "max_fetch_interval", "lease_ttl_seconds", "query_timeout_seconds"):
+            if getattr(self, name) is not None and not math.isfinite(getattr(self, name)):
                 msg = f"{name} must be a finite number, got {getattr(self, name)}"
                 raise ValueError(msg)
         if self.max_deliveries is not None and self.max_deliveries < 1:
             msg = f"max_deliveries must be >= 1 or None (unlimited), got {self.max_deliveries}"
             raise ValueError(msg)
+
+    @property
+    def query_timeout(self) -> float:
+        """Client-side cap on each fetch and terminal write; ``lease_ttl_seconds`` unless set."""
+        return self.lease_ttl_seconds if self.query_timeout_seconds is None else self.query_timeout_seconds
 
     @property
     def ack_policy(self) -> AckPolicy:

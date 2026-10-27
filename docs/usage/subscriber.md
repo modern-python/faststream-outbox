@@ -90,6 +90,7 @@ Per-subscriber knobs, passed to `@broker.subscriber("…", …)`:
 | `min_fetch_interval` | `1.0` s | Base for the adaptive idle backoff (jittered ±50%, so an actual wait can land below it); no sleep at all while fetches keep returning rows |
 | `max_fetch_interval` | `10.0` s | Ceiling for the adaptive idle backoff (with jitter) |
 | `lease_ttl_seconds` | `60.0` s | How long a claim is valid before another fetch may reclaim it. Must exceed your handler's P99 with margin. |
+| `query_timeout_seconds` | `None` (uses `lease_ttl_seconds`) | Client-side cap on each fetch and terminal write. A statement still running when it expires is abandoned, its connection is closed, and the loop reconnects. Set it below a long lease so a lost primary is noticed sooner. Must be `> 0` and at most `lease_ttl_seconds`. See [Database failover](#database-failover). |
 | `max_deliveries` | `None` (unbounded) | Total claims (including lease-expiry re-claims) after which the row is dropped without invoking the handler. Defends against handlers that consistently wedge. Must be at least `1`; use `None`, not `0`, for no cap. |
 | `terminal_flush_batch_size` | `1` (off) | Coalesce completed terminal `DELETE`s into one `DELETE … RETURNING` per N rows. `1` is one round-trip per message (unchanged). Higher trades a wider crash-redelivery window for far fewer round-trips. See [Batching terminal deletes](#batching-terminal-deletes). |
 | `ack_policy` | `AckPolicy.NACK_ON_ERROR` | See [Ack policy](#ack-policy) |
@@ -359,6 +360,39 @@ each replica opens its own pool and LISTEN connections, so your Postgres
 startup with `FATAL: too many connections`.
 
 *Operator-side: [Production checklist § Sizing](../operations/checklist.md#sizing).*
+
+## Database failover
+
+Point the engine at whichever node is currently primary, either through a proxy
+or virtual IP, or with a multi-host URL that asks asyncpg for the writable node:
+
+```python
+engine = create_async_engine(
+    "postgresql+asyncpg://user:pass@/app?host=pg-1:5432&host=pg-2:5432&target_session_attrs=primary",
+)
+```
+
+Without `target_session_attrs=primary`, a reconnect can land on a standby, where
+the fetch fails with a read-only error.
+
+How fast the subscriber recovers depends on how the old primary went away:
+
+- **It closed its connections** (the process crashed or was killed). The next
+  statement fails at once, and the fetch and worker loops back off and
+  reconnect within seconds.
+- **It went silent** (the host lost power, or the network was partitioned).
+  Statements hang because no error ever arrives. Each fetch and terminal write
+  is capped at `query_timeout_seconds`, after which the connection is dropped and
+  the loop reconnects. The fetch loop hits that cap first; the worker hits it
+  again on its own stale connection once it gets a row. Recovery takes about
+  `2 × query_timeout_seconds`, which is two minutes with the default 60 s lease.
+  A subscriber with a long lease for slow handlers should set a shorter
+  `query_timeout_seconds`.
+
+With asynchronous replication the new primary can miss the last commits on the
+old one. A lost insert disappears together with the business rows from the same
+transaction. A lost terminal `DELETE` brings a handled row back, so it is
+delivered again; handlers are idempotent for that reason anyway.
 
 ## Read-only inspection
 
