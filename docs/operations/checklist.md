@@ -28,8 +28,8 @@ story.
 - [ ] Engine URL follows the primary across a failover (a proxy, or a
   multi-host URL with `target_session_attrs=primary`). Subscribers with a
   long lease set a shorter `query_timeout_seconds`; recovery from a primary
-  that went silent takes about twice that value. See [Subscriber § Database
-  failover](../usage/subscriber.md#database-failover).
+  that went silent takes about that value plus `max_fetch_interval`. See
+  [Subscriber § Database failover](../usage/subscriber.md#database-failover).
 - [ ] Slow handlers segregated onto their own subscriber with a
   taller `lease_ttl_seconds`. Don't raise it globally; that delays
   reclaim of *actually* stuck rows everywhere.
