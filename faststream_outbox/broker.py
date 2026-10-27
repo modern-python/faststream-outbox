@@ -430,9 +430,9 @@ class OutboxBroker(
         outbox pattern: the row commits atomically with the caller's domain writes.
 
         Schedule a delayed delivery by passing exactly one of *activate_in* (relative)
-        or *activate_at* (absolute, tz-aware). Pass *timer_id* to deduplicate per
-        ``(queue, timer_id)`` — re-publishing with the same id is a no-op (returns
-        ``None``). Cancel a not-yet-leased timer with :meth:`cancel_timer`.
+        or *activate_at* (absolute, tz-aware). Pass *timer_id* to keep at most one live
+        row per ``(queue, timer_id)``; *timer_conflict* decides what re-publishing the
+        same id does. Cancel a not-yet-leased timer with :meth:`cancel_timer`.
 
         *timer_conflict* picks what a re-publish does when a live row holds the same
         ``(queue, timer_id)``. ``"ignore"`` (the default) leaves that row alone and
