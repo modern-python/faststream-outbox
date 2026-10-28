@@ -786,6 +786,85 @@ async def test_notify_wakes_subscriber_well_before_polling_interval(pg_engine, o
     assert received == [{"order_id": 1}]
 
 
+async def test_listen_connection_uses_engine_async_creator(pg_engine, outbox_table) -> None:
+    """LISTEN connects through the engine's async_creator, not by re-reading the URL."""
+    dsn = pg_engine.url.set(drivername="postgresql").render_as_string(hide_password=False)
+
+    async def connect() -> asyncpg.Connection:
+        return await asyncpg.connect(dsn)
+
+    engine = create_async_engine("postgresql+asyncpg://unused@unreachable.invalid/unused", async_creator=connect)
+    received: list[dict] = []
+    broker = OutboxBroker(engine, outbox_table=outbox_table)
+
+    @broker.subscriber("orders", min_fetch_interval=10.0, max_fetch_interval=10.0)
+    async def handle(body: dict) -> None:
+        received.append(body)
+
+    try:
+        async with broker:
+            await asyncio.sleep(0.5)
+            async with async_sessionmaker(engine)() as session, session.begin():
+                await broker.publish({"order_id": 1}, queue="orders", session=session)
+            await _wait_until(lambda: received, timeout=2.0)
+    finally:
+        await engine.dispose()
+
+    assert received == [{"order_id": 1}]
+
+
+async def test_listen_connection_fits_a_pool_sized_to_the_budget(pg_engine, outbox_table) -> None:
+    """With pool_size exactly max_workers + 1, LISTEN still gets a connection and NOTIFY wakes the subscriber."""
+    engine = create_async_engine(pg_engine.url, pool_size=3, max_overflow=0, pool_timeout=1)
+    received: list[dict] = []
+    broker = OutboxBroker(engine, outbox_table=outbox_table)
+
+    @broker.subscriber("orders", max_workers=2, min_fetch_interval=10.0, max_fetch_interval=10.0)
+    async def handle(body: dict) -> None:
+        received.append(body)
+
+    try:
+        async with broker:
+            await asyncio.sleep(1.5)
+            async with async_sessionmaker(pg_engine)() as session, session.begin():
+                await broker.publish({"order_id": 1}, queue="orders", session=session)
+            await _wait_until(lambda: received, timeout=2.0)
+    finally:
+        await engine.dispose()
+
+    assert received == [{"order_id": 1}]
+
+
+async def test_listen_connection_uses_engine_connect_args(pg_engine, outbox_table) -> None:
+    """LISTEN connects through the engine, so connect_args such as server_settings reach it."""
+    app_name = f"outbox-listen-{uuid.uuid4().hex[:8]}"
+    engine = create_async_engine(pg_engine.url, connect_args={"server_settings": {"application_name": app_name}})
+    received: list[dict] = []
+    broker = OutboxBroker(engine, outbox_table=outbox_table)
+
+    @broker.subscriber("orders", min_fetch_interval=0.05, max_fetch_interval=0.2)
+    async def handle(body: dict) -> None:
+        received.append(body)
+
+    try:
+        async with broker:
+            async with async_sessionmaker(engine)() as session, session.begin():
+                await broker.publish({"order_id": 1}, queue="orders", session=session)
+            await _wait_until(lambda: received, timeout=3.0)
+            async with pg_engine.connect() as conn:
+                listening = await conn.scalar(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity "
+                        "WHERE application_name = :app_name AND query LIKE 'LISTEN %'"
+                    ),
+                    {"app_name": app_name},
+                )
+    finally:
+        await engine.dispose()
+
+    assert listening == 1
+
+
 async def test_fetch_uses_persistent_connection(pg_engine, outbox_table) -> None:
     """Every fetch must land on the same backend pid — proves the connection is reused."""
     broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
