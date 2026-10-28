@@ -29,7 +29,7 @@ services:
     volumes:
       - ./tests_dr/primary-init.sh:/docker-entrypoint-initdb.d/primary-init.sh:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U outbox -d outbox"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U outbox -d outbox"]
       interval: 1s
       timeout: 3s
       retries: 30
@@ -47,7 +47,7 @@ services:
       pg-primary:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U outbox -d outbox"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U outbox -d outbox"]
       interval: 1s
       timeout: 3s
       retries: 60
