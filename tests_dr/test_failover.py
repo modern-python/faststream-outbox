@@ -16,6 +16,7 @@ from faststream_outbox import OutboxBroker, make_outbox_table
 
 
 PRIMARY_DSN = os.environ.get("PRIMARY_DSN", "")
+STANDBY_DSN = os.environ.get("STANDBY_DSN", "")
 REPLICA_DSN = os.environ.get("REPLICA_DSN", "")
 DOCKER_SOCKET = "/var/run/docker.sock"
 PRIMARY_CONTAINER = "outbox-dr-primary"
@@ -33,19 +34,31 @@ TEST_BUDGET_SECONDS = 240.0
 pytestmark = pytest.mark.skipif(not PRIMARY_DSN, reason="needs the docker-compose.dr.yml cluster")
 
 
-async def _connect_to_primary() -> asyncpg.Connection:
-    """Try each host under its own timeout; asyncpg's ``timeout`` covers all hosts at once."""
-    errors: list[Exception] = []
-    for dsn in (PRIMARY_DSN, REPLICA_DSN):
-        try:
-            async with asyncio.timeout(CONNECT_TIMEOUT_SECONDS):
-                return await asyncpg.connect(
-                    dsn, target_session_attrs="primary", command_timeout=COMMAND_TIMEOUT_SECONDS
-                )
-        except (OSError, asyncpg.TargetServerAttributeNotMatched) as e:
-            errors.append(e)
-    msg = "no primary reachable"
-    raise ExceptionGroup(msg, errors)
+def _primary_connector(rejected_standbys: list[str]) -> Callable[[], Awaitable[asyncpg.Connection]]:
+    """Try each host under its own timeout; asyncpg's ``timeout`` covers all hosts at once.
+
+    The standby sits between the old primary and the promoted replica, so after failover every
+    connect has to reject it as read-only before it reaches the new primary.
+    """
+
+    async def connect() -> asyncpg.Connection:
+        errors: list[Exception] = []
+        for dsn in (PRIMARY_DSN, STANDBY_DSN, REPLICA_DSN):
+            try:
+                async with asyncio.timeout(CONNECT_TIMEOUT_SECONDS):
+                    return await asyncpg.connect(
+                        dsn, target_session_attrs="primary", command_timeout=COMMAND_TIMEOUT_SECONDS
+                    )
+            except asyncpg.TargetServerAttributeNotMatched as e:
+                if dsn == STANDBY_DSN:
+                    rejected_standbys.append(dsn)
+                errors.append(e)
+            except OSError as e:
+                errors.append(e)
+        msg = "no primary reachable"
+        raise ExceptionGroup(msg, errors)
+
+    return connect
 
 
 async def _docker(method: str, path: str, body: dict[str, object] | None = None) -> None:
@@ -99,6 +112,14 @@ async def _wait_replica_caught_up() -> None:
         await replica.close()
 
 
+async def _standby_in_recovery() -> bool:
+    standby = await asyncpg.connect(STANDBY_DSN)
+    try:
+        return bool(await standby.fetchval("SELECT pg_is_in_recovery()"))
+    finally:
+        await standby.close()
+
+
 async def _promote_replica() -> None:
     replica = await asyncpg.connect(REPLICA_DSN)
     try:
@@ -109,7 +130,8 @@ async def _promote_replica() -> None:
 
 @pytest.mark.parametrize("fail_primary", [_kill_primary, _blackhole_primary], ids=["kill", "blackhole"])
 async def test_subscriber_recovers_after_failover(fail_primary: Callable[[], Awaitable[None]]) -> None:
-    engine = create_async_engine("postgresql+asyncpg://", async_creator=_connect_to_primary)
+    rejected_standbys: list[str] = []
+    engine = create_async_engine("postgresql+asyncpg://", async_creator=_primary_connector(rejected_standbys))
     metadata = MetaData()
     table = make_outbox_table(metadata, table_name="dr_outbox")
     async with engine.begin() as conn:
@@ -169,8 +191,10 @@ async def test_subscriber_recovers_after_failover(fail_primary: Callable[[], Awa
         await publish(BEFORE + AFTER)
         published_at = time.monotonic()
         await _wait_until(lambda: BEFORE + AFTER in handled_at, deadline=published_at + 3, what="NOTIFY wakeup")
+        assert rejected_standbys, "no connect attempt reached the standby"
+        assert await _standby_in_recovery()
 
         print(  # noqa: T201
             f"\npublish recovered {publish_recovered:.1f}s, subscriber recovered {subscriber_recovered:.1f}s, "
-            f"redeliveries {len(deliveries) - len(handled_at)}",
+            f"redeliveries {len(deliveries) - len(handled_at)}, standby rejected {len(rejected_standbys)}x",
         )

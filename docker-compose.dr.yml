@@ -15,8 +15,11 @@ services:
     depends_on:
       pg-replica:
         condition: service_healthy
+      pg-standby:
+        condition: service_healthy
     environment:
       - PRIMARY_DSN=postgresql://outbox:outbox@pg-primary:5432/outbox
+      - STANDBY_DSN=postgresql://outbox:outbox@pg-standby:5432/outbox
       - REPLICA_DSN=postgresql://outbox:outbox@pg-replica:5432/outbox
 
   pg-primary:
@@ -29,7 +32,7 @@ services:
     volumes:
       - ./tests_dr/primary-init.sh:/docker-entrypoint-initdb.d/primary-init.sh:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U outbox -d outbox"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U outbox -d outbox"]
       interval: 1s
       timeout: 3s
       retries: 30
@@ -47,7 +50,25 @@ services:
       pg-primary:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U outbox -d outbox"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U outbox -d outbox"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+
+  pg-standby:
+    image: postgres:17
+    container_name: outbox-dr-standby
+    user: postgres
+    entrypoint: ["bash", "/replica-entrypoint.sh"]
+    environment:
+      - PGPASSWORD=outbox
+    volumes:
+      - ./tests_dr/replica-entrypoint.sh:/replica-entrypoint.sh:ro
+    depends_on:
+      pg-primary:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U outbox -d outbox"]
       interval: 1s
       timeout: 3s
       retries: 60
