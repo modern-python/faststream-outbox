@@ -382,8 +382,8 @@ an error. If the old primary's name still resolves but its packets are dropped
 (a powered-off VM behind a firewall, a network partition), the connect hangs on
 that host until the timeout runs out, and the other hosts are never tried
 ([MagicStack/asyncpg#1155](https://github.com/MagicStack/asyncpg/issues/1155)).
-Until asyncpg has a per-host timeout, connect through an `async_creator` that
-gives each host its own:
+Until asyncpg has a per-host timeout, connect through an `async_creator`
+(SQLAlchemy 2.0.16 or newer) that gives each host its own:
 
 ```python
 import asyncio

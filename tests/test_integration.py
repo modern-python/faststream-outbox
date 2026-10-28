@@ -47,6 +47,14 @@ async def _wait_until(predicate, *, timeout: float = 5.0) -> None:  # noqa: ASYN
     raise AssertionError(msg)  # pragma: no cover - only when the predicate times out, failing the test
 
 
+def _supports_async_creator() -> bool:
+    try:
+        create_async_engine("postgresql+asyncpg://", async_creator=asyncpg.connect)
+    except TypeError:  # pragma: no cover - only on SQLAlchemy < 2.0.16, the floor on Python < 3.13
+        return False
+    return True
+
+
 async def _row_count(engine: AsyncEngine, table) -> int:
     async with engine.connect() as conn:
         result = await conn.execute(select(table))
@@ -786,6 +794,7 @@ async def test_notify_wakes_subscriber_well_before_polling_interval(pg_engine, o
     assert received == [{"order_id": 1}]
 
 
+@pytest.mark.skipif(not _supports_async_creator(), reason="async_creator needs SQLAlchemy 2.0.16+")
 async def test_listen_connection_uses_engine_async_creator(pg_engine, outbox_table) -> None:
     """LISTEN connects through the engine's async_creator, not by re-reading the URL."""
     dsn = pg_engine.url.set(drivername="postgresql").render_as_string(hide_password=False)
