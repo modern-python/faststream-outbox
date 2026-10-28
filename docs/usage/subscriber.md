@@ -339,8 +339,9 @@ The base strategy also enforces `max_attempts` and
 ## Connection budget
 
 Each subscriber holds `max_workers + 1` long-lived SQLAlchemy pool
-connections (one writer per worker + one fetch), plus one raw asyncpg
-connection for `LISTEN` when available. Size your engine pool for
+connections (one writer per worker + one fetch), plus one connection for
+`LISTEN` when available. The `LISTEN` connection is checked out from the pool
+and then detached, so it doesn't count against the pool. Size your engine pool for
 `Σ subscribers × (max_workers + 1)`. With a fixed-size pool (SQLAlchemy's
 default `QueuePool`), `broker.start()` raises `RuntimeError` when
 `pool_size + max_overflow` is below that sum. `NullPool` and an unlimited
@@ -351,8 +352,8 @@ repeating reconnect ERROR logs. SQLAlchemy's default `pool_size=5,
 max_overflow=10` covers a handful of single-worker subscribers; raise it for
 larger fleets.
 
-Server-side, the footprint is one larger: the raw asyncpg `LISTEN`
-connection lives outside the pool, so each subscriber consumes
+Server-side, the footprint is one larger: the detached `LISTEN`
+connection still holds a Postgres backend, so each subscriber consumes
 `max_workers + 2` Postgres connections. The budget is per process:
 each replica opens its own pool and LISTEN connections, so your Postgres
 `max_connections` needs to cover `replicas × Σ subscribers × (max_workers +
@@ -374,6 +375,57 @@ engine = create_async_engine(
 
 Without `target_session_attrs=primary`, a reconnect can land on a standby, where
 the fetch fails with a read-only error.
+
+A multi-host URL has one gap. asyncpg applies its connect `timeout` to all the
+hosts together, and it moves on to the next host only when a connect fails with
+an error. If the old primary's name still resolves but its packets are dropped
+(a powered-off VM behind a firewall, a network partition), the connect hangs on
+that host until the timeout runs out, and the other hosts are never tried
+([MagicStack/asyncpg#1155](https://github.com/MagicStack/asyncpg/issues/1155)).
+Until asyncpg has a per-host timeout, connect through an `async_creator` that
+gives each host its own:
+
+```python
+import asyncio
+
+import asyncpg
+from sqlalchemy.ext.asyncio import create_async_engine
+
+HOSTS = ("pg-1", "pg-2")
+
+
+async def connect_to_primary() -> asyncpg.Connection:
+    errors: list[Exception] = []
+    for host in HOSTS:
+        try:
+            async with asyncio.timeout(3):
+                return await asyncpg.connect(
+                    host=host,
+                    user="user",
+                    password="pass",
+                    database="app",
+                    target_session_attrs="primary",
+                    command_timeout=30,
+                )
+        except (OSError, asyncpg.TargetServerAttributeNotMatched) as e:
+            errors.append(e)
+    raise ExceptionGroup("no primary reachable", errors)
+
+
+engine = create_async_engine("postgresql+asyncpg://", async_creator=connect_to_primary)
+```
+
+The subscriber opens its fetch, writer and `LISTEN` connections through the
+engine, so the creator covers all of them. Keep the per-host timeout to a few
+seconds, since every reconnect pays it once for the dead host.
+
+`command_timeout` protects the application's own sessions. After a silent loss
+the pool still holds idle connections to the old primary, and a statement on
+one of them hangs. SQLAlchemy shields a session's close from cancellation, so an
+`asyncio.timeout` around your code does not end the hang either.
+`command_timeout` fails the statement instead, and the next checkout connects
+again. Set it above your longest legitimate query. The subscriber's own
+statements are capped by `query_timeout_seconds` either way.
 
 How fast the subscriber recovers depends on how the old primary went away:
 

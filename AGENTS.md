@@ -19,9 +19,9 @@ the vocabulary. Read it before naming a concept in code, a test name, or an issu
   pytest`; `tests/test_integration.py` skips if `POSTGRES_DSN` is unreachable. The compose Postgres
   publishes no host port, so run the DB tests through `just test`. The coverage gate is on by
   default, so a partial run trips it; pass `--no-cov` while iterating.
-- `just test-dr` runs the failover drills in `tests_dr/` (primary killed, primary cut off from the
-  network), each on a fresh primary/replica cluster from `docker-compose.dr.yml`. It needs the Docker
-  socket, takes a few minutes, and is not in CI.
+- `just test-dr` runs the failover drills in `tests_dr/` (primary killed, primary's packets
+  dropped), each on a fresh primary/replica cluster from `docker-compose.dr.yml`. It needs the
+  Docker socket and `NET_ADMIN`, takes a few minutes, and is not in CI.
 - Nothing validates Markdown links outside `docs/`. `just docs-build` runs `mkdocs --strict` over
   the site only; root Markdown, `.github/`, and `docs/agents/` are unchecked.
 

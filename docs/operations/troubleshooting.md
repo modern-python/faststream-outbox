@@ -108,14 +108,15 @@ Rows arrive but take up to `max_fetch_interval` (default 10 s) to
 dispatch, even though no other rows are in flight. NOTIFY should cut the
 idle wait short to about 10 ms.
 
-The likely cause is a `LISTEN` setup failure at subscriber start. The raw
-asyncpg connection that owns `LISTEN outbox_<table>` is separate from
-the SQLAlchemy fetch connection. Common failure modes are a missing
-asyncpg driver (no `[asyncpg]` extra), an engine URL that is not asyncpg,
-and a Postgres user without `LISTEN` permission.
+The likely cause is a `LISTEN` setup failure at subscriber start. The
+connection that owns `LISTEN outbox_<table>` is checked out from the
+engine's pool and detached, so it is separate from the fetch connection.
+Common failure modes are a missing asyncpg driver (no `[asyncpg]` extra),
+an engine URL that is not asyncpg, a pool the application's own sessions
+have exhausted, and a Postgres user without `LISTEN` permission.
 
-A connection or permission failure (`asyncpg.connect` or `add_listener`
-raising) logs a WARNING once at startup noting the NOTIFY fallback to
+A connection or permission failure (the pool checkout or `add_listener`
+raising, or `add_listener` not answering within `query_timeout_seconds`) logs a WARNING once at startup noting the NOTIFY fallback to
 polling. A missing asyncpg driver or a non-asyncpg engine URL falls back
 silently, with no log line. In that case, check that the engine URL's
 `drivername` is `postgresql+asyncpg` and that the `[asyncpg]` extra is
