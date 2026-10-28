@@ -1898,22 +1898,13 @@ async def test_open_listen_connection_returns_none_for_non_asyncpg_driver() -> N
     assert result is None
 
 
-async def test_open_listen_connection_returns_none_when_asyncpg_connect_fails() -> None:
+async def test_open_listen_connection_returns_none_when_checkout_fails() -> None:
     sub = _make_subscriber_for_listener_test()
     engine = MagicMock()
     engine.url.drivername = "postgresql+asyncpg"
-    engine.dialect.create_connect_args.return_value = (
-        [],
-        {"host": "h", "user": "u", "password": "p", "database": "db"},
-    )
+    engine.raw_connection = AsyncMock(side_effect=OSError("boom"))
 
-    with (
-        patch.object(sub, "_log") as log_mock,
-        patch(
-            "faststream_outbox.subscriber.usecase._asyncpg.connect",
-            new=AsyncMock(side_effect=OSError("boom")),
-        ),
-    ):
+    with patch.object(sub, "_log") as log_mock:
         result = await sub._open_listen_connection(engine)  # noqa: SLF001
 
     assert result is None
@@ -1921,46 +1912,21 @@ async def test_open_listen_connection_returns_none_when_asyncpg_connect_fails() 
     assert "LISTEN setup failed" in log_mock.call_args.kwargs["message"]
 
 
-async def test_open_listen_connection_passes_multihost_kwargs_to_asyncpg() -> None:
-    """Multi-host URLs must reach asyncpg as host/port lists, not a re-rendered DSN.
-
-    ``?host=h1:5432&host=h2:5432`` renders back as URL-encoded host tokens asyncpg
-    can't parse. SQLAlchemy-only kwargs (``prepared_statement_cache_size``, ...) must
-    be stripped before ``asyncpg.connect``, which rejects unknown kwargs.
-    """
+async def test_open_listen_connection_detaches_pooled_connection() -> None:
+    """The LISTEN connection leaves the pool, so no other checkout can be handed it."""
     sub = _make_subscriber_for_listener_test()
+    pooled = MagicMock()
+    pooled.driver_connection.add_listener = AsyncMock()
     engine = MagicMock()
     engine.url.drivername = "postgresql+asyncpg"
-    engine.dialect.create_connect_args.return_value = (
-        [],
-        {
-            "host": ["h1", "h2"],
-            "port": [5432, 5432],
-            "user": "u",
-            "password": "p",
-            "database": "db",
-            "prepared_statement_cache_size": 100,
-        },
-    )
+    engine.raw_connection = AsyncMock(return_value=pooled)
 
-    fake_conn = MagicMock()
-    fake_conn.add_listener = AsyncMock()
-    connect_mock = AsyncMock(return_value=fake_conn)
-
-    with (
-        patch("faststream_outbox.subscriber.usecase._asyncpg.connect", new=connect_mock),
-        patch.object(OutboxSubscriber, "_notify_channel", new="outbox_orders"),
-    ):
+    with patch.object(OutboxSubscriber, "_notify_channel", new="outbox_orders"):
         result = await sub._open_listen_connection(engine)  # noqa: SLF001
 
-    assert result is fake_conn
-    connect_mock.assert_awaited_once()
-    assert connect_mock.await_args is not None
-    kwargs = connect_mock.await_args.kwargs
-    assert kwargs["host"] == ["h1", "h2"]
-    assert kwargs["port"] == [5432, 5432]
-    assert "prepared_statement_cache_size" not in kwargs
-    fake_conn.add_listener.assert_awaited_once()
+    assert result is pooled.driver_connection
+    pooled.detach.assert_called_once_with()
+    pooled.driver_connection.add_listener.assert_awaited_once()
 
 
 # --- listen_conn health check (H2 — silent listener death) ---
@@ -2816,25 +2782,52 @@ async def test_worker_loop_reconnects_after_error(monkeypatch: pytest.MonkeyPatc
 
 
 async def test_open_listen_connection_closes_conn_when_add_listener_fails() -> None:
-    """B4: connect() succeeded but add_listener() failed → close the orphaned conn, don't leak it."""
+    """B4: checkout succeeded but add_listener() failed → close the orphaned conn, don't leak it."""
     sub = _make_subscriber_for_listener_test()
-    engine = MagicMock()
-    engine.url.drivername = "postgresql+asyncpg"
-    engine.dialect.create_connect_args.return_value = (
-        [],
-        {"host": "h", "user": "u", "password": "p", "database": "db"},
-    )
     fake_conn = MagicMock()
     fake_conn.add_listener = AsyncMock(side_effect=OSError("listen rejected"))
     fake_conn.close = AsyncMock()
+    engine = MagicMock()
+    engine.url.drivername = "postgresql+asyncpg"
+    engine.raw_connection = AsyncMock(return_value=MagicMock(driver_connection=fake_conn))
     with (
-        patch("faststream_outbox.subscriber.usecase._asyncpg.connect", new=AsyncMock(return_value=fake_conn)),
         patch.object(OutboxSubscriber, "_notify_channel", new="outbox_orders"),
         patch.object(sub, "_log"),
     ):
         result = await sub._open_listen_connection(engine)  # noqa: SLF001
     assert result is None
     fake_conn.close.assert_awaited_once()
+
+
+async def test_open_listen_connection_raises_on_hung_add_listener() -> None:
+    """A LISTEN that never answers raises after query_timeout, so the fetch loop reconnects.
+
+    A checkout can return an idle pooled socket that went silent with the old primary;
+    falling back to polling would leave NOTIFY off until the fetch loop next fails.
+    """
+    broker = _make_broker()
+
+    @broker.subscriber("orders", query_timeout_seconds=0.05)
+    async def handle(body: dict) -> None: ...
+
+    sub = next(iter(broker._subscribers))  # noqa: SLF001
+    driver_conn = MagicMock()
+
+    async def _hang(*_: object) -> None:
+        await asyncio.Event().wait()
+
+    driver_conn.add_listener = _hang
+    driver_conn.close = AsyncMock()
+    engine = MagicMock()
+    engine.url.drivername = "postgresql+asyncpg"
+    engine.raw_connection = AsyncMock(return_value=MagicMock(driver_connection=driver_conn))
+    with (
+        patch.object(OutboxSubscriber, "_notify_channel", new="outbox_orders"),
+        pytest.raises(TimeoutError),
+    ):
+        async with asyncio.timeout(2.0):
+            await sub._open_listen_connection(engine)  # noqa: SLF001
+    driver_conn.close.assert_awaited_once()
 
 
 async def test_close_listen_connection_graceful_close_succeeds() -> None:

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import socket
 import time
 from collections.abc import Awaitable, Callable
 
@@ -14,21 +15,37 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from faststream_outbox import OutboxBroker, make_outbox_table
 
 
-CLUSTER_DSN = os.environ.get("DR_CLUSTER_DSN", "")
 PRIMARY_DSN = os.environ.get("PRIMARY_DSN", "")
 REPLICA_DSN = os.environ.get("REPLICA_DSN", "")
 DOCKER_SOCKET = "/var/run/docker.sock"
 PRIMARY_CONTAINER = "outbox-dr-primary"
-NETWORK = "outbox-dr_default"
+PRIMARY_HOST = "pg-primary"
 QUEUE = "dr"
 BEFORE = 50
 AFTER = 50
 QUERY_TIMEOUT_SECONDS = 10.0
+CONNECT_TIMEOUT_SECONDS = 3.0
+COMMAND_TIMEOUT_SECONDS = 3.0
 RECOVERY_BUDGET_SECONDS = 90.0
 PUBLISH_ATTEMPT_TIMEOUT_SECONDS = 5.0
 TEST_BUDGET_SECONDS = 240.0
 
-pytestmark = pytest.mark.skipif(not CLUSTER_DSN, reason="needs the docker-compose.dr.yml cluster")
+pytestmark = pytest.mark.skipif(not PRIMARY_DSN, reason="needs the docker-compose.dr.yml cluster")
+
+
+async def _connect_to_primary() -> asyncpg.Connection:
+    """Try each host under its own timeout; asyncpg's ``timeout`` covers all hosts at once."""
+    errors: list[Exception] = []
+    for dsn in (PRIMARY_DSN, REPLICA_DSN):
+        try:
+            async with asyncio.timeout(CONNECT_TIMEOUT_SECONDS):
+                return await asyncpg.connect(
+                    dsn, target_session_attrs="primary", command_timeout=COMMAND_TIMEOUT_SECONDS
+                )
+        except (OSError, asyncpg.TargetServerAttributeNotMatched) as e:
+            errors.append(e)
+    msg = "no primary reachable"
+    raise ExceptionGroup(msg, errors)
 
 
 async def _docker(method: str, path: str, body: dict[str, object] | None = None) -> None:
@@ -50,7 +67,14 @@ async def _kill_primary() -> None:
 
 
 async def _blackhole_primary() -> None:
-    await _docker("POST", f"/networks/{NETWORK}/disconnect", {"Container": PRIMARY_CONTAINER, "Force": True})
+    """Drop every packet to and from the primary; its name still resolves, so connects hang."""
+    infos = await asyncio.get_running_loop().getaddrinfo(
+        PRIMARY_HOST, None, family=socket.AF_INET, type=socket.SOCK_STREAM
+    )
+    address = str(infos[0][4][0])
+    for rule in (["OUTPUT", "-d", address], ["INPUT", "-s", address]):
+        proc = await asyncio.create_subprocess_exec("iptables", "-A", *rule, "-j", "DROP")
+        assert await proc.wait() == 0, rule
 
 
 async def _wait_until(predicate: Callable[[], bool], *, deadline: float, what: str) -> None:
@@ -85,7 +109,7 @@ async def _promote_replica() -> None:
 
 @pytest.mark.parametrize("fail_primary", [_kill_primary, _blackhole_primary], ids=["kill", "blackhole"])
 async def test_subscriber_recovers_after_failover(fail_primary: Callable[[], Awaitable[None]]) -> None:
-    engine = create_async_engine(CLUSTER_DSN)
+    engine = create_async_engine("postgresql+asyncpg://", async_creator=_connect_to_primary)
     metadata = MetaData()
     table = make_outbox_table(metadata, table_name="dr_outbox")
     async with engine.begin() as conn:
@@ -142,9 +166,9 @@ async def test_subscriber_recovers_after_failover(fail_primary: Callable[[], Awa
 
         # Idle past max_fetch_interval so only a live LISTEN connection can deliver within 3s.
         await asyncio.sleep(12)
-        sent_at = time.monotonic()
         await publish(BEFORE + AFTER)
-        await _wait_until(lambda: BEFORE + AFTER in handled_at, deadline=sent_at + 3, what="NOTIFY wakeup")
+        published_at = time.monotonic()
+        await _wait_until(lambda: BEFORE + AFTER in handled_at, deadline=published_at + 3, what="NOTIFY wakeup")
 
         print(  # noqa: T201
             f"\npublish recovered {publish_recovered:.1f}s, subscriber recovered {subscriber_recovered:.1f}s, "

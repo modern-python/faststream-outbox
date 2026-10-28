@@ -385,18 +385,20 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         Production path opens a long-lived ``AsyncConnection`` for the fetch CTE and a
         separate raw asyncpg connection for LISTEN. Test-broker path (``engine is None``)
         skips both and lets ``_fetch_inner`` fall back to ``client.fetch(...)`` per tick.
+        LISTEN is opened first: its checkout is detached at once, so in a pool sized to
+        exactly ``max_workers + 1`` it never waits behind the fetch connection's slot.
         """
         if engine is None:
             yield {"fetch_conn": None, "listen_conn": None}
             return
-        async with engine.connect() as raw_fetch_conn:
-            fetch_conn = await raw_fetch_conn.execution_options(isolation_level="AUTOCOMMIT")
-            listen_conn = await self._open_listen_connection(engine)
-            try:
+        listen_conn = await self._open_listen_connection(engine)
+        try:
+            async with engine.connect() as raw_fetch_conn:
+                fetch_conn = await raw_fetch_conn.execution_options(isolation_level="AUTOCOMMIT")
                 yield {"fetch_conn": fetch_conn, "listen_conn": listen_conn}
-            finally:
-                if listen_conn is not None:
-                    await self._close_listen_connection(listen_conn)
+        finally:
+            if listen_conn is not None:
+                await self._close_listen_connection(listen_conn)
 
     async def _fetch_inner(
         self,
@@ -469,34 +471,26 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         self._notify_event.clear()
 
     async def _open_listen_connection(self, engine: "AsyncEngine") -> "asyncpg.Connection | None":
-        """Open a dedicated raw asyncpg connection and register LISTEN on it.
+        """Check a connection out of the engine's pool, detach it, and LISTEN on it; ``None`` on failure.
 
-        Returns the connection on success, ``None`` on any failure (asyncpg not installed,
-        non-asyncpg driver, permission error, network problem). The fetch loop falls back
-        to polling-only behavior in that case.
-
-        A separate connection is used so application fetch traffic and the LISTEN reader
-        task don't contend on one connection. The only query this loop runs on the LISTEN
-        connection is the bounded ``SELECT 1`` liveness probe in ``_fetch_inner`` — a
-        deliberate, infrequent exception that surfaces a silently-dropped socket; it does
-        not interfere with notification delivery (P15).
+        Detached so the pool never hands it to another checkout. An ``add_listener`` that outlives
+        ``query_timeout`` raises instead, so the fetch loop reconnects rather than polling on a
+        silent socket. The only other query on it is the ``SELECT 1`` probe in ``_fetch_inner`` (P15).
         """
         if _asyncpg is None or "asyncpg" not in (engine.url.drivername or ""):
             return None
-        # Delegate URL → asyncpg kwargs translation to SQLAlchemy's dialect so multi-host
-        # URLs (``?host=h1:5432&host=h2:5432``) become ``host=[...], port=[...]``. Round-
-        # tripping through ``render_as_string`` URL-encodes ``host:port`` into one token
-        # asyncpg can't parse and fails for failover/replica clusters.
-        _, opts = engine.dialect.create_connect_args(engine.url)
-        for sa_only_key in ("prepared_statement_cache_size", "async_fallback", "async_creator_fn"):
-            opts.pop(sa_only_key, None)
         conn: asyncpg.Connection | None = None
         listening = False
         try:
-            conn = await _asyncpg.connect(**opts)
-            await conn.add_listener(self._notify_channel, self._on_notify)
+            pooled = await engine.raw_connection()
+            conn = typing.cast("asyncpg.Connection", pooled.driver_connection)
+            pooled.detach()
+            async with asyncio.timeout(self._config.query_timeout):
+                await conn.add_listener(self._notify_channel, self._on_notify)
             listening = True
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
+            if conn is not None and isinstance(e, TimeoutError):
+                raise
             self._log(
                 log_level=logging.WARNING,
                 message=f"LISTEN setup failed; falling back to polling: {e!r}",
@@ -504,12 +498,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             )
         finally:
             if conn is not None and not listening:
-                # connect() opened the socket but add_listener failed (PgBouncer txn
-                # pooling, a drop between awaits) or the task was cancelled — close the
-                # orphaned connection so a reconnect storm can't leak one raw asyncpg
-                # connection per cycle (B4). suppress: the socket may already be dead.
-                with suppress(Exception):
-                    await conn.close()
+                await self._close_listen_connection(conn)
         return conn if listening else None
 
     async def _close_listen_connection(self, listen_conn: "asyncpg.Connection") -> None:

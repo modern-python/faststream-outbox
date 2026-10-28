@@ -8,13 +8,13 @@ story.
 
 - [ ] Engine pool ≥ `Σ subs × (max_workers + 1)`. Every
   subscriber holds `max_workers + 1` SQLAlchemy pool connections (one
-  writer per worker + one fetch) plus one raw asyncpg connection for
-  `LISTEN`. With a fixed-size pool, `broker.start()` raises below this
-  number; budget extra connections for the application's own sessions on
-  top. Sub-budget formula in [Subscriber § Connection
+  writer per worker + one fetch) plus one connection for `LISTEN`,
+  which is detached from the pool once it is open. With a fixed-size
+  pool, `broker.start()` raises below this number; budget extra
+  connections for the application's own sessions on top. Sub-budget formula in [Subscriber § Connection
   budget](../usage/subscriber.md#connection-budget).
 - [ ] Postgres `max_connections` ≥ `replicas × Σ subs × (max_workers + 2)`.
-  That covers `max_workers + 1` pool connections plus the raw asyncpg `LISTEN`
+  That covers `max_workers + 1` pool connections plus the detached `LISTEN`
   connection per subscriber. The formula is per-process, and rolling deploys
   multiply it. If it is too low, pods refuse with `FATAL: too many connections`.
 
@@ -26,7 +26,8 @@ story.
   Tuning: [Subscriber § Slow handlers: dedicated
   queue](../usage/subscriber.md#slow-handlers-dedicated-queue).
 - [ ] Engine URL follows the primary across a failover (a proxy, or a
-  multi-host URL with `target_session_attrs=primary`). Subscribers with a
+  multi-host URL with `target_session_attrs=primary` and an `async_creator`
+  that gives each host its own connect timeout). Subscribers with a
   long lease set a shorter `query_timeout_seconds`; recovery from a primary
   that went silent takes about that value plus `max_fetch_interval`. See
   [Subscriber § Database failover](../usage/subscriber.md#database-failover).
@@ -89,7 +90,7 @@ story.
   `lease_ttl_seconds < handler P99` for at least one subscriber. See
   [Troubleshooting § `event=lease_lost`](./troubleshooting.md#event-lease_lost-recurring-in-logs).
 - [ ] `LISTEN/NOTIFY` fallback understood. A *connection* or
-  *permission* failure (`asyncpg.connect` / `add_listener` raising) logs a
+  *permission* failure (the pool checkout or `add_listener` raising) logs a
   WARNING once and falls back to polling. A missing asyncpg driver or a
   non-asyncpg engine URL falls back silently (no log), so diagnose those
   from the engine URL, not the logs. Either way the subscriber lives with

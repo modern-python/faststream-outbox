@@ -4,8 +4,10 @@ services:
   dr:
     build:
       context: .
-      dockerfile: ./Dockerfile
+      dockerfile: ./tests_dr/Dockerfile
     user: root
+    cap_add:
+      - NET_ADMIN
     volumes:
       - .:/code
       - /code/.venv
@@ -14,7 +16,6 @@ services:
       pg-replica:
         condition: service_healthy
     environment:
-      - DR_CLUSTER_DSN=postgresql+asyncpg://outbox:outbox@/outbox?host=pg-primary:5432&host=pg-replica:5432&target_session_attrs=primary
       - PRIMARY_DSN=postgresql://outbox:outbox@pg-primary:5432/outbox
       - REPLICA_DSN=postgresql://outbox:outbox@pg-replica:5432/outbox
 
