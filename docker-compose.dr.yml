@@ -25,6 +25,7 @@ services:
   pg-primary:
     image: postgres:17
     container_name: outbox-dr-primary
+    command: ["postgres", "-c", "wal_keep_size=256MB"]
     environment:
       - POSTGRES_USER=outbox
       - POSTGRES_PASSWORD=outbox
