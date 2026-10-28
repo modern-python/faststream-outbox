@@ -890,6 +890,73 @@ async def test_query_timeout_bounds_hung_fetch_below_lease_ttl(pg_engine, outbox
     assert received == [{"order_id": 1}]
 
 
+async def test_worker_recycles_writer_connection_after_fetch_loop_reconnects(pg_engine, outbox_table) -> None:
+    """After the fetch loop loses its connection, the worker must not write on its own stale one.
+
+    A silently dropped primary leaves the idle writer connection dead too; reusing it costs a
+    second ``query_timeout_seconds`` before the first post-failover row can be acknowledged.
+    """
+    received: list[dict] = []
+    delete_pids: list[int] = []
+    hang_next_fetch: list[bool] = []
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table, graceful_timeout=2.0)
+    original_fetch = OutboxClient.fetch
+    original_delete = OutboxClient.delete_with_lease
+
+    async def hang_on_demand(
+        self: OutboxClient,
+        conn: AsyncConnection | None,
+        queues: Sequence[str],
+        *,
+        limit: int,
+        lease_ttl_seconds: float,
+    ) -> list[OutboxInnerMessage]:
+        if hang_next_fetch:
+            hang_next_fetch.clear()
+            await asyncio.Event().wait()
+        return await original_fetch(self, conn, queues, limit=limit, lease_ttl_seconds=lease_ttl_seconds)
+
+    async def record_pid(
+        self: OutboxClient,
+        conn: AsyncConnection | None,
+        row_id: int,
+        token: uuid.UUID,
+        *,
+        dlq_payload: Mapping[str, Any] | None = None,
+    ) -> bool:
+        assert conn is not None
+        delete_pids.append((await conn.exec_driver_sql("SELECT pg_backend_pid()")).scalar_one())
+        return await original_delete(self, conn, row_id, token, dlq_payload=dlq_payload)
+
+    @broker.subscriber(
+        "orders",
+        min_fetch_interval=0.05,
+        max_fetch_interval=0.2,
+        lease_ttl_seconds=30.0,
+        query_timeout_seconds=0.5,
+    )
+    async def handle(body: dict) -> None:
+        received.append(body)
+
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    with (
+        mock.patch.object(OutboxClient, "fetch", hang_on_demand),
+        mock.patch.object(OutboxClient, "delete_with_lease", record_pid),
+    ):
+        async with broker:
+            async with session_factory() as session, session.begin():
+                await broker.publish({"order_id": 1}, queue="orders", session=session)
+            await _wait_until(lambda: len(delete_pids) == 1, timeout=5.0)
+            hang_next_fetch.append(True)
+            await _wait_until(lambda: not hang_next_fetch, timeout=5.0)
+            async with session_factory() as session, session.begin():
+                await broker.publish({"order_id": 2}, queue="orders", session=session)
+            await _wait_until(lambda: len(delete_pids) == 2, timeout=10.0)
+
+    assert received == [{"order_id": 1}, {"order_id": 2}]
+    assert delete_pids[0] != delete_pids[1]
+
+
 async def test_hung_terminal_write_times_out_and_worker_reconnects(pg_engine, outbox_table) -> None:
     """A terminal DELETE stuck on a silently dropped socket must not wedge the worker forever."""
     received: list[dict] = []

@@ -70,6 +70,10 @@ _DEFAULT_DRAIN_TIMEOUT_SECONDS = 15.0
 _FLUSH_ON_EXIT_TIMEOUT_SECONDS = 2.0
 
 
+class _StaleWriterError(Exception):
+    """The fetch loop reconnected since this worker opened its writer connection."""
+
+
 @dataclasses.dataclass(slots=True)
 class _PendingFlush:
     """A batchable terminal delete awaiting its batch flush, with the metric to emit once it lands."""
@@ -216,6 +220,8 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         # from self.running: running must stay True during drain so FastStream's
         # SubscriberUsecase.consume() doesn't early-exit on rows already in _inflight.
         self._stopping: bool = False
+        # Bumped on every fetch-loop error; a worker whose writer predates the bump reconnects.
+        self._fetch_generation: int = 0
 
     @property
     def _client(self) -> "AbstractOutboxClient":
@@ -366,6 +372,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
             open_resources=self._open_fetch_resources,
             inner=self._fetch_inner,
             halt_on_drain=True,
+            recycle_writers_on_error=True,
         )
 
     @asynccontextmanager
@@ -586,6 +593,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         open_resources: Callable[["AsyncEngine | None"], AbstractAsyncContextManager[Mapping[str, object]]],
         inner: Callable[..., Awaitable[None]],
         halt_on_drain: bool = False,
+        recycle_writers_on_error: bool = False,
     ) -> None:
         """Reconnect-with-backoff scaffold shared by ``_fetch_loop`` and ``_worker_loop``.
 
@@ -614,7 +622,14 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                 async with open_resources(client.engine) as kwargs:
                     started = time.monotonic()
                     await inner(**kwargs)
+            except _StaleWriterError:
+                self._log(
+                    log_level=logging.INFO,
+                    message=f"Outbox {name} loop reconnecting: the fetch loop lost its connection",
+                )
             except Exception as e:  # noqa: BLE001
+                if recycle_writers_on_error:
+                    self._fetch_generation += 1
                 # Reset the backoff counter when the connection was healthy for a
                 # sustained window before failing — otherwise the lifetime error count
                 # accrues and every transient blip after the first handful costs the
@@ -638,6 +653,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         actual delete, not merely for dispatch.
         """
         buffer: list[_PendingFlush] = []
+        generation = self._fetch_generation
         batch_size = self._config.terminal_flush_batch_size
         max_buffer_age = self._config.lease_ttl_seconds / 2
         try:
@@ -650,6 +666,12 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                         row = await self._inflight.get()
                 else:
                     row = await self._inflight.get()
+                if writer_conn is not None and self._fetch_generation != generation:
+                    self._inflight.put_nowait(row)
+                    self._inflight.task_done()
+                    await self._flush_buffer(buffer, writer_conn=writer_conn)
+                    await writer_conn.invalidate()
+                    raise _StaleWriterError
                 if self._inflight.maxsize - self._inflight.qsize() >= self._refill_at:
                     self._notify_event.set()
                 buffered = False

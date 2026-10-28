@@ -383,9 +383,10 @@ How fast the subscriber recovers depends on how the old primary went away:
 - **It went silent** (the host lost power, or the network was partitioned).
   Statements hang because no error ever arrives. Each fetch and terminal write
   is capped at `query_timeout_seconds`, after which the connection is dropped and
-  the loop reconnects. The fetch loop hits that cap first; the worker hits it
-  again on its own stale connection once it gets a row. Recovery takes about
-  `2 × query_timeout_seconds`, which is two minutes with the default 60 s lease.
+  the loop reconnects. When the fetch loop reconnects, the workers drop their
+  connections too before writing again. Recovery takes about
+  `query_timeout_seconds` plus up to `max_fetch_interval` for an idle subscriber
+  to run its next fetch, which is about 70 s with the defaults.
   A subscriber with a long lease for slow handlers should set a shorter
   `query_timeout_seconds`.
 
