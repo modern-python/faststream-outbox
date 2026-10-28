@@ -1025,12 +1025,14 @@ async def test_publish_with_activate_in_delays_delivery(pg_engine, outbox_table)
 
 
 async def test_publish_with_activate_at_delays_delivery(pg_engine, outbox_table) -> None:
-    received: list[dict] = []
+    """The row is gated at activate_at and claimed no earlier, by the database clock."""
+    claimed: list[OutboxInnerMessage] = []
     broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
 
     @broker.subscriber("orders", min_fetch_interval=0.05, max_fetch_interval=0.2)
-    async def handle(body: dict) -> None:
-        received.append(body)
+    async def handle(body: dict, msg: AnnotatedOutboxMessage) -> None:
+        assert body == {"order_id": 2}
+        claimed.append(msg.raw_message)
 
     fire_at = dt.datetime.now(tz=dt.UTC) + dt.timedelta(milliseconds=500)
     session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
@@ -1042,10 +1044,12 @@ async def test_publish_with_activate_at_delays_delivery(pg_engine, outbox_table)
                 session=session,
                 activate_at=fire_at,
             )
-        await asyncio.sleep(0.2)
-        assert received == []
-        await _wait_until(lambda: received, timeout=3.0)
-    assert received == [{"order_id": 2}]
+        await _wait_until(lambda: claimed, timeout=3.0)
+
+    [row] = claimed
+    assert row.next_attempt_at == fire_at
+    assert row.acquired_at is not None
+    assert row.acquired_at >= row.next_attempt_at
 
 
 async def test_publish_rejects_activate_in_and_at_together(pg_engine, outbox_table) -> None:
