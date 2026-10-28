@@ -27,6 +27,7 @@ from faststream_outbox import (
     make_outbox_table,
     outbox_autovacuum_ddl,
 )
+from faststream_outbox.annotations import OutboxMessage as AnnotatedOutboxMessage
 from faststream_outbox.client import OutboxClient
 from faststream_outbox.envelope import _encode_payload as encode_payload
 from faststream_outbox.message import OutboxInnerMessage
@@ -997,13 +998,14 @@ async def test_hung_terminal_write_times_out_and_worker_reconnects(pg_engine, ou
 
 
 async def test_publish_with_activate_in_delays_delivery(pg_engine, outbox_table) -> None:
-    """Handler must not see the message until activate_in elapses."""
-    received: list[dict] = []
+    """The row is claimed no earlier than activate_in after its insert, by the database clock."""
+    claimed: list[OutboxInnerMessage] = []
     broker = OutboxBroker(pg_engine, outbox_table=outbox_table)
 
     @broker.subscriber("orders", min_fetch_interval=0.05, max_fetch_interval=0.2)
-    async def handle(body: dict) -> None:
-        received.append(body)
+    async def handle(body: dict, msg: AnnotatedOutboxMessage) -> None:
+        assert body == {"order_id": 1}
+        claimed.append(msg.raw_message)
 
     session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
     async with broker:
@@ -1014,12 +1016,12 @@ async def test_publish_with_activate_in_delays_delivery(pg_engine, outbox_table)
                 session=session,
                 activate_in=dt.timedelta(milliseconds=500),
             )
-        # Before the gate opens: nothing delivered.
-        await asyncio.sleep(0.2)
-        assert received == []
-        # After the gate opens: delivered.
-        await _wait_until(lambda: received, timeout=3.0)
-    assert received == [{"order_id": 1}]
+        await _wait_until(lambda: claimed, timeout=3.0)
+
+    [row] = claimed
+    assert row.next_attempt_at - row.created_at == dt.timedelta(milliseconds=500)
+    assert row.acquired_at is not None
+    assert row.acquired_at >= row.next_attempt_at
 
 
 async def test_publish_with_activate_at_delays_delivery(pg_engine, outbox_table) -> None:
