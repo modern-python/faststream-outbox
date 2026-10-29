@@ -65,6 +65,8 @@ async with session_factory() as session, session.begin():
 
 The same one-decorator pattern works for RabbitMQ, NATS, Redis, and Confluent. See the [relay tutorial](https://faststream-outbox.modern-python.org/usage/relay/) for the FastAPI lifecycle, header propagation, router shapes, and the at-least-once contract.
 
+At-least-once means a consumer can receive the same message twice. To skip the repeats on the consuming side, [`sqlalchemy-inbox`](https://github.com/modern-python/sqlalchemy-inbox) records each processed message in the consumer's own PostgreSQL transaction.
+
 ## Quickstart: standalone outbox queue
 
 If you don't have a downstream broker, the same broker can process outbox rows in place, and the table *is* the queue.
