@@ -3,11 +3,12 @@ from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
+from faststream.kafka import KafkaRouter
 from prometheus_client import CollectorRegistry
-from sqlalchemy import Table, func, insert, text
+from sqlalchemy import MetaData, Table, func, insert, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from faststream_outbox import OutboxBroker
+from faststream_outbox import OutboxBroker, make_outbox_table
 from faststream_outbox.metrics.prometheus import PrometheusRecorder
 
 
@@ -53,8 +54,50 @@ async def test_queue_lag_samples_only_claimable_rows(pg_engine: AsyncEngine, out
     assert registry.get_sample_value(age, work) is None
 
 
-def test_queue_lag_is_disabled_by_default() -> None:
+@pytest.mark.asyncio
+async def test_queue_lag_is_disabled_by_default(pg_engine: AsyncEngine, outbox_table: Table) -> None:
     registry = CollectorRegistry()
-    PrometheusRecorder(registry=registry)
-    assert all("queue_lag" not in metric.name for metric in registry.collect())
-    assert all("oldest_due_message_age" not in metric.name for metric in registry.collect())
+    recorder = PrometheusRecorder(registry=registry)
+    async with OutboxBroker(pg_engine, outbox_table=outbox_table, metrics_recorder=recorder):
+        assert all("queue_lag" not in metric.name for metric in registry.collect())
+        assert all("oldest_due_message_age" not in metric.name for metric in registry.collect())
+
+
+@pytest.mark.parametrize("interval", [0.0, -1.0, float("inf"), float("nan")])
+def test_queue_lag_rejects_invalid_interval(interval: float) -> None:
+    with pytest.raises(ValueError, match="queue_lag_interval_seconds must be finite and positive"):
+        PrometheusRecorder(registry=CollectorRegistry(), queue_lag_interval_seconds=interval)
+
+
+@pytest.mark.asyncio
+async def test_queue_lag_ignores_foreign_subscribers(pg_engine: AsyncEngine, outbox_table: Table) -> None:
+    registry = CollectorRegistry()
+    recorder = PrometheusRecorder(registry=registry, queue_lag_interval_seconds=60)
+    router = KafkaRouter()
+    subscriber = router.subscriber("foreign")
+    broker = OutboxBroker(pg_engine, outbox_table=outbox_table, metrics_recorder=recorder)
+    broker.include_router(router)  # ty: ignore[invalid-argument-type]
+
+    with patch.object(subscriber, "start"):
+        async with broker:
+            labels = {"table": outbox_table.fullname, "queue": "foreign"}
+            assert (
+                registry.get_sample_value("faststream_outbox_queue_lag_last_success_timestamp_seconds", labels) is None
+            )
+
+
+@pytest.mark.asyncio
+async def test_queue_lag_reports_failed_sample(pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture) -> None:
+    registry = CollectorRegistry()
+    recorder = PrometheusRecorder(registry=registry, queue_lag_interval_seconds=60)
+    missing_table = make_outbox_table(MetaData(), "missing_lag_outbox")
+    broker = OutboxBroker(pg_engine, outbox_table=missing_table, metrics_recorder=recorder)
+    subscriber = broker.subscriber("work")
+
+    with patch.object(subscriber, "start"):
+        async with broker:
+            async with asyncio.timeout(5):
+                while "Failed to sample outbox lag" not in caplog.text:  # noqa: ASYNC110
+                    await asyncio.sleep(0.01)
+            labels = {"table": missing_table.fullname, "queue": "work"}
+            assert registry.get_sample_value("faststream_outbox_queue_lag_last_success_timestamp_seconds", labels) == 0
