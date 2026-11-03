@@ -111,3 +111,6 @@ extra:
     - icon: fontawesome/brands/github
       link: https://github.com/modern-python/faststream-outbox
       name: GitHub
+
+plugins:
+  - search
