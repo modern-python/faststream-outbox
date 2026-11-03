@@ -29,6 +29,7 @@ Usage::
     )
 """
 
+import math
 import typing
 from collections.abc import Callable, Mapping, Sequence
 
@@ -36,10 +37,13 @@ from faststream._internal.constants import EMPTY
 
 from faststream_outbox._import_checker import is_prometheus_client_installed
 from faststream_outbox.metrics import BROKER_SYSTEM
+from faststream_outbox.metrics.lag import _sample_queue_lag
 
 
 if typing.TYPE_CHECKING:
     from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
+    from sqlalchemy import Table
+    from sqlalchemy.ext.asyncio import AsyncEngine
 
 # ``faststream.prometheus`` imports ``prometheus_client`` at its module top, so its
 # import must be guarded behind the same probe as the third-party import. Importing
@@ -89,13 +93,15 @@ class PrometheusRecorder:
             upstream so series fall onto the existing exposition.
         received_messages_size_buckets: bucket boundaries for the message-size
             histogram. Defaults to FastStream's ``DEFAULT_SIZE_BUCKETS``.
-        custom_labels: extra labels appended to every metric. Same shape as
+        custom_labels: extra labels appended to event metrics. Same shape as
             upstream: ``dict[str, str | Callable[[Mapping], str]]``. Callable
             values receive the event's ``tags`` mapping and return the
             label value. ``published`` tags carry no ``subscriber``.
         include_bus_metrics: if False, skip the consume/publish families that
             ``OutboxPrometheusMiddleware`` also records and keep only the
             ``{metrics_prefix}_outbox_*`` series. Set it when registering both.
+        queue_lag_interval_seconds: seconds between lag samples. Defaults to
+            ``None``, which disables sampling.
 
     """
 
@@ -108,10 +114,30 @@ class PrometheusRecorder:
         received_messages_size_buckets: Sequence[float] | None = None,
         custom_labels: dict[str, str | Callable[[Mapping[str, typing.Any]], str]] | None = None,
         include_bus_metrics: bool = True,
+        queue_lag_interval_seconds: float | None = None,
     ) -> None:
         if not is_prometheus_client_installed:
             msg = "PrometheusRecorder requires the 'prometheus' extra: pip install 'faststream-outbox[prometheus]'"
             raise ImportError(msg)
+        if queue_lag_interval_seconds is not None and (
+            not math.isfinite(queue_lag_interval_seconds) or queue_lag_interval_seconds <= 0
+        ):
+            msg = "queue_lag_interval_seconds must be finite and positive."
+            raise ValueError(msg)
+        self._queue_lag_interval_seconds = queue_lag_interval_seconds
+        if queue_lag_interval_seconds is not None:
+            self._queue_lag_age = Gauge(
+                "faststream_outbox_oldest_due_message_age_seconds",
+                "Age of the oldest claimable row, or zero for an empty claimable queue.",
+                ("table", "queue"),
+                registry=registry,
+            )
+            self._queue_lag_freshness = Gauge(
+                "faststream_outbox_queue_lag_last_success_timestamp_seconds",
+                "Database timestamp of the last successful queue lag sample.",
+                ("table", "queue"),
+                registry=registry,
+            )
         self._app_name = "" if app_name is EMPTY else app_name
         self._custom_label_keys = list((custom_labels or {}).keys())
         self._custom_label_resolvers = list((custom_labels or {}).values())
@@ -241,6 +267,19 @@ class PrometheusRecorder:
         # ``published_messages_*`` definitions.
         destination = tags.get("queue", "")
         return (self._app_name, BROKER_SYSTEM, destination, *self._resolve_custom_values(tags))
+
+    def _queue_lag_context(self, engine: "AsyncEngine", table: "Table", lease_ttl_by_queue: Mapping[str, float]):
+        interval = self._queue_lag_interval_seconds
+        if interval is None or not lease_ttl_by_queue:
+            return None
+        return _sample_queue_lag(
+            engine,
+            table,
+            age=self._queue_lag_age,
+            freshness=self._queue_lag_freshness,
+            lease_ttl_by_queue=lease_ttl_by_queue,
+            interval_seconds=interval,
+        )
 
     def __call__(self, event: str, tags: Mapping[str, typing.Any]) -> None:
         if event == "published":

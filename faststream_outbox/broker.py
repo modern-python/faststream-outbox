@@ -11,6 +11,7 @@ import logging
 import typing
 import warnings
 from collections.abc import Iterable, Sequence
+from contextlib import AbstractAsyncContextManager
 from types import TracebackType
 
 import anyio
@@ -34,9 +35,11 @@ from faststream_outbox.client import AbstractOutboxClient, OutboxClient
 from faststream_outbox.configs import LastExceptionRenderer, OutboxBrokerConfig
 from faststream_outbox.message import OutboxInnerMessage, TimerConflict
 from faststream_outbox.metrics import MetricsRecorder, _noop_recorder
+from faststream_outbox.metrics.prometheus import PrometheusRecorder
 from faststream_outbox.publisher.producer import OutboxProducer
 from faststream_outbox.registrator import OutboxRegistrator
 from faststream_outbox.response import _REQUEST_UNSUPPORTED_MSG, OutboxPublishCommand, _validate_publish_args
+from faststream_outbox.subscriber.usecase import OutboxSubscriber
 
 
 _logger = logging.getLogger(__name__)
@@ -51,8 +54,6 @@ if typing.TYPE_CHECKING:
     from faststream._internal.context.repository import ContextRepo
     from sqlalchemy import Table
     from sqlalchemy.ext.asyncio import AsyncEngine
-
-    from faststream_outbox.subscriber.usecase import OutboxSubscriber
 
 
 def _spec_url(engine: "AsyncEngine | None", outbox_table: "Table") -> list[str]:
@@ -155,6 +156,7 @@ class OutboxBroker(
     ) -> None:
         self._outbox_table = outbox_table
         self._dlq_table = dlq_table
+        self._queue_lag: AbstractAsyncContextManager[None] | None = None
         client = OutboxClient(engine, outbox_table, dlq_table=dlq_table) if engine is not None else None
         fd_config = FastDependsConfig(use_fastdepends=apply_types, serializer=serializer)
         recorder: MetricsRecorder = metrics_recorder or _noop_recorder
@@ -235,6 +237,27 @@ class OutboxBroker(
         await super().start()
         self._warn_on_unstarted_foreign_publishers()
         self._warn_on_duplicate_queues()
+        await self._start_queue_lag()
+
+    async def _start_queue_lag(self) -> None:
+        """Start the recorder's sampler for the queues registered on this broker."""
+        config = self.config.broker_config
+        recorder = config.metrics_recorder
+        if self._queue_lag is not None or not isinstance(recorder, PrometheusRecorder) or config.engine is None:
+            return
+        if recorder._queue_lag_interval_seconds is None:  # noqa: SLF001
+            return
+        lease_ttl_by_queue: dict[str, float] = {}
+        for sub in self.subscribers:
+            if not isinstance(sub, OutboxSubscriber):
+                continue
+            ttl = sub._config.lease_ttl_seconds  # noqa: SLF001
+            for queue in sub._queues:  # noqa: SLF001
+                lease_ttl_by_queue[queue] = min(ttl, lease_ttl_by_queue.get(queue, ttl))
+        context = recorder._queue_lag_context(config.engine, self._outbox_table, lease_ttl_by_queue)  # noqa: SLF001
+        if context is not None:
+            await context.__aenter__()
+            self._queue_lag = context
 
     def _check_pool_capacity(self) -> None:
         """Raise when a fixed-size pool can't hold every subscriber's connections at once.
@@ -347,6 +370,9 @@ class OutboxBroker(
         # otherwise an external cancellation of stop() during the gather leaves
         # running=True over already-stopped subscribers (ping() would lie).
         self.running = False
+        queue_lag, self._queue_lag = self._queue_lag, None
+        if queue_lag is not None:
+            await queue_lag.__aexit__(None, None, None)
         results = await asyncio.gather(
             *(sub.stop() for sub in subs),
             return_exceptions=True,

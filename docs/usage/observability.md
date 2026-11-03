@@ -158,3 +158,55 @@ middleware stack, so publish-scope middleware metrics and the recorder
 Consume-scope metrics fire too. In sync mode the handler runs inside
 `publish`, so a publish-scope duration includes the handler's run time;
 the recorder's `duration_seconds` covers only the in-memory insert.
+
+## Queue lag
+
+Set `queue_lag_interval_seconds` on your existing `PrometheusRecorder` to
+enable sampling. Omit it or pass `None` to disable sampling.
+
+```python
+broker = OutboxBroker(
+    engine,
+    outbox_table=outbox_table,
+    metrics_recorder=PrometheusRecorder(
+        app_name="checkout",
+        registry=registry,
+        queue_lag_interval_seconds=60,
+    ),
+)
+```
+
+The broker starts and stops the sampler. It samples immediately, then waits
+the configured interval between rounds. At startup it reads the lease TTL
+for each registered subscriber queue. If subscribers overlap on a queue,
+the sampler uses the shortest TTL.
+
+Both gauges have `table` and `queue` labels:
+
+- `faststream_outbox_oldest_due_message_age_seconds` is the time since the
+  oldest claimable row became due. Rows under active leases and future timers
+  and retries are excluded. A successful sample of an empty claimable queue is
+  zero.
+- `faststream_outbox_queue_lag_last_success_timestamp_seconds` is the database
+  time of the last successful sample. It starts at zero and stays unchanged
+  on errors, as does the age gauge, which starts at NaN. Alert separately on
+  stale samples and scrape target availability.
+
+Each queue adds one read per round with a
+five-second maximum timeout (or the sampling interval if shorter). The
+query uses the existing fetch indexes and can scan past active leases to
+find an expired lease. If several replicas share an outbox, enabling the
+sampler on one replica avoids redundant reads.
+
+For a queue with many active leases, consider this optional index on the
+actual outbox table. Run the statement outside a transaction.
+
+```sql
+CREATE INDEX CONCURRENTLY outbox_lag_lease_idx
+ON outbox (queue, acquired_at) INCLUDE (next_attempt_at)
+WHERE acquired_token IS NOT NULL;
+```
+
+The index lets Postgres narrow the leased branch by the expiry cutoff. It
+adds maintenance work on claims and terminal writes. If many leases have
+already expired, the query can still scan and sort the qualifying rows.

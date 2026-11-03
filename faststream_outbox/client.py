@@ -197,6 +197,16 @@ def _seconds(name: str) -> "ColumnElement[typing.Any]":
     return func.make_interval(0, 0, 0, 0, 0, 0, bindparam(name, type_=Float))
 
 
+def _claimable_branches(
+    t: "Table", lease_cutoff: "ColumnElement[typing.Any]"
+) -> tuple[tuple["ColumnElement[bool]", ...], tuple["ColumnElement[bool]", ...]]:
+    """Return separate lease predicates for unleased rows and expired leases."""
+    return (
+        (t.c.acquired_token.is_(None),),
+        (t.c.acquired_token.is_not(None), t.c.acquired_at < lease_cutoff),
+    )
+
+
 def _build_fetch_stmt(outbox: "Table") -> "Update":
     """Build the claim statement once; queues, limit, lease TTL and the new token are bind parameters.
 
@@ -222,8 +232,9 @@ def _build_fetch_stmt(outbox: "Table") -> "Update":
         )
         return select(per_queue.c.id, per_queue.c.next_attempt_at).select_from(queues.join(per_queue, true())).cte(name)
 
-    pending = branch("pending", t.c.acquired_token.is_(None))
-    expired = branch("expired", t.c.acquired_token.is_not(None), t.c.acquired_at < lease_cutoff)
+    unleased, expired_lease = _claimable_branches(t, lease_cutoff)
+    pending = branch("pending", *unleased)
+    expired = branch("expired", *expired_lease)
     candidates = union_all(
         select(pending.c.id, pending.c.next_attempt_at), select(expired.c.id, expired.c.next_attempt_at)
     ).subquery("candidates")
