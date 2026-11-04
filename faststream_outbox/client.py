@@ -215,7 +215,7 @@ def _build_fetch_stmt(outbox: "Table") -> "Update":
     sorting the whole backlog. See ADR 0003 for why the query has this shape.
     """
     t = outbox
-    limit = bindparam("limit", type_=Integer)
+    limit = bindparam("limit", type_=Integer())
     lease_cutoff = func.now() - _seconds("lease_ttl")
     queue_array = ARRAY(String)
     queue_name = func.unnest(cast(bindparam("queues", type_=queue_array), queue_array)).label("name")
