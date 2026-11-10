@@ -63,7 +63,7 @@ class OutboxRouter(StreamRouter[OutboxInnerMessage]):
     """FastAPI router for the outbox transport."""
 
     broker_class = _OutboxBroker
-    broker: _OutboxBroker  # ty: ignore[invalid-mutable-override]
+    broker: _OutboxBroker  # ty: ignore[incompatible-mutable-override]
 
     def __init__(  # noqa: PLR0913
         self,
@@ -156,7 +156,7 @@ class OutboxRouter(StreamRouter[OutboxInnerMessage]):
             generate_unique_id_function=generate_unique_id_function,
         )
 
-    def subscriber(  # ty: ignore[invalid-method-override]  # noqa: PLR0913
+    def subscriber(  # ty: ignore[incompatible-method-override]  # noqa: PLR0913
         self,
         queues: str | list[str],
         *,
@@ -222,7 +222,7 @@ class OutboxRouter(StreamRouter[OutboxInnerMessage]):
             ),
         )
 
-    def publisher(  # ty: ignore[invalid-method-override]
+    def publisher(  # ty: ignore[incompatible-method-override]
         self,
         queue: str,
         *,

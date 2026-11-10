@@ -126,7 +126,7 @@ class OutboxBroker(
 
     # P25: the runtime container is a WeakSet (set by the upstream Registrator), not a
     # list — annotate it accurately so the _subscribers/subscribers distinction is clear.
-    _subscribers: "WeakSet[OutboxSubscriber]"  # ty: ignore[invalid-attribute-override]
+    _subscribers: "WeakSet[OutboxSubscriber]"  # ty: ignore[incompatible-attribute-override]
 
     def __init__(  # noqa: PLR0913
         self,
@@ -324,7 +324,7 @@ class OutboxBroker(
         for sub in self.subscribers:
             for call in sub.calls:
                 for pub in call.handler._publishers:  # noqa: SLF001
-                    outer = pub._outer_config  # noqa: SLF001  # ty: ignore[unresolved-attribute]
+                    outer = pub._outer_config  # noqa: SLF001  # ty: ignore[missing-attribute]
                     # An internal outbox publisher's ``outer`` is this broker's own config,
                     # which carries a (truthy) ``producer`` — so the wired-producer check
                     # below already skips it; no separate ``outer is self.config`` branch needed.
@@ -434,7 +434,7 @@ class OutboxBroker(
         await self.client.validate_schema(check_autovacuum=check_autovacuum)
 
     # Deliberate signature divergence: the outbox contract adds session/activate_*/timer_id.
-    async def publish(  # ty: ignore[invalid-method-override]
+    async def publish(  # ty: ignore[incompatible-method-override]
         self,
         body: typing.Any,
         *,
@@ -486,7 +486,7 @@ class OutboxBroker(
         return typing.cast("int | None", result)
 
     # Deliberate signature divergence: the outbox contract adds session/activate_*.
-    async def publish_batch(  # ty: ignore[invalid-method-override]
+    async def publish_batch(  # ty: ignore[incompatible-method-override]
         self,
         *bodies: typing.Any,
         queue: str,

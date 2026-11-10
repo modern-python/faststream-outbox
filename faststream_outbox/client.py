@@ -673,7 +673,7 @@ class OutboxClient(AbstractOutboxClient):
             t.c.acquired_token.is_(None),
         )
         result = await session.execute(stmt)
-        return (result.rowcount or 0) > 0  # ty: ignore[unresolved-attribute]
+        return (result.rowcount or 0) > 0  # ty: ignore[missing-attribute]
 
     async def fetch_unprocessed(
         self,

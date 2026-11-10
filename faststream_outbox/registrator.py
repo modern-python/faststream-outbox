@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 class OutboxRegistrator(Registrator[OutboxInnerMessage, "OutboxBrokerConfig"]):  # ty: ignore[unresolved-reference]
     @override
-    def subscriber(  # ty: ignore[invalid-method-override]
+    def subscriber(  # ty: ignore[incompatible-method-override]
         self,
         queues: str | list[str],
         *,
@@ -108,7 +108,7 @@ class OutboxRegistrator(Registrator[OutboxInnerMessage, "OutboxBrokerConfig"]): 
         )
 
     @override
-    def publisher(  # ty: ignore[invalid-method-override]
+    def publisher(  # ty: ignore[incompatible-method-override]
         self,
         queue: str,
         *,

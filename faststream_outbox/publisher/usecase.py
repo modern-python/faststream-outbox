@@ -42,7 +42,7 @@ _REJECT_RELAY_MSG = (
 class OutboxPublisher(PublisherUsecase):
     """Queue-scoped publisher. Standalone use only — no relay decorator support."""
 
-    _outer_config: "OutboxBrokerConfig"  # ty: ignore[invalid-mutable-override]
+    _outer_config: "OutboxBrokerConfig"  # ty: ignore[incompatible-mutable-override]
 
     def __init__(
         self,
@@ -65,7 +65,7 @@ class OutboxPublisher(PublisherUsecase):
     ) -> "HandlerCallWrapper[P_HandlerParams, T_HandlerReturn]":
         raise NotImplementedError(_REJECT_RELAY_MSG)
 
-    async def publish(  # ty: ignore[invalid-method-override]
+    async def publish(  # ty: ignore[incompatible-method-override]
         self,
         body: typing.Any,  # parity with broker.publish (both build OutboxPublishCommand(body: Any))
         *,

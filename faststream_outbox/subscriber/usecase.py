@@ -191,7 +191,7 @@ class OutboxSubscriberSpecification(SubscriberSpecification["OutboxBrokerConfig"
 
 
 class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
-    _outer_config: "OutboxBrokerConfig"  # ty: ignore[invalid-mutable-override]
+    _outer_config: "OutboxBrokerConfig"  # ty: ignore[incompatible-mutable-override]
 
     def __init__(
         self,
@@ -1108,7 +1108,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                 stack.enter_context(context.scope(k, v))
 
             middlewares: list[typing.Any] = []
-            for base_m in self._SubscriberUsecase__build__middlewares_stack():  # ty: ignore[unresolved-attribute]
+            for base_m in self._SubscriberUsecase__build__middlewares_stack():  # ty: ignore[missing-attribute]
                 middleware = base_m(msg, context=context)
                 middlewares.append(middleware)
                 await middleware.__aenter__()
@@ -1146,7 +1146,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
                     self._reject_outbox_response_with_foreign_publisher(result_msg, h.handler)
 
                     for p in chain(
-                        self._SubscriberUsecase__get_response_publisher(message),  # ty: ignore[unresolved-attribute]
+                        self._SubscriberUsecase__get_response_publisher(message),  # ty: ignore[missing-attribute]
                         h.handler._publishers,  # noqa: SLF001
                     ):
                         await p._publish(  # noqa: SLF001
