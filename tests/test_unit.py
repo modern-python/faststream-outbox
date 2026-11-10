@@ -1529,7 +1529,7 @@ async def test_broker_ping_checks_router_registered_subscribers() -> None:
     assert all(s not in broker._subscribers for s in subs)  # noqa: SLF001
     done_task = MagicMock()
     done_task.done.return_value = True
-    subs[0].tasks = [done_task]  # ty: ignore[unresolved-attribute]
+    subs[0].tasks = [done_task]  # ty: ignore[missing-attribute]
     assert await broker.ping() is False
 
 

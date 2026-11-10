@@ -243,7 +243,7 @@ async def probe(engine: AsyncEngine, table_name: str, schema: str | None = None)
 
     yield sink
 
-    checked_out = engine.pool.checkedout()  # ty: ignore[unresolved-attribute]
+    checked_out = engine.pool.checkedout()  # ty: ignore[missing-attribute]
     if checked_out:
         msg = (
             f"{checked_out} connection(s) are still checked out of the pool. "

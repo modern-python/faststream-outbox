@@ -66,7 +66,7 @@ def _validate_queues(queues: list[str]) -> None:
 
 @dataclass(kw_only=True)
 class OutboxSubscriberConfig(SubscriberUsecaseConfig):
-    _outer_config: "OutboxBrokerConfig"  # ty: ignore[invalid-mutable-override]
+    _outer_config: "OutboxBrokerConfig"  # ty: ignore[incompatible-mutable-override]
     queues: list[str]
     max_workers: int
     retry_strategy: "RetryStrategyProto | None"
