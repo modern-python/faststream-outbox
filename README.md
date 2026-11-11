@@ -125,6 +125,8 @@ The architecture of this package is heavily informed by Arseniy Popov's [PR #270
 - [PyPI](https://pypi.org/project/faststream-outbox)
 - [License](https://github.com/modern-python/faststream-outbox/blob/main/LICENSE)
 
+If this project saves you time, consider giving it a star on GitHub.
+
 ## Part of `modern-python`
 
 Browse the full list of templates and libraries in
