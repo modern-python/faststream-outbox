@@ -1078,7 +1078,7 @@ class OutboxSubscriber(TasksMixin, SubscriberUsecase[OutboxInnerMessage]):
         # SubscriberUsecase.process_message calls on a response publisher) but skips
         # the ``publish``/``request`` boilerplate from the native FakePublisher base.
         # Safe to ignore — those methods are unreachable for response publishers.
-        return (OutboxFakePublisher(producer=self._outer_config.producer),)  # ty: ignore[invalid-return-type]
+        return (OutboxFakePublisher(producer=self._outer_config.producer),)  # ty: ignore[invalid-explicit-return]
 
     @override
     async def process_message(self, msg: OutboxInnerMessage) -> "Response":  # noqa: C901
